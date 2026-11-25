@@ -5,6 +5,7 @@ import { CloseButton } from "@storyteller/ui-close-button";
 import { LoadingSpinner } from "@storyteller/ui-loading-spinner";
 import type { Prompts } from "@storyteller/api";
 import React, {
+  Suspense,
   useState,
   useEffect,
   useCallback,
@@ -93,6 +94,14 @@ import {
   isActionReminderOpen,
 } from "@storyteller/ui-action-reminder-modal";
 import { Checkbox } from "@storyteller/ui-checkbox";
+import {
+  PodSourceSwitch,
+  usePodGalleryAccess,
+  type GallerySource,
+} from "@storyteller/pod-gallery";
+
+// The "My pod" source: a separate chunk, fetched only when a connected pod's gallery shows it.
+const PodGalleryPanel = React.lazy(() => import("./pod/PodGalleryPanel"));
 
 // ─── Module-level gallery cache ───────────────────────────────────────────────
 // Persists gallery items across modal open/close so users see content instantly.
@@ -129,7 +138,7 @@ async function fetchCurrentUsername(): Promise<string | null> {
 // ─── Skeleton loader component ────────────────────────────────────────────────
 const SKELETON_COUNT = 15;
 
-const SkeletonGrid = ({ columns }: { columns: number }) => {
+export const SkeletonGrid = ({ columns }: { columns: number }) => {
   const gapClass = columns <= 4 ? "gap-2" : columns <= 7 ? "gap-2" : "gap-0.5";
   return (
     <div className="space-y-6 p-4 animate-in fade-in duration-200">
@@ -617,6 +626,20 @@ export const GalleryModal = React.memo(
     const [usernameError, setUsernameError] = useState(false);
     const [usernameRetryCount, setUsernameRetryCount] = useState(0);
     const [activeFilter, setActiveFilter] = useState(forceFilter || "all");
+    // "My pod" is a second source for the view-mode gallery, offered only while a
+    // pod is connected. Its code is a lazy chunk, loaded when it is first shown, and
+    // it is unmounted (releasing every picture it holds) when the gallery closes.
+    const podAccess = usePodGalleryAccess();
+    const [source, setSource] = useState<GallerySource>("hosted");
+    useEffect(() => {
+      // A disconnected pod takes the choice with it: reconnecting starts on the ArtCraft library.
+      if (!podAccess) setSource("hosted");
+    }, [podAccess]);
+    const showPod =
+      mode === "view" &&
+      podAccess !== null &&
+      source === "pod" &&
+      galleryModalVisibleViewMode.value;
     const minColumns = 3;
     const maxColumns = 12;
     // Default gridColumns to 5 on desktop; narrow screens are locked to 2 columns
@@ -2596,10 +2619,31 @@ export const GalleryModal = React.memo(
               <div className="absolute left-0 top-0 z-[50] h-[60px] w-full cursor-move" />
             </Modal.DragHandle>
           )}
+          {showPod && podAccess ? (
+            <Suspense fallback={<SkeletonGrid columns={gridColumns} />}>
+              <PodGalleryPanel
+                access={podAccess}
+                sourceSwitch={<PodSourceSwitch source={source} onChange={setSource} />}
+                onClose={() => {
+                  clearBulkSelection();
+                  galleryModalVisibleViewMode.value = false;
+                }}
+                sliderValue={sliderValue}
+                onSliderChange={setSliderValue}
+                minColumns={minColumns}
+                maxColumns={maxColumns}
+                gridColumns={gridColumns}
+                imageFit={imageFit}
+              />
+            </Suspense>
+          ) : (
           <div className="relative flex h-full flex-col">
             <div className="border-b border-ui-panel-border p-4 py-3 bg-ui-panel">
               <div className="flex flex-wrap justify-between items-center gap-y-2">
                 <div className="flex items-center gap-3 flex-wrap gap-y-1">
+                  {mode === "view" && (
+                    <PodSourceSwitch source={source} onChange={setSource} />
+                  )}
                   {(mode === "view" || mode === "select") && (
                     <div className="flex items-center gap-0.5 rounded-[3px] bg-ui-controls/40 p-0.5 relative z-[51]">
                       {(["unsorted", "folders"] as const).map((t) => (
@@ -3671,6 +3715,7 @@ export const GalleryModal = React.memo(
               </div>
             )}
           </div>
+          )}
         </Modal>
 
         {mode === "view" && (
