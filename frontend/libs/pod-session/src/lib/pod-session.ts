@@ -17,6 +17,7 @@ import { checkConfig, type ConfigCheck, type PodSessionConfig } from './config.j
 import { parseSignInInput } from './issuer.js';
 import { localStoragePending, originOfHint, type PendingStore, type SignInHint } from './pending.js';
 import { runSelfTest, type SelfTestResult } from './self-test.js';
+import { type SignInGate, SignInNotInProgressError } from './sign-in-gate.js';
 import type { PodSessionErrorKind, PodSessionState } from './state.js';
 import { createOriginGate, gateFetch, isInvalidInjectedResponse, type OriginAdmission, refusalOf } from './storage-origins.js';
 import type { WipeOutcome } from './wipe.js';
@@ -31,6 +32,12 @@ export type AuthOptions = {
    * for their click.
    */
   confirmOpen?: (url: string) => Promise<void>;
+  /**
+   * Asked before pod-auth may open the system browser. It returns only while the sign-in the
+   * person started with `beginSignIn` is in progress, and only once for that attempt; otherwise
+   * it throws `SignInNotInProgressError` and the session ends (see `getFetch`).
+   */
+  authorizeSignIn?: SignInGate;
 };
 
 /** The part of `@jeswr/pod-auth`'s `PodAuth` this machine uses. */
@@ -172,6 +179,13 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   const listeners = new Set<(state: PodSessionState) => void>();
   let auth: PodAuthPort | null = null;
   let abort: AbortController | null = null;
+  /**
+   * The one sign-in the person started and is still waiting for. It is the only thing that may
+   * open the system browser, and it may do so once. An attempt that finished, failed or was
+   * aborted is gone from here, so what it built can no longer authorise anything.
+   */
+  type Attempt = { controller: AbortController; browserOpened: boolean };
+  let attempt: Attempt | null = null;
   let started: Promise<PodSessionState> | null = null;
   let leaving: Promise<void> | null = null;
   const originGate = podMode.admission ? createOriginGate(podMode.admission, deps.config.allowLoopbackHttp) : null;
@@ -210,7 +224,25 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       set({ kind: 'confirm-provider', provider: shown, ...(typed.kind === 'webid' ? { webId: typed.webId } : {}) });
     });
   };
-  const buildAuth = (): PodAuthPort => deps.createAuth({ ...(authFetch ? { fetch: authFetch } : {}), confirmOpen });
+  /**
+   * A pod-auth that may open the browser only for `owner`, the attempt it is built for. One built
+   * with `null` (a restore, a revoke) never may, and neither may the one a finished attempt left
+   * behind to serve reads: a read whose token cannot be renewed ends the session instead.
+   */
+  const buildAuth = (owner: Attempt | null): PodAuthPort =>
+    deps.createAuth({
+      ...(authFetch ? { fetch: authFetch } : {}),
+      confirmOpen,
+      authorizeSignIn: () => {
+        if (owner !== null && attempt === owner && !owner.controller.signal.aborted && !owner.browserOpened) {
+          owner.browserOpened = true;
+          return;
+        }
+        // Nothing the person is waiting for asked for this: a background read, or a second ask.
+        if (state.kind === 'connected') sessionEnded();
+        throw new SignInNotInProgressError();
+      },
+    });
 
   const set = (next: PodSessionState): void => {
     state = next;
@@ -233,6 +265,16 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     }
   };
 
+  /**
+   * The connected session can no longer renew its token without the person: nothing may use its
+   * fetch, so the mirror pauses and the gallery asks to sign in again. The stored sign-in is kept
+   * so "Try again" can restore it; leaving pod mode removes it.
+   */
+  function sessionEnded(): void {
+    releaseAuth();
+    fail('restore-failed');
+  }
+
   /** Why pod-auth may not be built in this window, or null when it may. */
   function gate(): PodSessionErrorKind | null {
     const config = checkConfig(deps.config);
@@ -250,7 +292,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
         // An ordinary window, or a build with no client yet, has never held a session.
         if (!podMode.isPodMode() || checkConfig(deps.config) === 'not-configured') return true;
         if (gate() !== null) return false;
-        auth = buildAuth();
+        auth = buildAuth(null);
       }
       await auth.logout();
       return true;
@@ -285,6 +327,8 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     if (blocked !== null) return fail(blocked);
     const controller = new AbortController();
     abort = controller;
+    const mine: Attempt = { controller, browserOpened: false };
+    attempt = mine;
     signingFor = { hint, issuer: origin };
     set({ kind: 'signing-in', issuer: origin });
     try {
@@ -292,7 +336,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       // this window's own sign-in. A delete that is only queued is not empty.
       if ((await deps.wipeStores()) !== 'wiped') return fail('wipe-failed');
       if (controller.signal.aborted) return settleCancelled();
-      const created = buildAuth();
+      const created = buildAuth(mine);
       auth = created;
       const identity = await created.login(loginHint(hint), { signal: controller.signal });
       if (controller.signal.aborted) {
@@ -313,6 +357,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       settleFailure(error, 'sign-in', hint);
     } finally {
       if (abort === controller) abort = null;
+      if (attempt === mine) attempt = null;
       confirming = null;
       signingFor = null;
     }
@@ -360,7 +405,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     const blocked = gate();
     if (blocked !== null) return fail(blocked);
     try {
-      const created = buildAuth();
+      const created = buildAuth(null);
       auth = created;
       const identity = await created.restore();
       if (identity?.webId) set({ kind: 'connected', webId: identity.webId });

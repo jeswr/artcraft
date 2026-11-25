@@ -3,8 +3,9 @@ import "fake-indexeddb/auto";
 import { createMockOp } from "@jeswr/pod-auth/testing";
 import { createDefaultAuth, createPodSession, type PodSessionConfig } from "@storyteller/pod-session";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { sessionPortFor } from "./mirror-ports";
 // Test doubles of pod-session (read only; nothing in that library is changed by this spec).
-import { fakePodMode, memoryMarker } from "../../../../../libs/pod-session/src/lib/testing";
+import { fakePodMode, memoryMarker, memoryPending } from "../../../../../libs/pod-session/src/lib/testing";
 
 /**
  * M4 of the delta review: can a background read through the gallery's fetch (`session.getFetch()`,
@@ -12,7 +13,8 @@ import { fakePodMode, memoryMarker } from "../../../../../libs/pod-session/src/l
  *
  * The wiring is ArtCraft's real one: `createPodSession` + `createDefaultAuth` (pod-auth with
  * desktop-auth's `getCode`), against pod-auth's in-memory identity provider; `host.openUrl` is the
- * Tauri opener. Findings are in the report; the second test pins the bug as a known failure.
+ * Tauri opener. The second test is the regression test for M4: a read that nobody asked the person
+ * about used to open the browser; pod-session now refuses it and ends the session.
  */
 const config: PodSessionConfig = {
   clientId: "https://artcraft.example/solid-client-id.jsonld",
@@ -50,14 +52,19 @@ async function connected() {
   };
   const session = createPodSession({
     config,
-    createAuth: () => createDefaultAuth(config, host),
+    createAuth: (options) => createDefaultAuth(config, host, options),
     wipeStores: async () => "wiped",
-    podMode: fakePodMode({ podWindow: true, issuer: op.issuer, fresh: op.issuer }),
+    podMode: fakePodMode({ podWindow: true, issuer: new URL(op.issuer).origin, fresh: new URL(op.issuer).origin }),
     marker: memoryMarker(),
+    pending: memoryPending({ hint: { kind: "issuer", issuer: op.issuer } }),
     selfTest: async () => ({ ok: true }),
   });
   await session.start();
-  await session.beginSignIn();
+  // The person's own sign-in: the click, the provider confirmation, the click that opens the browser.
+  const signedIn = session.beginSignIn();
+  await vi.waitFor(() => expect(session.getState().kind).toBe("confirm-provider"));
+  session.openBrowser();
+  await signedIn;
   expect(session.getState().kind).toBe("connected");
   expect(opened).toHaveLength(1); // the person's own sign-in
   return { op, session, opened, podFetch: session.getFetch()! };
@@ -79,15 +86,17 @@ describe("a background read through the session's fetch", () => {
     expect(opened).toHaveLength(1);
   });
 
-  // The desired behaviour: a read that nobody asked the person about must never open the browser.
-  // It does today, so this is marked as a known failure: it starts failing (and must be turned
-  // into a plain `it`) when the sign-in gate exists. Observed: opened.length === 2, and a second
-  // `GET /authorize` + `POST /token` against the provider, with the session still "connected".
-  it.fails("after a failed refresh, does not open the system browser to sign in again (M4)", async () => {
-    const { op, opened, podFetch } = await connected();
+  // A read that nobody asked the person about must never open the browser. Before the gate it did:
+  // opened.length === 2, a second `GET /authorize` + `POST /token`, and the session stayed "connected".
+  it("after a failed refresh, does not open the system browser to sign in again (M4)", async () => {
+    const { op, session, opened, podFetch } = await connected();
     op.failRefresh("invalid_grant");
     aDayLater();
     await podFetch(`${op.root}private`).catch(() => undefined);
     expect(opened).toHaveLength(1);
+    // The session is no longer connected, so the mirror pauses and the gallery says "sign in again".
+    expect(session.getState()).toEqual({ kind: "error", error: "restore-failed" });
+    expect(session.getFetch()).toBeNull();
+    expect(sessionPortFor(session, op.webId).isConnected()).toBe(false);
   });
 });

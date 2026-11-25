@@ -1,6 +1,7 @@
 import { createDesktopCodeDriver, type DesktopHost } from '@jeswr/desktop-auth';
 import { createPodAuth } from '@jeswr/pod-auth';
 import type { PodSessionConfig } from './config.js';
+import { refuseSignIn } from './sign-in-gate.js';
 import type { AuthOptions, PodAuthPort } from './pod-session.js';
 
 /**
@@ -10,7 +11,9 @@ import type { AuthOptions, PodAuthPort } from './pod-session.js';
  * supplied by the caller, so the WebID prompt is refused. `options.fetch` is pod-auth's own
  * transport for its unauthenticated reads (discovery, the client document, the profile): the
  * session passes the origin gate there, so the window's policy and the app's dialog decide
- * which origins those reads may reach.
+ * which origins those reads may reach. `options.authorizeSignIn` is asked before the code driver
+ * does anything: it throws unless the person's own sign-in is in progress, so a background read
+ * whose token refresh failed can never open the browser. Without it nothing authorises the browser.
  */
 export function createDefaultAuth(
   config: PodSessionConfig,
@@ -28,6 +31,12 @@ export function createDefaultAuth(
         },
       }
     : host;
+  const driver = createDesktopCodeDriver({ host: confirmed, redirectUri: config.redirectUri });
+  const authorize = options.authorizeSignIn ?? refuseSignIn;
+  const getCode: typeof driver = async (...args) => {
+    authorize();
+    return driver(...args);
+  };
   return createPodAuth({
     ...(options.fetch ? { fetch: options.fetch } : {}),
     clientId: config.clientId,
@@ -35,7 +44,7 @@ export function createDefaultAuth(
     nativeRedirect: true,
     ui: {
       getWebId: () => Promise.reject(new Error('Signing in with a WebID is not offered')),
-      getCode: createDesktopCodeDriver({ host: confirmed, redirectUri: config.redirectUri }),
+      getCode,
     },
   });
 }
