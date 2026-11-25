@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { applyPodModePolicy } from './apply-policy.js';
 import { enterPodMode } from './pod-mode.js';
-import { POD_MODE_FLAG_KEY, POD_MODE_ORIGINS_KEY, resetPodWindowForTests } from './window-state.js';
+import { podPolicyApplied, POD_MODE_FLAG_KEY, POD_MODE_ORIGINS_KEY, resetPodWindowForTests } from './window-state.js';
 import { memoryStorage } from './testing.js';
 
 afterEach(() => resetPodWindowForTests());
@@ -9,9 +9,9 @@ afterEach(() => resetPodWindowForTests());
 const newDoc = () => document.implementation.createHTMLDocument('x');
 
 describe('applyPodModePolicy', () => {
-  it('inserts the meta as first child of head in a pod window, with hosted and pod origins', () => {
+  it('inserts the meta as first child of head in a pod window, with hosted and pod origins', async () => {
     const storage = memoryStorage();
-    enterPodMode({ issuer: 'https://id.example' }, { storage, reload: () => {} });
+    await enterPodMode({ issuer: 'https://id.example' }, { storage, reload: () => {} });
     const doc = newDoc();
     doc.head.appendChild(doc.createElement('title'));
     expect(applyPodModePolicy(doc, { storage })).toBe(true);
@@ -45,5 +45,24 @@ describe('applyPodModePolicy', () => {
     doc.head.remove();
     expect(() => applyPodModePolicy(doc, { storage })).toThrow();
     expect(doc.documentElement.querySelector('meta')).toBeNull();
+  });
+
+  it('builds the policy from the shell\'s origins and records that a policy is in force', () => {
+    const readHost = () => ({ enabled: true, issuer: 'https://id.example', storageOrigins: ['https://pod.example', 'https://pod2.example'], headerPolicy: false });
+    const doc = newDoc();
+    expect(podPolicyApplied({ readHost })).toBe(false);
+    expect(applyPodModePolicy(doc, { readHost })).toBe(true);
+    const connect = doc.head.querySelector('meta')?.content.split('; ').find((d) => d.startsWith('connect-src '));
+    expect(connect).toContain('https://pod.example');
+    expect(connect).toContain('https://pod2.example');
+    expect(podPolicyApplied({ readHost })).toBe(true);
+  });
+
+  it('records no policy when the insertion throws', () => {
+    const readHost = () => ({ enabled: true, storageOrigins: [], headerPolicy: false });
+    const doc = newDoc();
+    doc.head.remove();
+    expect(() => applyPodModePolicy(doc, { readHost })).toThrow();
+    expect(podPolicyApplied({ readHost })).toBe(false);
   });
 });

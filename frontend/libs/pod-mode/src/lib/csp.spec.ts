@@ -48,6 +48,18 @@ describe('buildPodModeCsp', () => {
     }
   });
 
+  it('admits several storage origins, in order, to connect-src only', () => {
+    const d = directives(
+      buildPodModeCsp({ issuer: 'https://id.example', storage: ['https://pod1.example', 'https://pod2.example:8443', 'https://pod1.example'] }, []),
+    );
+    expect(d['connect-src']).toEqual(["'self'", 'https://id.example', 'https://pod1.example', 'https://pod2.example:8443']);
+    expect(d['img-src'].join(' ')).not.toContain('pod');
+  });
+
+  it('refuses one bad origin in a list', () => {
+    expect(() => buildPodModeCsp({ storage: ['https://pod1.example', 'https://pod2.example/path'] }, [])).toThrow();
+  });
+
   it('deduplicates a storage origin equal to the issuer', () => {
     const csp = buildPodModeCsp({ issuer: 'https://id.example', storage: 'https://id.example' }, []);
     expect(csp.match(/https:\/\/id\.example/g)).toHaveLength(1);

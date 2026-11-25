@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   analyticsAllowed,
+  HOST_POD_MODE_KEY,
   isPodMode,
   latchPodWindow,
+  markMetaPolicyApplied,
+  podPolicyApplied,
+  readHostPodMode,
   markAnalyticsLoaded,
   POD_MODE_FLAG_KEY,
   readPodModeFlag,
@@ -75,5 +79,41 @@ describe('sessionRestoreAllowed', () => {
   it('is false in a window that is not pod mode', () => {
     latchPodWindow({ storage: memoryStorage() });
     expect(sessionRestoreAllowed()).toBe(false);
+  });
+});
+
+describe('the shell is the authority', () => {
+  const host = (over: Record<string, unknown> = {}) => ({ enabled: true, storageOrigins: [], headerPolicy: false, ...over });
+
+  it('a planted localStorage flag does not make a window a pod window', () => {
+    const storage = memoryStorage();
+    storage.setItem(POD_MODE_FLAG_KEY, '1');
+    expect(isPodMode({ storage, readHost: () => host({ enabled: false }) })).toBe(false);
+  });
+
+  it('a pod window needs no flag in localStorage, and a cleared flag changes nothing', () => {
+    const storage = memoryStorage();
+    expect(isPodMode({ storage, readHost: () => host() })).toBe(true);
+    expect(storage.log).toEqual([]);
+  });
+
+  it('reads the global the initialization script defines and fails closed when it is malformed', () => {
+    expect(readHostPodMode()).toBeNull();
+    vi.stubGlobal(HOST_POD_MODE_KEY, { enabled: false, storageOrigins: [], headerPolicy: false });
+    expect(readHostPodMode()).toEqual({ enabled: false, storageOrigins: [], headerPolicy: false });
+    for (const bad of ['yes', null, { enabled: 'yes' }, { enabled: true, storageOrigins: [1], headerPolicy: true }, { enabled: true, storageOrigins: [], headerPolicy: true, issuer: 5 }]) {
+      vi.stubGlobal(HOST_POD_MODE_KEY, bad);
+      expect(readHostPodMode()).toEqual({ enabled: true, storageOrigins: [], headerPolicy: false });
+    }
+  });
+
+  it('reports a policy only in a pod window, from the header or the meta element', () => {
+    expect(podPolicyApplied({ readHost: () => host({ enabled: false, headerPolicy: true }) })).toBe(false);
+    resetPodWindowForTests();
+    expect(podPolicyApplied({ readHost: () => host() })).toBe(false);
+    markMetaPolicyApplied();
+    expect(podPolicyApplied()).toBe(true);
+    resetPodWindowForTests();
+    expect(podPolicyApplied({ readHost: () => host({ headerPolicy: true }) })).toBe(true);
   });
 });

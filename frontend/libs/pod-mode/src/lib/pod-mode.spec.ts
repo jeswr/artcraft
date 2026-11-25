@@ -1,22 +1,30 @@
-import { describe, expect, it, vi } from 'vitest';
-import { enterPodMode, leavePodMode, readPodOrigins } from './pod-mode.js';
-import { POD_MODE_FLAG_KEY, POD_MODE_ORIGINS_KEY, readPodModeFlag, type StorageLike } from './window-state.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { addStorageOrigin, enterPodMode, leavePodMode, readPodModeOrigins, readPodOrigins, reloadPodWindow } from './pod-mode.js';
+import {
+  type HostPodMode,
+  type PodModeRequests,
+  POD_MODE_FLAG_KEY,
+  POD_MODE_ORIGINS_KEY,
+  readPodModeFlag,
+  resetPodWindowForTests,
+  type StorageLike,
+} from './window-state.js';
 import { memoryStorage, throwingStorage } from './testing.js';
 
 describe('enterPodMode', () => {
-  it('persists origins then flag, then reloads', () => {
+  it('persists origins then flag, then reloads (dev fallback without a shell)', async () => {
     const storage = memoryStorage();
     const reload = vi.fn(() => {
       // by the time of the reload both keys are already written
       expect(readPodModeFlag({ storage })).toBe(true);
       expect(readPodOrigins({ storage })).toEqual({ issuer: 'https://id.example', storage: 'https://pod.example:8443' });
     });
-    enterPodMode({ issuer: 'https://id.example', storage: 'https://pod.example:8443' }, { storage, reload });
+    expect(await enterPodMode({ issuer: 'https://id.example', storage: 'https://pod.example:8443' }, { storage, reload })).toBe('requested');
     expect(reload).toHaveBeenCalledTimes(1);
     expect(storage.log).toEqual([`set ${POD_MODE_ORIGINS_KEY}`, `set ${POD_MODE_FLAG_KEY}`]);
   });
 
-  it('does not reload and rolls back both keys when writing the flag fails', () => {
+  it('does not reload and rolls back both keys when writing the flag fails', async () => {
     const storage = memoryStorage();
     const failing: StorageLike = {
       ...storage,
@@ -26,24 +34,24 @@ describe('enterPodMode', () => {
       },
     };
     const reload = vi.fn();
-    expect(() => enterPodMode({ issuer: 'https://id.example' }, { storage: failing, reload })).toThrow('quota');
+    await expect(enterPodMode({ issuer: 'https://id.example' }, { storage: failing, reload })).rejects.toThrow('quota');
     expect(reload).not.toHaveBeenCalled();
     expect(storage.data.size).toBe(0);
   });
 
-  it('rethrows the original error even when the rollback also fails', () => {
+  it('rethrows the original error even when the rollback also fails', async () => {
     const reload = vi.fn();
-    expect(() => enterPodMode({ issuer: 'https://id.example' }, { storage: throwingStorage, reload })).toThrow(
+    await expect(enterPodMode({ issuer: 'https://id.example' }, { storage: throwingStorage, reload })).rejects.toThrow(
       'denied',
     );
     expect(reload).not.toHaveBeenCalled();
   });
 
-  it('touches nothing and does not reload when origins are invalid', () => {
+  it('touches nothing and does not reload when origins are invalid', async () => {
     const storage = memoryStorage();
     const reload = vi.fn();
-    expect(() => enterPodMode({ issuer: 'https://x.example/path' }, { storage, reload })).toThrow();
-    expect(() => enterPodMode({ issuer: 'https://ok.example', storage: 'ftp://x' }, { storage, reload })).toThrow();
+    await expect(enterPodMode({ issuer: 'https://x.example/path' }, { storage, reload })).rejects.toThrow();
+    await expect(enterPodMode({ issuer: 'https://ok.example', storage: 'ftp://x' }, { storage, reload })).rejects.toThrow();
     expect(storage.log).toEqual([]);
     expect(reload).not.toHaveBeenCalled();
   });
@@ -104,5 +112,87 @@ describe('leavePodMode', () => {
       }, { storage, reload }),
     ).rejects.toThrow('sync');
     expect(reload).not.toHaveBeenCalled();
+  });
+});
+
+afterEach(() => resetPodWindowForTests());
+
+function requests(over: Partial<PodModeRequests> = {}): PodModeRequests & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    requestEnter: async (o) => (calls.push(`enter ${o.issuer}`), 'requested'),
+    requestAddStorageOrigin: async (o) => (calls.push(`add ${o}`), 'requested'),
+    requestLeave: async () => void calls.push('leave'),
+    requestReload: async () => void calls.push('reload'),
+    ...over,
+  };
+}
+
+describe('with the desktop shell', () => {
+  it('asks the shell instead of writing storage, and reports a declined confirmation', async () => {
+    const storage = memoryStorage();
+    const reload = vi.fn();
+    const r = requests({ requestEnter: async () => 'declined' });
+    expect(await enterPodMode({ issuer: 'https://id.example' }, { storage, reload, requests: r })).toBe('declined');
+    expect(storage.log).toEqual([]);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('validates the issuer before it asks', async () => {
+    const r = requests();
+    await expect(enterPodMode({ issuer: 'https://id.example/x' }, { requests: r })).rejects.toThrow();
+    expect(r.calls).toEqual([]);
+  });
+
+  it('adds a storage origin only through the shell, and only a valid one', async () => {
+    const r = requests();
+    await addStorageOrigin('https://pod.example', { requests: r });
+    expect(r.calls).toEqual(['add https://pod.example']);
+    await expect(addStorageOrigin('https://pod.example/x', { requests: r })).rejects.toThrow();
+    await expect(addStorageOrigin('https://pod.example', {})).rejects.toThrow();
+  });
+
+  it('wipes first, then asks the shell to leave and never touches storage', async () => {
+    const storage = memoryStorage();
+    const r = requests();
+    await leavePodMode(async () => void r.calls.push('wipe'), { storage, requests: r });
+    expect(r.calls).toEqual(['wipe', 'leave']);
+    expect(storage.log).toEqual([]);
+  });
+
+  it('does not ask the shell to leave when the wipe fails', async () => {
+    const r = requests();
+    await expect(leavePodMode(async () => Promise.reject(new Error('stuck')), { requests: r })).rejects.toThrow('stuck');
+    expect(r.calls).toEqual([]);
+  });
+
+  it('can rebuild the window without changing the mode', async () => {
+    const r = requests();
+    await reloadPodWindow({ requests: r });
+    expect(r.calls).toEqual(['reload']);
+  });
+
+  it('takes origins from the shell and ignores planted localStorage hints', () => {
+    resetPodWindowForTests();
+    const storage = memoryStorage();
+    storage.setItem(POD_MODE_ORIGINS_KEY, '{"issuer":"https://planted.example"}');
+    const host: HostPodMode = { enabled: true, issuer: 'https://id.example', storageOrigins: ['https://pod.example'], headerPolicy: true };
+    expect(readPodModeOrigins({ storage, readHost: () => host })).toEqual({
+      issuer: 'https://id.example',
+      storageOrigins: ['https://pod.example'],
+    });
+  });
+
+  it('refuses hostile origins in the shell value and reports nothing when not in pod mode', () => {
+    const read = (host: HostPodMode) => {
+      resetPodWindowForTests();
+      return readPodModeOrigins({ readHost: () => host });
+    };
+    const bad: HostPodMode = { enabled: true, issuer: 'https://a.example; script-src *', storageOrigins: [], headerPolicy: false };
+    expect(read(bad)).toBeNull();
+    expect(read({ ...bad, issuer: 'https://ok.example', storageOrigins: ['x'] })).toBeNull();
+    expect(read({ enabled: false, storageOrigins: [], headerPolicy: false })).toBeNull();
+    expect(read({ enabled: true, storageOrigins: [], headerPolicy: false })).toEqual({ storageOrigins: [] });
   });
 });

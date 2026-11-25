@@ -4,12 +4,53 @@ export const POD_MODE_FLAG_KEY = 'artcraft.podMode';
 export const POD_MODE_ORIGINS_KEY = 'artcraft.podMode.origins';
 export const FLAG_ON = '1';
 
-export type PodModeDeps = {
-  storage?: StorageLike;
-  reload?: () => void;
+/**
+ * What the Tauri shell says about this window, set by an initialization script that runs before
+ * any page script and cannot be reassigned. The shell owns pod mode: it persists the record,
+ * confirms origins in a native dialog, and (in a bundled build) adds the narrowing policy as
+ * a response header. When it is present, the localStorage flag below is not consulted.
+ */
+export type HostPodMode = {
+  enabled: boolean;
+  issuer?: string;
+  storageOrigins: readonly string[];
+  /** The shell added the narrowing policy to this document's response headers. */
+  headerPolicy: boolean;
 };
 
-type WindowState = { podMode: boolean; analyticsLoaded: boolean };
+export const HOST_POD_MODE_KEY = '__ARTCRAFT_POD_MODE__';
+
+export type PodModeDeps = {
+  /** Dev-server fallback only: the flag and origins used when there is no shell. */
+  storage?: StorageLike;
+  reload?: () => void;
+  /** Reads the shell's answer; defaults to the initialization script's global. */
+  readHost?: () => HostPodMode | null;
+  /** Calls into the shell. Absent in a plain browser, where the localStorage fallback is used. */
+  requests?: PodModeRequests;
+};
+
+export type EnterResult = 'requested' | 'declined';
+
+/** The shell's commands. None of them carries a credential. */
+export type PodModeRequests = {
+  /** Asks to enter pod mode for `issuer`. The shell shows a native confirmation. */
+  requestEnter(origins: { issuer: string }): Promise<EnterResult>;
+  /** Asks to admit one more storage origin. The shell shows a native confirmation. */
+  requestAddStorageOrigin(origin: string): Promise<EnterResult>;
+  /** Leaves pod mode. The caller has already wiped the credentials. */
+  requestLeave(): Promise<void>;
+  /** Rebuilds the window, staying in the current mode. */
+  requestReload(): Promise<void>;
+};
+
+type WindowState = {
+  podMode: boolean;
+  analyticsLoaded: boolean;
+  headerPolicy: boolean;
+  metaPolicy: boolean;
+  host: HostPodMode | null;
+};
 
 // Shared through a global symbol because the bootstrap script and the app bundle are
 // separate module instances in the same window.
@@ -39,9 +80,54 @@ export function readPodModeFlag(deps: PodModeDeps = {}): boolean {
   }
 }
 
+/**
+ * The shell's answer, or null when there is none (plain browser). A present but malformed value
+ * fails closed: pod mode, no origins, no header policy.
+ */
+export function readHostPodMode(): HostPodMode | null {
+  const raw = (globalThis as Record<string, unknown>)[HOST_POD_MODE_KEY];
+  if (raw === undefined) return null;
+  const closed: HostPodMode = { enabled: true, storageOrigins: [], headerPolicy: false };
+  if (typeof raw !== 'object' || raw === null) return closed;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.enabled !== 'boolean' || typeof r.headerPolicy !== 'boolean' || !Array.isArray(r.storageOrigins)) return closed;
+  if (!r.storageOrigins.every((o) => typeof o === 'string')) return closed;
+  if (r.issuer !== undefined && typeof r.issuer !== 'string') return closed;
+  return {
+    enabled: r.enabled,
+    ...(r.issuer === undefined ? {} : { issuer: r.issuer as string }),
+    storageOrigins: [...(r.storageOrigins as string[])],
+    headerPolicy: r.headerPolicy,
+  };
+}
+
+function hostOf(deps: PodModeDeps): HostPodMode | null {
+  return (deps.readHost ?? readHostPodMode)();
+}
+
 function state(deps: PodModeDeps = {}): WindowState {
   const h = holder();
-  return (h[KEY] ??= { podMode: readPodModeFlag(deps), analyticsLoaded: false });
+  if (h[KEY]) return h[KEY];
+  const host = hostOf(deps);
+  // With a shell, its answer is the authority and localStorage is not read at all.
+  const podMode = host === null ? readPodModeFlag(deps) : host.enabled;
+  return (h[KEY] = { podMode, analyticsLoaded: false, headerPolicy: host?.headerPolicy === true && host.enabled, metaPolicy: false, host });
+}
+
+/** The shell's record as latched at load, or null when there is no shell. */
+export function latchedHostPodMode(deps: PodModeDeps = {}): HostPodMode | null {
+  return state(deps).host;
+}
+
+/** A narrowing policy is in force: the shell's response header or an inserted meta element. */
+export function podPolicyApplied(deps: PodModeDeps = {}): boolean {
+  const s = state(deps);
+  return s.podMode && (s.headerPolicy || s.metaPolicy);
+}
+
+/** Called after the narrowing meta policy was inserted into <head>. */
+export function markMetaPolicyApplied(): void {
+  state().metaPolicy = true;
 }
 
 /** Decide pod mode once for this window (first call wins) and return the latched value. */

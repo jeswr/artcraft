@@ -1,4 +1,4 @@
-import { type PodOrigins, parseOrigin } from './origins.js';
+import { parseOrigin } from './origins.js';
 
 /**
  * Hosts the static CSP in crates/desktop/artcraft/tauri*.conf.json admits in connect-src,
@@ -43,7 +43,10 @@ const SOURCE = /^(?:[a-z][a-z0-9+.-]*:|[a-z][a-z0-9+.-]*:\/\/(?:\*\.)?[a-z0-9.-]
  * that is not strictly serialised. No directive here falls through to a wider static value:
  * default-src, style-src, font-src, img-src, media-src and connect-src are all explicit.
  */
-export function buildPodModeCsp(origins: Partial<PodOrigins>, hostedHosts: readonly string[]): string {
+export function buildPodModeCsp(
+  origins: { issuer?: string; storage?: string | readonly string[] },
+  hostedHosts: readonly string[],
+): string {
   const hosts = hostedHosts.map((h) => {
     if (!SOURCE.test(h)) throw new Error(`buildPodModeCsp: invalid host source ${JSON.stringify(h)}`);
     return h;
@@ -54,8 +57,9 @@ export function buildPodModeCsp(origins: Partial<PodOrigins>, hostedHosts: reado
     if (i === null) throw new Error('buildPodModeCsp: invalid issuer origin');
     extra.push(i);
   }
-  if (origins.storage !== undefined) {
-    const s = parseOrigin(origins.storage);
+  const storage = origins.storage === undefined ? [] : typeof origins.storage === 'string' ? [origins.storage] : origins.storage;
+  for (const origin of storage) {
+    const s = parseOrigin(origin);
     if (s === null) throw new Error('buildPodModeCsp: invalid storage origin');
     extra.push(s);
   }
