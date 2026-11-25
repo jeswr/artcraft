@@ -152,4 +152,11 @@ finds or creates the library and reports its exposure before the first `put`, an
 resurrects a concurrently deleted description). SHA-256 now
 `dddf848335bf654db3e5b57b7aa74f5d6cd01ac330213f8ae0c92ba766761b61`.
 
+It was packed a fourth time from `origin/feat/pod-media-store` at `690ecee7c` (adds `resumePending({ signal, shouldResume })`
+with a per-delete veto that may answer `true`, `false` or `"withdraw"`, `ResumeSummary.skipped` and per-entry `entries`,
+`withdrawPending(descriptionUrl)`, a per-copy lock inside the store, a `put` that withdraws a pending delete for a copy it
+adopts, and the `reentrant` reason). It was built in a scratch git worktree of the SDK with the recipe above. SHA-256 now
+`2814fa93aee8e4edb1bf2f986d97b96cd0dbe27c4435ff2dbd39ef2b8032a998`; the `frontend/package-lock.json` integrity is the
+tarball's SHA-512 (`sha512-qdXo998c...`).
+
 These packages are experimental and security critical; they are unreleased and unaudited.
