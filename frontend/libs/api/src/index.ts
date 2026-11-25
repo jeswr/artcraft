@@ -3,6 +3,7 @@ export * from "./lib/enums/Job.js";
 export * from "./lib/models/Users.js";
 export * from "./lib/models/Job.js";
 export * from "./lib/models/Prompts.js";
+export * from "./lib/models/MediaFile.js";
 export * from "./lib/BillingApi.js";
 export * from "./lib/CreditsApi.js";
 export * from "./lib/GenerationApi.js";

@@ -16,6 +16,7 @@ import { initPostHogIfAllowed } from "./posthog-init";
 import { PodSessionProvider } from "@storyteller/pod-session";
 import { podSession, startPodSessionNow } from "./pod/pod-session";
 import { notifyPodNotice } from "./pod/pod-notice";
+import { PodMirrorHost } from "./pod/PodMirrorHost";
 
 // TODO(bt,2025-04-19): Make these configurable
 const ENV = {
@@ -101,10 +102,12 @@ createRoot(document.getElementById("root")!).render(
           startNow={startPodSessionNow()}
           onNotice={notifyPodNotice}
         >
-          <GlobalSettingsManager env={ENV} />
-          <div className="topbar-spacer" data-tauri-drag-region={true} />
-          <MainApp />
-          <GlobalFileDropHandler />
+          <PodMirrorHost session={podSession}>
+            <GlobalSettingsManager env={ENV} />
+            <div className="topbar-spacer" data-tauri-drag-region={true} />
+            <MainApp />
+            <GlobalFileDropHandler />
+          </PodMirrorHost>
         </PodSessionProvider>
       </BrowserRouter>
     </StrictMode>

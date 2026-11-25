@@ -79,6 +79,12 @@
       "path": "../../libs/pod-session"
     },
     {
+      "path": "../../libs/pod-mirror"
+    },
+    {
+      "path": "../../libs/pod-mirror-ui"
+    },
+    {
       "path": "../../libs/state/credits"
     },
     {
