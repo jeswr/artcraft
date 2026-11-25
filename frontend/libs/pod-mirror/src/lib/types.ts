@@ -118,7 +118,7 @@ export type ItemState =
   /** The hosted copy is deleted but the pod copy could not be removed yet. */
   | { kind: 'remove-failed'; reason: FailureReason; attempts: number };
 
-export type PauseReason = 'offline' | 'session' | 'exposed' | 'exposure-unknown' | 'storage-unsafe' | 'store-unavailable' | 'stopped';
+export type PauseReason = 'offline' | 'session' | 'exposed' | 'exposure-unknown' | 'storage-unsafe' | 'store-unavailable' | 'journal-closed' | 'stopped';
 
 export interface MirrorStatus {
   running: boolean;
@@ -162,6 +162,13 @@ export interface MirrorSummary extends MirrorStatus {
   import: ImportStatus;
   /** Saved items ArtCraft no longer lists. Their pod copies stay until the person asks to remove them. */
   goneFromArtcraft: number;
+  /**
+   * The pod check found more of the library missing than it believes on its own (more than
+   * max(5, 10%) of the items asked): nothing was requeued. `copyAgain()` is the person's go-ahead.
+   */
+  /** The local record could not be written: nothing is deleted from the pod until it can, and an item is not called saved. */
+  journalUnavailable?: boolean;
+  libraryMissing?: { missing: number; checked: number } | null;
   /** Every download from ArtCraft's media host has failed since this install began, while the pod works. */
   mediaHostBlocked: boolean;
 }
@@ -200,5 +207,8 @@ export interface VerifyResult {
   checked: number;
   /** Items the hosted side says it no longer has. Their pod copies are kept and only marked. */
   flagged: number;
-  stoppedBy: 'done' | 'too-soon' | 'hosted-unavailable' | 'not-running';
+  /** Saved items whose pod copy the pod said is gone, queued to be copied again (hosted item still there). */
+  requeued: number;
+  /** `pod-unavailable`: the hosted side was checked but the pod could not be asked, so the pass is not recorded as done. */
+  stoppedBy: 'done' | 'too-soon' | 'hosted-unavailable' | 'pod-unavailable' | 'library-missing' | 'not-running';
 }

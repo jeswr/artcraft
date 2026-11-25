@@ -63,6 +63,7 @@ export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; w
         exposure: exposureFromOwnerOnly(async (url, probeSignal) =>
           checkOwnerOnly({ storage: await modelled(probeSignal ?? signal), url, ownerWebId: deps.webId }),
         ),
+        // Pending deletes of copies a record pairs with are stopped by the mirror's own veto (`resumePending`).
         journal: deps.journal.deletesFor(deps.webId, storage.root),
         allowUnknownExposureFor,
         signal,

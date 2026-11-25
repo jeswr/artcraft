@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPublicBytesFetcher, isPublicHttpsUrl, readBounded } from './bytes.js';
+import { ByteBudget, createPublicBytesFetcher, isPublicHttpsUrl, readBounded } from './bytes.js';
 
 const streamOf = (chunks: Uint8Array[], headers: Record<string, string> = {}) =>
   new Response(
@@ -71,5 +71,62 @@ describe('createPublicBytesFetcher', () => {
     }
     expect(never).not.toHaveBeenCalled();
     expect(isPublicHttpsUrl('https://cdn.example/a')).toBe(true);
+  });
+});
+
+describe('ByteBudget', () => {
+  const settled = async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  };
+
+  it('holds back an item that does not fit until bytes are released, in order', async () => {
+    const budget = new ByteBudget(100);
+    const first = await budget.acquire(60);
+    const order: string[] = [];
+    const second = budget.acquire(60).then((release: () => void) => {
+      order.push('second');
+      return release;
+    });
+    const third = budget.acquire(10).then((release: () => void) => {
+      order.push('third');
+      return release;
+    });
+    await settled();
+    expect(order).toEqual([]);
+    expect(budget.inFlight).toBe(60);
+    first();
+    await settled();
+    expect(order).toEqual(['second', 'third']);
+    (await second)();
+    (await third)();
+    expect(budget.inFlight).toBe(0);
+  });
+
+  it('lets an item larger than the whole budget run, but alone', async () => {
+    const budget = new ByteBudget(10);
+    const big = await budget.acquire(500);
+    let small = false;
+    const waiting = budget.acquire(1).then((release: () => void) => {
+      small = true;
+      return release;
+    });
+    await settled();
+    expect(small).toBe(false);
+    big();
+    (await waiting)();
+    expect(small).toBe(true);
+  });
+
+  it('gives a waiter up on abort without leaking its share, and a release counts once', async () => {
+    const budget = new ByteBudget(100);
+    const held = await budget.acquire(80);
+    const controller = new AbortController();
+    const waiting = budget.acquire(50, controller.signal);
+    controller.abort();
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+    held();
+    held();
+    expect(budget.inFlight).toBe(0);
+    await expect(budget.acquire(1, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

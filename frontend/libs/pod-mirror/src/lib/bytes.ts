@@ -55,6 +55,64 @@ export async function readBounded(response: Response, maxBytes: number): Promise
   return new Blob(chunks as BlobPart[]);
 }
 
+/**
+ * Bounds the bytes being uploaded at once. The upload step costs several times a file's size
+ * (the SDK store reads the whole body once to hash it, and the authenticated `fetch` may buffer
+ * it again), so what is bounded is the bytes, not the number of items. An item larger than the
+ * whole budget still runs, alone.
+ */
+export class ByteBudget {
+  private used = 0;
+  private readonly waiting: { bytes: number; grant: () => void }[] = [];
+
+  constructor(readonly capacity: number) {}
+
+  /** Resolves with a release function once `bytes` fit (or nothing else holds any). Rejects on abort. */
+  acquire(bytes: number, signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'));
+    return new Promise((resolve, reject) => {
+      const entry = {
+        bytes,
+        grant: () => {
+          signal?.removeEventListener('abort', onAbort);
+          this.used += bytes;
+          let released = false;
+          resolve(() => {
+            if (released) return;
+            released = true;
+            this.used -= bytes;
+            this.admit();
+          });
+        },
+      };
+      const onAbort = () => {
+        const at = this.waiting.indexOf(entry);
+        if (at >= 0) this.waiting.splice(at, 1);
+        reject(new DOMException('aborted', 'AbortError'));
+        this.admit();
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiting.push(entry);
+      this.admit();
+    });
+  }
+
+  /** Bytes currently held. */
+  get inFlight(): number {
+    return this.used;
+  }
+
+  private admit(): void {
+    // First come, first served: a large item at the head is not overtaken forever by small ones.
+    for (;;) {
+      const next = this.waiting[0];
+      if (!next || (this.used > 0 && this.used + next.bytes > this.capacity)) return;
+      this.waiting.shift();
+      next.grant();
+    }
+  }
+}
+
 /** The first `length` bytes of a `Blob`, for sniffing. */
 export async function blobHead(blob: Blob, length = 4096): Promise<Uint8Array> {
   return new Uint8Array(await blob.slice(0, length).arrayBuffer());

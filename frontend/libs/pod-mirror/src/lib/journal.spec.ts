@@ -1,6 +1,6 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DB_NAME, JournalError, upgradeJournal, type JournalRecord, type MirrorJournal, openMirrorJournal, createMemoryMirrorJournal } from './journal.js';
+import { DB_NAME, DB_VERSION, JournalError, upgradeJournal, type JournalRecord, type MirrorJournal, openMirrorJournal, createMemoryMirrorJournal } from './journal.js';
 const ACCOUNT = { webId: 'https://alice.example/profile/card#me', username: 'alice_hosted' };
 
 const OTHER_USER = { webId: ACCOUNT.webId, username: 'someone_else' };
@@ -42,6 +42,38 @@ describe.each([
     expect((await journal.get(OTHER_USER, 'm_1'))?.attempts).toBe(2);
     expect((await journal.get(OTHER_POD, 'm_1'))?.attempts).toBe(3);
     expect(await journal.list(ACCOUNT)).toHaveLength(1);
+  });
+
+  it('compares pod addresses in canonical form, whatever spelling a record or a lookup uses', async () => {
+    const journal = await fresh();
+    await journal.create(record(ACCOUNT, 'm_1', { state: 'saved', descriptionUrl: 'https://POD.example:443/jos\u00e9/d' }));
+    expect((await journal.get(ACCOUNT, 'm_1'))?.descriptionUrl).toBe('https://pod.example/jos%C3%A9/d');
+    expect(await journal.isPairedElsewhere('https://pod.example/jos%C3%A9/d')).toBe(true);
+    expect(await journal.isPairedElsewhere('https://Pod.example/jos\u00e9/d')).toBe(true);
+    await journal.update(ACCOUNT, 'm_1', { descriptionUrl: 'https://pod.example:443/x y' }, 2);
+    expect(await journal.isPairedElsewhere('https://pod.example/x%20y')).toBe(true);
+    expect(await journal.isPairedElsewhere('https://pod.example/jos%C3%A9/d')).toBe(false);
+  });
+
+  it('says whether another record, of any hosted account or WebID, pairs with a pod copy', async () => {
+    const journal = await fresh();
+    const url = 'https://pod/lib/2026/06/hash';
+    await journal.create(record(ACCOUNT, 'm_1', { state: 'saved', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(false);
+    // The same account, another token: same bytes held twice.
+    await journal.create(record(ACCOUNT, 'm_2', { state: 'saved', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(true);
+    await journal.remove(ACCOUNT, 'm_2');
+    // Another hosted account on the same pod, and another WebID.
+    await journal.create(record(OTHER_USER, 'm_1', { state: 'saved', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(true);
+    await journal.remove(OTHER_USER, 'm_1');
+    await journal.create(record(OTHER_POD, 'm_1', { state: 'pending', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(true);
+    // A different copy, and a record that is itself being removed, do not count.
+    expect(await journal.isPairedElsewhere('https://pod/lib/2026/06/other', { ...ACCOUNT, token: 'm_1' })).toBe(false);
+    await journal.update(OTHER_POD, 'm_1', { state: 'removing' }, 5);
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(false);
   });
 
   it('creates only when absent and never overwrites', async () => {
@@ -155,6 +187,72 @@ describe('indexeddb journal durability', () => {
     upgraded.close();
   });
 
+  it('adds the pod-copy index to a version 2 database and keeps its rows', async () => {
+    const factory = new IDBFactory();
+    const prior = await openRaw(factory, 2, (db) => upgradeJournal(db, 0));
+    await new Promise<void>((resolve) => {
+      const tx = prior.transaction('items', 'readwrite');
+      tx.objectStore('items').put(record(ACCOUNT, 'm_old', { state: 'saved', descriptionUrl: 'https://p/d' }));
+      tx.oncomplete = () => resolve();
+    });
+    prior.close();
+    const journal = await open(factory);
+    open1.push(journal);
+    expect((await journal.get(ACCOUNT, 'm_old'))?.descriptionUrl).toBe('https://p/d');
+    expect(await journal.isPairedElsewhere('https://p/d', { ...ACCOUNT, token: 'other' })).toBe(true);
+  });
+
+  it('rewrites the addresses of an older database to the canonical form, so a canonical lookup finds them', async () => {
+    const factory = new IDBFactory();
+    const prior = await openRaw(factory, 2, (db) => upgradeJournal(db, 0));
+    await new Promise<void>((resolve) => {
+      const tx = prior.transaction('items', 'readwrite');
+      tx.objectStore('items').put(record(ACCOUNT, 'm_old', { state: 'saved', descriptionUrl: 'https://POD.example:443/jos\u00e9/d', lastDescriptionUrl: 'https://POD.example:443/jos\u00e9/e' }));
+      tx.oncomplete = () => resolve();
+    });
+    prior.close();
+    const journal = await open(factory);
+    open1.push(journal);
+    expect(await journal.get(ACCOUNT, 'm_old')).toMatchObject({ descriptionUrl: 'https://pod.example/jos%C3%A9/d', lastDescriptionUrl: 'https://pod.example/jos%C3%A9/e' });
+    expect(await journal.isPairedElsewhere('https://pod.example/jos%C3%A9/d')).toBe(true);
+  });
+
+  it('tells whoever holds the journal when another window upgrades the database, and every call then fails closed', async () => {
+    const factory = new IDBFactory();
+    const journal = await open(factory);
+    await journal.create(record());
+    let told = 0;
+    journal.onClose?.(() => told++);
+    await new Promise<void>((resolve, reject) => {
+      const req = factory.open(DB_NAME, DB_VERSION + 1);
+      req.onsuccess = () => {
+        req.result.close();
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    expect(told).toBe(1);
+    await expect(journal.get(ACCOUNT, 'm_1')).rejects.toBeInstanceOf(Error);
+  });
+
+  it('does not leak a connection from an open that was blocked: a later upgrade is not held up by it', async () => {
+    const factory = new IDBFactory();
+    // A window that does not close on versionchange (an older build) holds version 2.
+    const old = await openRaw(factory, 2, (db) => upgradeJournal(db, 0));
+    await expect(open(factory)).rejects.toMatchObject({ name: 'JournalError', kind: 'blocked' });
+    old.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const outcome = await new Promise<string>((resolve) => {
+      const req = factory.open(DB_NAME, DB_VERSION + 1);
+      req.onblocked = () => resolve('blocked');
+      req.onsuccess = () => {
+        req.result.close();
+        resolve('opened');
+      };
+    });
+    expect(outcome).toBe('opened');
+  });
+
   it('refuses a database written by a newer version, with a closed error', async () => {
     const factory = new IDBFactory();
     await new Promise<void>((resolve) => {
@@ -177,7 +275,7 @@ describe('indexeddb journal durability', () => {
     await journal.create(record());
     // A newer window upgrading must not be blocked by this one.
     await new Promise<void>((resolve, reject) => {
-      const req = factory.open(DB_NAME, 3);
+      const req = factory.open(DB_NAME, DB_VERSION + 1);
       req.onsuccess = () => {
         req.result.close();
         resolve();

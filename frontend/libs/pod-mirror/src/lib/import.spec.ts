@@ -115,6 +115,107 @@ describe('copy my existing library', () => {
     expect(t.store.puts).toHaveLength(40);
   });
 
+  it('starts no new copy once pause has resolved: queued items wait, only those mid-transfer finish', async () => {
+    const t = setup(library(30), { concurrency: 2 });
+    await t.mirror.start();
+    await drain(t.mirror);
+    const release = holdPuts(t.store);
+    await t.mirror.startImport();
+    await tick();
+    // Two puts have begun and are held in the store; the rest of the page is queued behind them.
+    expect(t.store.puts).toHaveLength(2);
+    await t.mirror.pauseImport();
+    const begun = t.store.puts.length;
+    release();
+    await drain(t.mirror);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain(t.mirror);
+    expect(t.store.puts).toHaveLength(begun);
+    const status = t.mirror.summary().import;
+    expect(status.state).toBe('paused');
+    expect(status.saved).toBe(begun);
+    expect(status.pending).toBeGreaterThan(0);
+
+    expect(await t.mirror.resumeImport()).toBe(true);
+    await drain(t.mirror);
+    expect(t.mirror.summary().import).toMatchObject({ state: 'done', saved: 30, pending: 0 });
+    expect(t.store.puts).toHaveLength(30);
+  });
+
+  it('does not start a copy that was already launched, and is still preparing, when pause arrives', async () => {
+    const t = setup(library(10), { concurrency: 2 });
+    await t.mirror.start();
+    await drain(t.mirror);
+    // The hosted lookup of the first two items is slow, so they are launched but not yet uploading.
+    const real = t.hosted.getPrompt;
+    let release: () => void = () => undefined;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    for (const file of t.hosted.files.values()) file.maybe_prompt_token = 'p_slow';
+    t.hosted.getPrompt = async (token, signal) => {
+      await slow;
+      return real(token, signal);
+    };
+    await t.mirror.startImport();
+    await tick();
+    await t.mirror.pauseImport();
+    release();
+    await drain(t.mirror);
+    expect(t.store.puts).toHaveLength(0);
+    expect(t.mirror.summary().import).toMatchObject({ state: 'paused', saved: 0 });
+    await t.mirror.resumeImport();
+    await drain(t.mirror);
+    expect(t.mirror.summary().import).toMatchObject({ state: 'done', saved: 10 });
+  });
+
+  it('keeps counting what the walk has gone past across pause and resume', async () => {
+    const t = setup(library(25));
+    const seen: number[] = [];
+    t.mirror.subscribe(() => seen.push(t.mirror.summary().import.walked));
+    await t.mirror.start();
+    await drain(t.mirror);
+    const release = holdPuts(t.store);
+    await t.mirror.startImport();
+    await tick();
+    await t.mirror.pauseImport();
+    const atPause = t.mirror.summary().import.walked;
+    expect(atPause).toBeGreaterThan(0);
+    await t.mirror.resumeImport();
+    expect(t.mirror.summary().import.walked).toBeGreaterThanOrEqual(atPause);
+    release();
+    await drain(t.mirror);
+    const status = t.mirror.summary().import;
+    expect(status).toMatchObject({ state: 'done', walked: 25 });
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1] as number);
+  });
+
+  it('keeps the count when a run paused after its whole walk is resumed, and when a saved run restarts', async () => {
+    const newest = hostedFile(25);
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'item', token: newest.token, createdAt: new Date(newest.created_at).getTime() });
+    // Paused during a catch-up pass: the cursor is back at the first page, the count is not.
+    await journal.updateAccountState(JOURNAL_ACCOUNT, { import: { state: 'paused', walked: 25, total: 25, cursor: { page: 0 }, passes: 1, startedAt: 1 } });
+    const paused = setup(library(25), {}, journal);
+    await paused.mirror.start();
+    await drain(paused.mirror);
+    expect(paused.mirror.summary().import).toMatchObject({ state: 'paused', walked: 25 });
+    await paused.mirror.resumeImport();
+    await drain(paused.mirror);
+    expect(paused.mirror.summary().import).toMatchObject({ state: 'done', walked: 25 });
+    await paused.mirror.stop();
+
+    const restarted = createMemoryMirrorJournal();
+    await restarted.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'item', token: newest.token, createdAt: new Date(newest.created_at).getTime() });
+    await restarted.updateAccountState(JOURNAL_ACCOUNT, { import: { state: 'running', walked: 20, total: 25, cursor: { page: 2 }, startedAt: 1 } });
+    const again = setup(library(25), {}, restarted);
+    const counts: number[] = [];
+    again.mirror.subscribe(() => counts.push(again.mirror.summary().import.walked));
+    await again.mirror.start();
+    expect(again.mirror.summary().import.walked).toBe(20);
+    await drain(again.mirror);
+    expect(Math.min(...counts)).toBeGreaterThanOrEqual(20);
+    expect(again.mirror.summary().import).toMatchObject({ state: 'done', walked: 25 });
+  });
+
   it('pauses when the engine does: the session drops, then comes back', async () => {
     const t = setup(library(30));
     await t.mirror.start();

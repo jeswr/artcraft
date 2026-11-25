@@ -1,4 +1,4 @@
-import type { MediaStoreError, PutInput, PutOutcome, Result } from '@jeswr/pod-media-store';
+import type { MediaStoreError, PendingDelete, PutInput, PutOutcome, ResumeEntryResult, Result } from '@jeswr/pod-media-store';
 import { BytesError, type FetchPublicBytes } from './bytes.js';
 import { journalAccount, type LibraryReport, type OpenStore, type PodStorePort } from './mirror.js';
 import type {
@@ -159,6 +159,23 @@ export interface FakeStore extends PodStorePort {
   /** Everything handed to the store, serialisable, for leak checks. */
   seen: string[];
   removed: string[];
+  withdrawn: string[];
+  /** What `withdrawPending` answers. */
+  withdrawResult: 'withdrawn' | 'none' | 'incomplete';
+  /** What the store's `resumePending` asks the veto about, in order (the vetoes' answers are kept). */
+  pendingDeletes: PendingDelete[];
+  vetoes: (boolean | 'withdraw')[];
+  /** Store calls made while a veto was open, as the real store answers them: `conflict` / `reentrant`. */
+  reentered: string[];
+  vetoOpen: boolean;
+  /** Holds `resumePending` until it resolves. */
+  resumeGate: Promise<void> | null;
+  /** Description URLs whose copy the pod no longer has (404/410), or how a lookup fails otherwise. */
+  missing: Set<string>;
+  getFailure: MediaStoreError | null;
+  gets: string[];
+  /** What `probeLibrary` answers. */
+  libraryProbe: 'ok' | 'missing' | 'unknown';
   attached: { url: string }[];
   exposure: 'private' | 'exposed' | 'unknown' | 'offline';
   /** Failures to hand out for the next puts, in order. */
@@ -186,6 +203,17 @@ export function fakeStore(): FakeStore {
     puts: [],
     seen: [],
     removed: [],
+    withdrawn: [],
+    withdrawResult: 'withdrawn',
+    pendingDeletes: [],
+    vetoes: [],
+    reentered: [],
+    vetoOpen: false,
+    resumeGate: null,
+    missing: new Set(),
+    getFailure: null,
+    gets: [],
+    libraryProbe: 'ok',
     attached: [],
     exposure: 'private',
     putFailures: [],
@@ -216,6 +244,8 @@ export function fakeStore(): FakeStore {
         sha256: 'ab'.repeat(32),
         existed: store.existed,
       };
+      // A put that reports it adopted a copy written earlier writes nothing: it cannot bring back a deleted one.
+      if (!store.existed) store.missing.delete(outcome.descriptionUrl);
       return { ok: true, value: outcome };
     },
     async attachThumbnail(url, input) {
@@ -230,12 +260,41 @@ export function fakeStore(): FakeStore {
       const failure = store.removeFailures.shift();
       if (failure) return { ok: false, error: failure };
       store.removed.push(url);
+      store.missing.add(url);
       return { ok: true, value: undefined };
     },
+    async withdrawPending(url) {
+      store.withdrawn.push(url);
+      return { ok: true, value: store.withdrawResult };
+    },
+    async probeLibrary() {
+      return store.libraryProbe;
+    },
+    async get(url) {
+      store.gets.push(url);
+      if (store.getFailure) return { ok: false, error: store.getFailure };
+      if (store.missing.has(url)) return { ok: false, error: { kind: 'not-found', reason: 'storage' } };
+      return { ok: true, value: {} };
+    },
     exposureTarget: () => store.target,
-    async resumePending() {
+    async resumePending(options) {
       store.resumed++;
-      return { ok: true, value: { completed: 0, failed: 0, rejected: 0 } };
+      if (store.resumeGate) await store.resumeGate;
+      const entries: ResumeEntryResult[] = [];
+      for (const entry of store.pendingDeletes) {
+        store.vetoOpen = true;
+        let answer: boolean | 'withdraw';
+        try {
+          answer = (await options?.shouldResume?.(entry)) ?? true;
+        } finally {
+          store.vetoOpen = false;
+        }
+        store.vetoes.push(answer);
+        entries.push({ descriptionUrl: entry.descriptionUrl, outcome: answer === true ? 'completed' : 'skipped', ...(answer === true ? {} : { reason: answer === 'withdraw' ? 'withdrawn' : 'vetoed' }) } as ResumeEntryResult);
+        if (answer === true) store.removed.push(entry.descriptionUrl), store.missing.add(entry.descriptionUrl);
+      }
+      const completed = entries.filter((e) => e.outcome === 'completed').length;
+      return { ok: true, value: { completed, failed: 0, rejected: 0, skipped: entries.length - completed, entries } };
     },
     async ensureLibrary(): Promise<Result<LibraryReport>> {
       store.ensured++;
@@ -244,6 +303,14 @@ export function fakeStore(): FakeStore {
       return { ok: true, value: { url, created: false, exposure: store.exposure, probed: url ?? 'https://pod.example/alice/' } };
     },
   };
+  for (const name of ['put', 'attachThumbnail', 'remove', 'withdrawPending', 'get'] as const) {
+    const real = store[name] as (...args: unknown[]) => Promise<unknown>;
+    (store as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+      if (!store.vetoOpen) return real.apply(store, args);
+      store.reentered.push(name);
+      return Promise.resolve({ ok: false, error: { kind: 'conflict', reason: 'reentrant' } });
+    };
+  }
   return store;
 }
 

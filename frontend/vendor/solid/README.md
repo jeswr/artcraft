@@ -166,4 +166,11 @@ dependency key order, and it works with the vendored reactive-authentication 0.1
 `b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e`; the list above carries it now (the earlier
 `349742b5...` is gone). Every other tarball is unchanged.
 
+It was packed a fourth time from `origin/feat/pod-media-store` at `690ecee7c` (adds `resumePending({ signal, shouldResume })`
+with a per-delete veto that may answer `true`, `false` or `"withdraw"`, `ResumeSummary.skipped` and per-entry `entries`,
+`withdrawPending(descriptionUrl)`, a per-copy lock inside the store, a `put` that withdraws a pending delete for a copy it
+adopts, and the `reentrant` reason). It was built in a scratch git worktree of the SDK with the recipe above. SHA-256 now
+`2814fa93aee8e4edb1bf2f986d97b96cd0dbe27c4435ff2dbd39ef2b8032a998`; the `frontend/package-lock.json` integrity is the
+tarball's SHA-512 (`sha512-qdXo998c...`).
+
 These packages are experimental and security critical; they are unreleased and unaudited.

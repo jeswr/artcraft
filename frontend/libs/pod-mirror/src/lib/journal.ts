@@ -26,6 +26,11 @@ export interface JournalRecord {
   /** ArtCraft no longer lists this item. The pod copy is kept until the person says otherwise. */
   goneFromArtcraft?: boolean;
   descriptionUrl?: string;
+  /**
+   * The pod copy this record pointed at before the pod check queued it to be copied again. Kept
+   * so a hosted delete that arrives before the new copy exists can still remove (or count) it.
+   */
+  lastDescriptionUrl?: string;
   /** Lowercase hex SHA-256 of the stored bytes. */
   sha256?: string;
   /** The hosted thumbnail address with `{WIDTH}` still in it, kept for the backfill. */
@@ -76,6 +81,12 @@ export interface AccountState {
   bytesEverOk?: boolean;
   /** When the hosted deletions were last checked (ms, local clock, scheduling only). */
   verifiedAt?: number;
+  /** When the pod copies were last checked (ms, local clock, scheduling only); apart from `verifiedAt`. */
+  podVerifiedAt?: number;
+  /** A pod check in progress: the last token asked, how many were, and which were missing. */
+  podCheck?: { after: string; checked: number; missing: string[] };
+  /** Raised by a pod check that found too much missing; kept until the person chooses "Copy again". */
+  libraryMissing?: { at: number; checked: number; tokens: string[] };
   /** Library containers the person confirmed are private, for servers that cannot say. */
   confirmedPrivate?: string[];
   /** The last "copy my existing library" run; only a `running` one resumes by itself. */
@@ -91,6 +102,14 @@ export interface MirrorJournal {
   update(account: MirrorAccount, token: string, patch: RecordPatch, now: number): Promise<JournalRecord | undefined>;
   remove(account: MirrorAccount, token: string): Promise<void>;
   list(account: MirrorAccount): Promise<JournalRecord[]>;
+  /**
+   * True when any record on this device, of ANY WebID and hosted account, other than `except`,
+   * still pairs with this pod description and is not itself on its way out (`removing` or
+   * `remove-failed`). Content-hash naming makes several hosted tokens share one pod copy; this is
+   * the check a delete needs before it may take the copy with it. Without `except` it asks whether
+   * anything at all pairs with the copy. It cannot see other devices.
+   */
+  isPairedElsewhere(descriptionUrl: string, except?: MirrorAccount & { token: string }): Promise<boolean>;
   getAccountState(account: MirrorAccount): Promise<AccountState | undefined>;
   /** Sets the baseline once per account; returns the stored one. */
   ensureBaseline(account: MirrorAccount, baseline: Baseline): Promise<Baseline>;
@@ -104,6 +123,11 @@ export interface MirrorJournal {
   /** Purges this account's records and state, and the delete entries of its WebID only. */
   forgetAccount(account: MirrorAccount): Promise<void>;
   close(): void;
+  /**
+   * Called when the connection is closed from outside, because another window upgraded the
+   * database (`versionchange`). Every call after that fails. Returns an unsubscribe function.
+   */
+  onClose?(listener: () => void): () => void;
 }
 
 export class JournalError extends Error {
@@ -114,7 +138,30 @@ export class JournalError extends Error {
 }
 
 export const DB_NAME = 'artcraft-pod-mirror';
-export const DB_VERSION = 2;
+export const DB_VERSION = 4;
+
+/**
+ * A pod address in the one form the store keys its own journal and locks by (`new URL(url).href`).
+ * A server may list an address with an upper-case host, an explicit default port or raw non-ASCII
+ * characters; every pairing, lookup and veto compares this form, so such a copy is still found.
+ */
+export function canonicalUrl(url: string): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url;
+  }
+}
+
+function canonFields<T extends { descriptionUrl?: string; lastDescriptionUrl?: string }>(value: T): T {
+  const next = { ...value };
+  if (typeof next.descriptionUrl === 'string') next.descriptionUrl = canonicalUrl(next.descriptionUrl);
+  if (typeof next.lastDescriptionUrl === 'string') next.lastDescriptionUrl = canonicalUrl(next.lastDescriptionUrl);
+  return next;
+}
+const BY_DESCRIPTION = 'descriptionUrl';
+/** States that no longer hold a pod copy up: the hosted item is gone and the copy is going. */
+const LEAVING: ReadonlySet<string> = new Set(['removing', 'remove-failed']);
 const ITEMS = 'items';
 const ACCOUNTS = 'accounts';
 const DELETES = 'deletes';
@@ -144,7 +191,7 @@ function done(tx: IDBTransaction): Promise<void> {
 }
 
 /** Creates the stores a version needs; safe to run again over an existing database. */
-export function upgradeJournal(db: IDBDatabase, oldVersion: number): void {
+export function upgradeJournal(db: IDBDatabase, oldVersion: number, tx?: IDBTransaction): void {
   if (oldVersion < 1) {
     if (!db.objectStoreNames.contains(ITEMS)) db.createObjectStore(ITEMS, { keyPath: ['webId', 'username', 'token'] });
   }
@@ -153,6 +200,24 @@ export function upgradeJournal(db: IDBDatabase, oldVersion: number): void {
     for (const name of ['watermarks', DELETES]) if (db.objectStoreNames.contains(name)) db.deleteObjectStore(name);
     db.createObjectStore(ACCOUNTS, { keyPath: ['webId', 'username'] });
     db.createObjectStore(DELETES, { keyPath: ['scope', 'descriptionUrl'] });
+  }
+  if (oldVersion < 3 && tx) {
+    // Looks up "who else pairs with this pod copy" without reading every row. Records without a
+    // descriptionUrl are simply not in the index.
+    const items = tx.objectStore(ITEMS);
+    if (!items.indexNames.contains(BY_DESCRIPTION)) items.createIndex(BY_DESCRIPTION, 'descriptionUrl');
+  }
+  if (oldVersion < 4 && oldVersion >= 1 && tx) {
+    // Addresses were stored as the pod listed them; the store compares them in canonical form.
+    const request = tx.objectStore(ITEMS).openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      const row = cursor.value as JournalRecord;
+      const next = canonFields(row);
+      if (next.descriptionUrl !== row.descriptionUrl || next.lastDescriptionUrl !== row.lastDescriptionUrl) cursor.update(next);
+      cursor.continue();
+    };
   }
 }
 
@@ -170,6 +235,7 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
   const KR = options.keyRange ?? (globalThis as { IDBKeyRange?: typeof IDBKeyRange }).IDBKeyRange;
   if (!factory || !KR) throw new JournalError('unavailable');
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    let abandoned = false;
     let open: IDBOpenDBRequest;
     try {
       open = factory.open(options.name ?? DB_NAME, DB_VERSION);
@@ -177,13 +243,26 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       reject(new JournalError('unavailable'));
       return;
     }
-    open.onupgradeneeded = (event) => upgradeJournal(open.result, event.oldVersion);
-    open.onsuccess = () => resolve(open.result);
-    open.onblocked = () => reject(new JournalError('blocked'));
+    open.onupgradeneeded = (event) => upgradeJournal(open.result, event.oldVersion, open.transaction ?? undefined);
+    open.onsuccess = () => {
+      // A blocked open still completes once the other connection closes; nobody is waiting for it
+      // any more, and a connection nobody holds would block the next upgrade for ever.
+      if (abandoned) open.result.close();
+      else resolve(open.result);
+    };
+    open.onblocked = () => {
+      abandoned = true;
+      reject(new JournalError('blocked'));
+    };
     open.onerror = () => reject(new JournalError(open.error?.name === 'VersionError' ? 'newer-version' : 'unavailable'));
   });
-  // A version change from another window must not wedge this one.
-  db.onversionchange = () => db.close();
+  // A version change from another window must not wedge this one: the connection is closed, and
+  // whoever holds the journal is told, since every call from now on fails.
+  const closeListeners = new Set<() => void>();
+  db.onversionchange = () => {
+    db.close();
+    for (const listener of [...closeListeners]) listener();
+  };
 
   const deletesFor = (webId: string, storage: string): DeleteJournal => {
     const scope = scopeOf(webId, storage);
@@ -226,16 +305,17 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       const store = tx.objectStore(ITEMS);
       const existing = (await request(store.get(itemKey(record, record.token)))) as JournalRecord | undefined;
       if (existing) return { record: existing, created: false };
-      store.put({ ...record });
+      const clean = canonFields(record);
+      store.put({ ...clean });
       await done(tx);
-      return { record, created: true };
+      return { record: clean, created: true };
     },
     async update(account, token, patch, now) {
       const tx = db.transaction(ITEMS, 'readwrite');
       const store = tx.objectStore(ITEMS);
       const existing = (await request(store.get(itemKey(account, token)))) as JournalRecord | undefined;
       if (!existing) return undefined;
-      const next: JournalRecord = { ...existing, ...patch, updatedAt: now };
+      const next: JournalRecord = { ...existing, ...canonFields(patch), updatedAt: now };
       // `undefined` in a patch clears the field.
       for (const [key, value] of Object.entries(patch)) if (value === undefined) delete (next as unknown as Record<string, unknown>)[key];
       store.put(next);
@@ -250,6 +330,15 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
     async list(account) {
       const tx = db.transaction(ITEMS, 'readonly');
       return (await request(tx.objectStore(ITEMS).getAll(accountRange(KR, account)))) as JournalRecord[];
+    },
+    async isPairedElsewhere(descriptionUrl, except) {
+      const tx = db.transaction(ITEMS, 'readonly');
+      const items = tx.objectStore(ITEMS);
+      // A database upgraded without the index (it should not be) is scanned instead.
+      const rows = (await request(
+        items.indexNames.contains(BY_DESCRIPTION) ? items.index(BY_DESCRIPTION).getAll(KR.only(canonicalUrl(descriptionUrl))) : items.getAll(),
+      )) as JournalRecord[];
+      return rows.some((row) => pairsWith(row, descriptionUrl, except));
     },
     getAccountState: readState,
     async ensureBaseline(account, baseline) {
@@ -287,7 +376,16 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
     close() {
       db.close();
     },
+    onClose(listener) {
+      closeListeners.add(listener);
+      return () => closeListeners.delete(listener);
+    },
   };
+}
+
+function pairsWith(row: JournalRecord, descriptionUrl: string, except: (MirrorAccount & { token: string }) | undefined): boolean {
+  if (row.descriptionUrl === undefined || canonicalUrl(row.descriptionUrl) !== canonicalUrl(descriptionUrl) || LEAVING.has(row.state)) return false;
+  return !except || !(row.webId === except.webId && row.username === except.username && row.token === except.token);
 }
 
 /** An in-memory journal with the same behaviour, for the engine's tests. Keeps nothing. */
@@ -320,13 +418,14 @@ export function createMemoryMirrorJournal(): MirrorJournal {
     async create(record) {
       const existing = items.get(key(record, record.token));
       if (existing) return { record: { ...existing }, created: false };
-      items.set(key(record, record.token), { ...record });
-      return { record, created: true };
+      const clean = canonFields(record);
+      items.set(key(record, record.token), { ...clean });
+      return { record: clean, created: true };
     },
     async update(a, t, patch, now) {
       const existing = items.get(key(a, t));
       if (!existing) return undefined;
-      const next: JournalRecord = { ...existing, ...patch, updatedAt: now };
+      const next: JournalRecord = { ...existing, ...canonFields(patch), updatedAt: now };
       for (const [k, v] of Object.entries(patch)) if (v === undefined) delete (next as unknown as Record<string, unknown>)[k];
       items.set(key(a, t), next);
       return { ...next };
@@ -336,6 +435,9 @@ export function createMemoryMirrorJournal(): MirrorJournal {
     },
     async list(a) {
       return [...items.values()].filter((r) => r.webId === a.webId && r.username === a.username).map((r) => ({ ...r }));
+    },
+    async isPairedElsewhere(descriptionUrl, except) {
+      return [...items.values()].some((row) => pairsWith(row, descriptionUrl, except));
     },
     async getAccountState(a) {
       const found = states.get(accountKey(a));

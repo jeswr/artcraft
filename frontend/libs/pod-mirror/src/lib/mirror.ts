@@ -3,15 +3,18 @@ import {
   defaultSniff,
   type ExposureState,
   type MediaStoreError,
+  type PendingDelete,
   type PutInput,
   type PutOutcome,
   type ResumeSummary,
   type Result,
+  type ShouldResume,
   type Sniffer,
+  type WithdrawResult,
 } from '@jeswr/pod-media-store';
 import { thumbnailMutation } from './assets-store.js';
-import { BytesError, blobHead, type FetchPublicBytes } from './bytes.js';
-import type { Baseline, ImportRun, ItemMark, JournalRecord, MirrorJournal, RecordPatch } from './journal.js';
+import { BytesError, blobHead, ByteBudget, type FetchPublicBytes } from './bytes.js';
+import { type Baseline, canonicalUrl, type ImportRun, type ItemMark, type JournalRecord, type MirrorJournal, type RecordPatch } from './journal.js';
 import { type AssetInput, type AssetKind, classify, type Expected, parseDate, referenceTokens, thumbnailUrl, toAssetInput } from './mapping.js';
 import type {
   FailureReason,
@@ -38,7 +41,29 @@ export interface PodStorePort {
   put(input: PutInput<AssetInput>): Promise<Result<PutOutcome>>;
   attachThumbnail(descriptionUrl: string, input: AttachThumbnailInput): Promise<Result<unknown>>;
   remove(descriptionUrl: string, signal?: AbortSignal): Promise<Result<void>>;
-  resumePending(signal?: AbortSignal): Promise<Result<ResumeSummary>>;
+  /**
+   * Forgets a delete the store recorded for this copy and has not finished, so a later
+   * `resumePending` cannot carry it out: `withdrawn`, `none` (nothing was pending) or `incomplete`
+   * (the description is already gone, so nothing can save the copy: whoever pairs with it must be
+   * copied again). It deletes nothing in the pod.
+   */
+  withdrawPending(descriptionUrl: string, signal?: AbortSignal): Promise<Result<WithdrawResult>>;
+  /**
+   * Whether the library container answers, with the current session: `ok`, `missing` (the pod says
+   * there is no library to read) or `unknown` (offline, refused, a server error). Reads only.
+   */
+  probeLibrary(signal?: AbortSignal): Promise<'ok' | 'missing' | 'unknown'>;
+  /**
+   * Reads one description. Used only by the verification pass, to ask whether a pod copy the
+   * journal calls `saved` is still there. Nothing is written.
+   */
+  get(descriptionUrl: string, signal?: AbortSignal): Promise<Result<unknown>>;
+  /**
+   * Finishes the deletes the store journalled. `shouldResume` is asked immediately before each
+   * destructive request; while it runs, any other store call on that copy fails `conflict` /
+   * `reentrant`.
+   */
+  resumePending(options?: { signal?: AbortSignal; shouldResume?: ShouldResume }): Promise<Result<ResumeSummary>>;
   /**
    * Finds or creates the library and probes it, before anything is written. `url` is null when the
    * library does not exist and the storage root is not provably private: nothing was created.
@@ -80,6 +105,12 @@ export interface PodMirrorOptions {
   /** Hosted records that are intermediate system files (none are known from the model today). */
   isIntermediate?: (file: HostedMediaFile) => boolean;
   concurrency?: number;
+  /**
+   * Bytes the upload step may hold at once, across items. The step (hash, then PUT) costs several
+   * times a file's size, so `concurrency` alone does not bound memory. One item larger than this
+   * still runs, alone.
+   */
+  maxBytesInFlight?: number;
   maxBytes?: number;
   maxThumbnailBytes?: number;
   /** Attempts after which a failure that might be a block (not an outage) becomes `failed`. */
@@ -90,6 +121,8 @@ export interface PodMirrorOptions {
   verifyOnStartAfterMs?: number;
   /** Items looked up in one hosted batch call during verification. */
   verifyChunk?: number;
+  /** Wait between two pod lookups in the verification pass, so a large library is asked gently (0: none; the app sets it). */
+  podCheckPaceMs?: number;
   baseDelayMs?: number;
   maxDelayMs?: number;
   thumbnailDelaysMs?: readonly number[];
@@ -117,13 +150,15 @@ export const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
 
 const DEFAULTS = {
   concurrency: 2,
-  /** Handed to the store as a Blob, which the session's fetch sends without buffering it. */
+  maxBytesInFlight: 32 * 1024 * 1024,
+  /** Handed to the store as a Blob; the store reads it to hash it, and the fetch may buffer it again (see the README). */
   maxBytes: DEFAULT_MAX_BYTES,
   maxThumbnailBytes: 5 * 1024 * 1024,
   blockedAttempts: 3,
   verifyIntervalMs: 24 * 60 * 60_000,
   verifyOnStartAfterMs: 60 * 60_000,
   verifyChunk: 50,
+  podCheckPaceMs: 0,
   baseDelayMs: 5_000,
   maxDelayMs: 15 * 60_000,
   thumbnailDelaysMs: [30_000, 120_000, 600_000, 3_600_000, 21_600_000] as readonly number[],
@@ -178,6 +213,66 @@ export function podRefusal(error: MediaStoreError): PodRefusal | undefined {
 /** Passes over the listing after the first, to catch items that slid past it while it was read. */
 const CATCH_UP_PASSES = 3;
 
+/**
+ * Pod copies are named by content hash, so one copy (one description URL) can be reached from
+ * several journal records, and a delete and a copy of the same bytes can race. Everything that
+ * decides about, removes, or records a copy at one URL runs one at a time per URL: in this process
+ * through a queue, and, where the Web Locks API exists (`navigator.locks`), across every window of
+ * the app on this origin through a lock named by the URL. Without it, only this window is covered;
+ * other devices are never covered (see the README).
+ */
+const copyLocks = new Map<string, Promise<void>>();
+const COPY_LOCK_PREFIX = 'artcraft-pod-copy:';
+
+interface LockManagerLike {
+  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
+}
+function webLocks(): LockManagerLike | undefined {
+  try {
+    const locks = (globalThis as { navigator?: { locks?: LockManagerLike } }).navigator?.locks;
+    return typeof locks?.request === 'function' ? locks : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function withCopyLock<T>(address: string, work: () => Promise<T>): Promise<T> {
+  const url = canonicalUrl(address);
+  const previous = copyLocks.get(url) ?? Promise.resolve();
+  const run = previous.then(() => {
+    const locks = webLocks();
+    return locks ? locks.request(COPY_LOCK_PREFIX + url, work) : work();
+  });
+  const tail = run.then(() => undefined, () => undefined);
+  copyLocks.set(url, tail);
+  try {
+    return await run;
+  } finally {
+    if (copyLocks.get(url) === tail) copyLocks.delete(url);
+  }
+}
+
+/** When (a tick of `removalClock`) a pod copy was last deleted by a mirror here; bounded, oldest dropped first. */
+const removedAt = new Map<string, number>();
+let removalClock = 0;
+const MAX_REMEMBERED_REMOVALS = 2048;
+function noteRemoved(address: string): void {
+  const url = canonicalUrl(address);
+  removedAt.delete(url);
+  removedAt.set(url, ++removalClock);
+  if (removedAt.size > MAX_REMEMBERED_REMOVALS) removedAt.delete(removedAt.keys().next().value as string);
+}
+
+/** Times a put is repeated because a delete took the same copy while it was being written. */
+const MAX_PUT_REPEATS = 3;
+
+/** The most items the pod check may call missing before it stops and asks the person: max(5, 10% of those asked). */
+function requeueCeiling(asked: number): number {
+  return Math.max(5, Math.floor(asked * 0.1));
+}
+/** The pod check saves its place this often. */
+const POD_CHECK_SAVE_EVERY = 25;
+
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** How a failure is handled: wait and retry for ever, stop at once, or stop after this many attempts. */
@@ -198,6 +293,7 @@ export class PodMirror {
   /** The hosted username as the hosted side knows it; `o.account` carries it with the API origin, for the journal. */
   private readonly hostedUser: string;
   private readonly hostedHost: string;
+  private readonly budget: ByteBudget;
   private readonly o: Required<Omit<PodMirrorOptions, 'network' | 'events' | 'isIntermediate' | 'sniff'>> &
     Pick<PodMirrorOptions, 'network' | 'events' | 'isIntermediate'> & { sniff: Sniffer };
   private readonly records = new Map<string, JournalRecord>();
@@ -226,6 +322,8 @@ export class PodMirror {
   private target: string | null = null;
   private storeAttempts = 0;
   private resumed = false;
+  /** Pod copies a put has returned for and that are not recorded yet: a pending delete of one is not carried out. */
+  private readonly unrecorded = new Map<string, number>();
   private preparing: Promise<void> | null = null;
   private reconciling: Promise<ReconcileResult> | null = null;
   private verifying: Promise<VerifyResult> | null = null;
@@ -240,6 +338,11 @@ export class PodMirror {
   /** Downloads that have failed in a row, with none ever having worked on this install. */
   private byteFailures = 0;
   private importRun: ImportRun = { state: 'idle', walked: 0 };
+  /** The last journal write failed (and none has worked since): deletes wait, and the summary says so. */
+  private journalFailing = false;
+  /** Another window upgraded the journal's database and this connection was closed: the app must be reloaded. */
+  private journalClosed = false;
+  private libraryMissing: { at: number; checked: number; tokens: string[] } | null = null;
   private importWalker: Promise<void> | null = null;
   private importTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly importWaiters: (() => void)[] = [];
@@ -257,6 +360,7 @@ export class PodMirror {
     this.hostedUser = options.account.username;
     this.hostedHost = options.hosted.currentHost();
     this.o.account = journalAccount(options.account, this.hostedHost);
+    this.budget = new ByteBudget(this.o.maxBytesInFlight);
   }
 
   /** Loads the journal, then begins copying whatever is pending. Does not wait for the copies. */
@@ -271,6 +375,7 @@ export class PodMirror {
     this.bytesEverOk = state?.bytesEverOk === true;
     this.byteFailures = 0;
     this.importRun = state?.import ? { ...state.import } : { state: 'idle', walked: 0 };
+    this.libraryMissing = state?.libraryMissing ? { ...state.libraryMissing } : null;
     this.confirmed.clear();
     for (const url of state?.confirmedPrivate ?? []) this.confirmed.add(url);
     this.records.clear();
@@ -287,8 +392,12 @@ export class PodMirror {
     this.unsubscribers.push(this.o.session.subscribe(() => this.onSessionChange()));
     if (this.o.network) this.unsubscribers.push(this.o.network.subscribe(() => this.onNetworkChange()));
     if (this.o.events) this.unsubscribers.push(this.o.events.subscribe((event) => this.onEvent(event)));
+    this.journalClosed = false;
+    const offClose = this.o.journal.onClose?.(() => this.onJournalClosed());
+    if (offClose) this.unsubscribers.push(offClose);
     this.changed();
     void this.prepare().then(() => this.reconcile().catch(() => undefined));
+    // The pod can only be asked once the store is open; `prepare` asks for a pass when it is.
     void this.verify(false, this.o.verifyOnStartAfterMs).catch(() => undefined);
     this.armInterval();
     this.armVerify();
@@ -365,13 +474,22 @@ export class PodMirror {
   }
 
   /**
-   * Checks journalled `saved` items against the hosted library, in chunks: on start (if the last
-   * pass was over an hour ago), then at most once a day (unless `force`). An item the hosted side definitively no longer has gets its pod copy
-   * removed. An error, an offline moment or an item that is someone else's never removes anything.
+   * Two checks, each recorded on its own (`verifiedAt`, `podVerifiedAt`) and each run on start when
+   * its last pass was over an hour ago (the pod one once the store is open), then at most once a
+   * day (unless `force`): saved items the hosted side no longer lists are marked (their pod copy
+   * stays until the person asks for it to go), and saved items whose pod copy the pod says is gone
+   * are queued to be copied again. Neither ever deletes anything on its own.
    */
   verify(force = false, minGapMs = this.o.verifyIntervalMs): Promise<VerifyResult> {
-    if (!this.running) return Promise.resolve({ checked: 0, flagged: 0, stoppedBy: 'not-running' });
-    this.verifying ??= this.verifyPass(force, minGapMs).finally(() => {
+    if (!this.running) return Promise.resolve({ checked: 0, flagged: 0, requeued: 0, stoppedBy: 'not-running' });
+    // A request that comes while a pass runs waits for it and is then judged on its own (the
+    // pass that just ended usually makes it "too soon"): the start pass cannot swallow the one
+    // that follows the store opening.
+    if (this.verifying) {
+      const running = this.verifying;
+      return running.then(() => this.verify(force, minGapMs), () => this.verify(force, minGapMs));
+    }
+    this.verifying = this.verifyPass(force, minGapMs).finally(() => {
       this.verifying = null;
     });
     return this.verifying;
@@ -408,6 +526,8 @@ export class PodMirror {
       counts,
       import: this.importStatus(),
       goneFromArtcraft: gone,
+      journalUnavailable: this.journalFailing,
+      libraryMissing: this.libraryMissing ? { missing: this.libraryMissing.tokens.length, checked: this.libraryMissing.checked } : null,
       mediaHostBlocked: this.mediaHostBlocked(),
     };
     return this.cachedSummary;
@@ -425,6 +545,7 @@ export class PodMirror {
     this.hints.clear();
     this.deleted.clear();
     this.importRun = { state: 'idle', walked: 0 };
+    this.libraryMissing = null;
     this.changed();
   }
 
@@ -623,7 +744,11 @@ export class PodMirror {
     return true;
   }
 
-  /** Stops reading the listing. Items already queued still finish; resume goes on from the cursor. */
+  /**
+   * Stops the run: the listing is no longer read and no further import item starts copying.
+   * Items already past the point of being uploaded finish; the rest wait, `pending`, and resume
+   * goes on from the cursor.
+   */
   async pauseImport(): Promise<void> {
     if (this.importRun.state !== 'running') return;
     this.importRun = { ...this.importRun, state: 'paused' };
@@ -747,7 +872,6 @@ export class PodMirror {
     // One page back: deletions made while the run was down move older items up a page.
     let page = Math.max(0, (this.importRun.cursor?.page ?? 0) - 1);
     let passes = this.importRun.passes ?? 0;
-    this.importRun.walked = Math.min(this.importRun.walked, page * this.o.pageSize);
     let failures = 0;
     let admitted = 0;
     const retryLater = async (): Promise<void> => {
@@ -774,9 +898,11 @@ export class PodMirror {
       }
       failures = 0;
       const { items, totalPages } = listed.value;
-      for (const file of items) {
+      for (const [index, file] of items.entries()) {
         if (!running()) return;
-        if (passes === 0) this.importRun.walked++;
+        // Where the walk has been, by position, so going back a page to resume, or a short
+        // catch-up pass, never lowers it; a paused, resumed or restarted run counts on.
+        this.importRun.walked = Math.max(this.importRun.walked, page * this.o.pageSize + index + 1);
         if (this.records.has(file.token) || (await journal.get(account, file.token))) continue;
         admitted++;
         const created = parseDate(file.created_at)?.getTime();
@@ -852,8 +978,10 @@ export class PodMirror {
   }
 
   private async beginRemoval(record: JournalRecord): Promise<void> {
-    if (record.descriptionUrl && (record.state === 'saved' || record.state === 'removing' || record.state === 'remove-failed' || record.state === 'pending')) {
-      await this.patch(record.token, { state: 'removing', attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
+    // A record the pod check queued to be copied again has no address of its own yet; the one it had is used.
+    const url = record.descriptionUrl ?? (record.state === 'pending' ? record.lastDescriptionUrl : undefined);
+    if (url && (record.state === 'saved' || record.state === 'removing' || record.state === 'remove-failed' || record.state === 'pending')) {
+      await this.patch(record.token, { state: 'removing', descriptionUrl: url, lastDescriptionUrl: undefined, attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
       this.pump();
       return;
     }
@@ -871,21 +999,49 @@ export class PodMirror {
    * whose own lookup says "not found" is only marked, and its pod copy stays until the person
    * asks for it to go (`removeGoneFromPod`). A different hosted user or API origin, an outage
    * or going offline stops the pass before anything is marked.
+   *
+   * It also asks the pod, for every saved item the hosted side still has, whether the pod copy is
+   * still there. Only the pod's own "gone" answer (404 or 410 on the description) counts: a network
+   * error, 401, 403, a 5xx or an unreadable description is "cannot tell" and changes nothing. A
+   * copy that is gone (deleted from another device or by hand) is requeued for copying again; that
+   * only ever writes, it never deletes. The multi-device limit is in the README.
    */
   private async verifyPass(force: boolean, minGapMs: number): Promise<VerifyResult> {
-    const { journal, account, hosted } = this.o;
-    const result: VerifyResult = { checked: 0, flagged: 0, stoppedBy: 'done' };
+    const { journal, account } = this.o;
+    const result: VerifyResult = { checked: 0, flagged: 0, requeued: 0, stoppedBy: 'done' };
     const state = await journal.getAccountState(account);
-    if (!force && state?.verifiedAt !== undefined && this.o.now() - state.verifiedAt < minGapMs) return { ...result, stoppedBy: 'too-soon' };
+    // The hosted pass and the pod pass are recorded apart: one that could not run (the pod was
+    // not open yet, the hosted side was down) never makes the other repeat.
+    const due = (at: number | undefined) => force || at === undefined || this.o.now() - at >= minGapMs;
+    const hostedDue = due(state?.verifiedAt);
+    const podDue = due(state?.podVerifiedAt);
+    if (!hostedDue && !podDue) return { ...result, stoppedBy: 'too-soon' };
     // A lookup made as a different hosted user, or on another backend, would call every item "gone".
     if (!this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
+    let stoppedBy: VerifyResult['stoppedBy'] = 'done';
+    if (hostedDue) {
+      const hostedStop = await this.hostedPass(result);
+      if (hostedStop) stoppedBy = hostedStop;
+      else await journal.updateAccountState(account, { verifiedAt: this.o.now() }).catch(() => undefined);
+    }
+    if (podDue && this.running) {
+      const podStop = await this.podPass(result);
+      if (podStop) stoppedBy = stoppedBy === 'done' ? podStop : stoppedBy;
+      else await journal.updateAccountState(account, { podVerifiedAt: this.o.now() }).catch(() => undefined);
+    }
+    return { ...result, stoppedBy };
+  }
+
+  /** Marks saved items the hosted side no longer has. Returns why it stopped early, if it did. */
+  private async hostedPass(result: VerifyResult): Promise<VerifyResult['stoppedBy'] | undefined> {
+    const { hosted } = this.o;
     const signal = this.lifecycle?.signal;
     const saved = [...this.records.values()].filter((record) => record.state === 'saved').map((record) => record.token);
     for (let at = 0; at < saved.length; at += this.o.verifyChunk) {
-      if (!this.canTalk()) return { ...result, stoppedBy: this.running ? 'hosted-unavailable' : 'not-running' };
+      if (!this.canTalk()) return this.running ? 'hosted-unavailable' : 'not-running';
       const chunk = saved.slice(at, at + this.o.verifyChunk);
       const batch = await hosted.getMediaFiles(chunk, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
-      if (!batch.ok || !this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
+      if (!batch.ok || !this.sameIdentity()) return 'hosted-unavailable';
       const present = new Set(batch.value.map((file) => file.token));
       result.checked += chunk.length;
       for (const token of chunk) {
@@ -895,21 +1051,164 @@ export class PodMirror {
         }
         // Absent from a batch is a hint. Only the item's own lookup answering "not found" counts.
         const own = await hosted.getMediaFile(token, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
-        if (!own.ok && own.kind === 'unavailable') return { ...result, stoppedBy: 'hosted-unavailable' };
+        if (!own.ok && own.kind === 'unavailable') return 'hosted-unavailable';
         if (own.ok) {
           await this.markPresent(token);
           continue;
         }
-        if (!this.canTalk()) return { ...result, stoppedBy: this.running ? 'hosted-unavailable' : 'not-running' };
-        if (!this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
+        if (!this.canTalk()) return this.running ? 'hosted-unavailable' : 'not-running';
+        if (!this.sameIdentity()) return 'hosted-unavailable';
         const record = this.records.get(token);
         if (record?.state !== 'saved') continue;
         if (!record.goneFromArtcraft) await this.patch(token, { goneFromArtcraft: true });
         result.flagged++;
       }
     }
-    await journal.updateAccountState(account, { verifiedAt: this.o.now() }).catch(() => undefined);
-    return result;
+    return undefined;
+  }
+
+  /**
+   * Asks the pod about every saved item, and queues the ones whose copy it says is gone to be
+   * copied again. Returns why it stopped early, if it did: such a pass is not recorded as done.
+   *
+   * A 404 is believed only with a second opinion and under a ceiling:
+   * - the library container itself must answer, with this session, in the same pass (a pod, proxy
+   *   or expired session that hides everything with 404 stops the pass as "cannot tell");
+   * - if more than max(5, 10%) of the items checked are missing, nothing is requeued: the pass stops
+   *   and raises `libraryMissing`, and only the person's "Copy again" goes on.
+   * The pass keeps a cursor (the last token asked, and who was missing) in the journal, so one that
+   * is interrupted (a stop, going offline, a restart) continues instead of starting again, and it
+   * checks that it is still wanted between every two items.
+   */
+  private async podPass(result: VerifyResult): Promise<VerifyResult['stoppedBy'] | undefined> {
+    const { journal, account } = this.o;
+    const signal = this.lifecycle?.signal;
+    const store = this.store;
+    if (!store) return 'pod-unavailable';
+    const state = await journal.getAccountState(account);
+    if (state?.libraryMissing) return 'library-missing';
+    const probe = await store.probeLibrary(signal).catch(() => 'unknown' as const);
+    if (probe === 'unknown') return 'pod-unavailable';
+    const saved = [...this.records.values()].filter((record) => record.state === 'saved').map((record) => record.token).sort();
+    const resumed = state?.podCheck;
+    const missing = new Set<string>(resumed?.missing ?? []);
+    let checked = resumed?.checked ?? 0;
+    const check = { halted: false, answers: new Map<string, 'present' | 'missing'>() };
+    const save = () => journal.updateAccountState(account, { podCheck: { after: last, checked, missing: [...missing] } }).catch(() => undefined);
+    let last = resumed?.after ?? '';
+    for (const token of saved) {
+      if (token <= last) continue;
+      if (!this.canTalk() || !this.sameIdentity()) {
+        await save();
+        return this.running ? 'pod-unavailable' : 'not-running';
+      }
+      const record = this.records.get(token);
+      const url = record?.state === 'saved' ? record.descriptionUrl : undefined;
+      if (url) {
+        // A library the probe could not find makes every copy in it "missing" without a request each.
+        const answer = probe === 'missing' ? 'missing' : await this.askPod(url, check, signal);
+        if (answer === 'missing') missing.add(token);
+        else if (!answer) {
+          await save();
+          return 'pod-unavailable';
+        }
+      }
+      checked++;
+      last = token;
+      if (missing.size > requeueCeiling(saved.length)) return this.raiseLibraryMissing(missing, checked);
+      if (checked % POD_CHECK_SAVE_EVERY === 0) await save();
+      if (this.o.podCheckPaceMs > 0) await this.sleep(this.o.podCheckPaceMs);
+    }
+    if (missing.size > requeueCeiling(checked)) return this.raiseLibraryMissing(missing, checked);
+    for (const token of missing) if (await this.requeueMissing(token, signal)) result.requeued++;
+    await journal.updateAccountState(account, { podCheck: undefined }).catch(() => undefined);
+    return undefined;
+  }
+
+  /** Asks the pod once per copy. `undefined`: it could not tell and the pass should stop. */
+  private async askPod(url: string, check: { halted: boolean; answers: Map<string, 'present' | 'missing'> }, signal: AbortSignal | undefined): Promise<'present' | 'missing' | undefined> {
+    const known = check.answers.get(url);
+    if (known) return known;
+    const store = this.store;
+    if (!store || check.halted) return undefined;
+    const got = await store.get(url, signal).catch(() => undefined);
+    let answer: 'present' | 'missing' | undefined;
+    if (got?.ok) answer = 'present';
+    // `not-found` with the reason `storage` is the pod's own 404 or 410. `out-of-scope` is the
+    // store saying the address is not in its library, which is not the same as the copy being gone.
+    else if (got && got.error.kind === 'not-found' && got.error.reason === 'storage') answer = 'missing';
+    else if (got && (got.error.kind === 'failed' || got.error.kind === 'not-found')) return 'present'; // not gone as far as anyone can tell
+    if (!answer) {
+      // Offline or refused (the pod, the session): stop asking this pass rather than hammer it.
+      check.halted = true;
+      return undefined;
+    }
+    check.answers.set(url, answer);
+    return answer;
+  }
+
+  private async raiseLibraryMissing(missing: Set<string>, checked: number): Promise<VerifyResult['stoppedBy']> {
+    this.libraryMissing = { at: this.o.now(), checked, tokens: [...missing] };
+    await this.o.journal.updateAccountState(this.o.account, { libraryMissing: this.libraryMissing, podCheck: undefined }).catch(() => undefined);
+    this.changed();
+    return 'library-missing';
+  }
+
+  /**
+   * The person's "Copy again" after the pod check found a large share of the library missing:
+   * queues those items to be copied again (the ones the hosted side still has), then lets the
+   * pod check run again. Resolves with how many were queued.
+   */
+  async copyAgain(): Promise<number> {
+    const info = this.libraryMissing;
+    if (!this.running || !info || !this.sameIdentity()) return 0;
+    let count = 0;
+    for (const token of info.tokens) if (await this.requeueMissing(token, this.lifecycle?.signal)) count++;
+    this.libraryMissing = null;
+    await this.o.journal.updateAccountState(this.o.account, { libraryMissing: undefined, podCheck: undefined, podVerifiedAt: undefined }).catch(() => undefined);
+    this.changed();
+    return count;
+  }
+
+  /** Queues one saved item whose copy is gone to be copied again, if the hosted side still has it. */
+  private async requeueMissing(token: string, signal: AbortSignal | undefined): Promise<boolean> {
+    const url = this.records.get(token)?.descriptionUrl;
+    if (!url || this.records.get(token)?.state !== 'saved') return false;
+    // Only an item the hosted side still has is copied again; one it no longer lists is left to the hosted pass's mark.
+    const own = await this.o.hosted.getMediaFile(token, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
+    if (!own.ok || !this.sameIdentity()) return false;
+    return withCopyLock(url, async () => {
+      const current = this.records.get(token);
+      if (current?.state !== 'saved' || current.descriptionUrl !== url) return false;
+      await this.patch(token, {
+        state: 'pending',
+        // Not the import run's any more (cancelling or pausing it must not drop or hold this one),
+        // and the old address is kept for a hosted delete that comes before the new copy.
+        source: undefined,
+        lastDescriptionUrl: url,
+        descriptionUrl: undefined,
+        sha256: undefined,
+        thumbnail: undefined,
+        thumbnailTemplate: undefined,
+        thumbnailAttempts: undefined,
+        thumbnailNextAt: undefined,
+        goneFromArtcraft: undefined,
+        attempts: 0,
+        repeats: undefined,
+        nextAttemptAt: undefined,
+        lastError: undefined,
+      });
+      this.pump();
+      return true;
+    });
+  }
+
+  /** A pause between two pod lookups that a stop ends at once. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      this.lifecycle?.signal.addEventListener('abort', () => (clearTimeout(timer), resolve()), { once: true });
+    });
   }
 
   private async markPresent(token: string): Promise<void> {
@@ -944,6 +1243,7 @@ export class PodMirror {
 
   private pauseReason(): PauseReason | null {
     if (!this.running) return 'stopped';
+    if (this.journalClosed) return 'journal-closed';
     if (!this.o.session.isConnected()) return 'session';
     if (this.o.network && !this.o.network.isOnline()) return 'offline';
     if (this.blocked) return this.blocked;
@@ -962,7 +1262,9 @@ export class PodMirror {
     }
     if (this.pauseReason() !== null) return;
     const now = this.o.now();
-    const waiting = [...this.work.entries()].filter(([token]) => !this.inflight.has(token)).sort((a, b) => a[1].priority - b[1].priority || a[1].due - b[1].due || a[1].seq - b[1].seq);
+    const importHeld = this.importRun.state === 'paused';
+    // A paused import's items wait: priority 1 is import work (copies and thumbnail backfills).
+    const waiting = [...this.work.entries()].filter(([token, work]) => !this.inflight.has(token) && !(importHeld && work.priority === 1)).sort((a, b) => a[1].priority - b[1].priority || a[1].due - b[1].due || a[1].seq - b[1].seq);
     let earliest = Number.POSITIVE_INFINITY;
     for (const [token, work] of waiting) {
       if (work.due > now) {
@@ -1011,6 +1313,7 @@ export class PodMirror {
     // nothing that keeps failing can fetch the same file again without waiting its turn.
     const before = this.records.get(token);
     if (!before) return;
+    if (this.heldByPause(token)) return;
     const attempt = before.attempts + 1;
     await this.patch(token, { attempts: attempt, nextAttemptAt: this.o.now() + this.retryDelay(attempt) });
     const hint = this.hints.get(token);
@@ -1068,41 +1371,109 @@ export class PodMirror {
       ...toAssetInput(file, prompt, { kind, referencedAssets }),
       ...(thumb ? { thumbnailEncodingFormat: thumb.contentType } : {}),
     };
-    const put = await store.put({
-      bytes,
-      contentType: sniffed.contentType,
-      extension: sniffed.extension,
-      createdAt: parseDate(file.created_at) ?? new Date(this.o.now()),
-      description,
-      ...(thumb ? { thumbnail: { bytes: thumb.bytes } } : {}),
-      signal,
-    });
-    if (!put.ok) return this.storeFailure(token, 'copy', put.error, signal);
-    this.refusedItems.clear();
+    // The upload step (hash, then PUT) costs several times the file's size in the store, so it
+    // is admitted by bytes in flight, not only by item count. The item holds its downloaded
+    // `Blob` (one copy) while it waits.
+    let release: () => void;
+    try {
+      release = await this.budget.acquire(bytes.size + (thumb?.bytes.size ?? 0), signal);
+    } catch {
+      return this.failTask(token, 'copy', 'unexpected', signal, 'transient'); // aborted: not counted
+    }
+    try {
+      // A pause that came while this item waited for room stops it before anything is written.
+      if (this.heldByPause(token)) return this.uncount(token, 'copy');
+      for (let repeat = 0; ; repeat++) {
+        const clock = removalClock;
+        const put = await store.put({
+          bytes,
+          contentType: sniffed.contentType,
+          extension: sniffed.extension,
+          createdAt: parseDate(file.created_at) ?? new Date(this.o.now()),
+          description,
+          ...(thumb ? { thumbnail: { bytes: thumb.bytes } } : {}),
+          signal,
+        });
+        if (!put.ok) return this.storeFailure(token, 'copy', put.error, signal);
+        this.refusedItems.clear();
+        // Under the copy's lock, so a delete deciding about the same pod copy sees this record or
+        // runs wholly before it; one that took the copy while this put was writing it means
+        // the put is repeated (it recreates the copy) rather than leaving a dead link.
+        const url = canonicalUrl(put.value.descriptionUrl);
+        let settled: boolean;
+        this.unrecorded.set(url, (this.unrecorded.get(url) ?? 0) + 1);
+        try {
+          settled = await withCopyLock(url, async () => {
+            if ((removedAt.get(url) ?? 0) > clock) return false;
+            // A put that adopted a copy that was already there is the one a delete in another window
+            // can overtake (this window's clock does not see it): ask the pod before calling it saved.
+            if (put.value.existed) {
+              const there = await store.get(url, signal);
+              if (!there.ok) return false;
+            }
+            await this.recordSaved(token, put.value, { kind, template, thumb }, store, signal);
+            return true;
+          });
+        } catch (error) {
+          if (!(error instanceof JournalWriteError)) throw error;
+          // Not recorded, so not `saved`: the item stays pending and is copied (adopted) again.
+          return this.failTask(token, 'copy', 'unexpected', signal, 'transient');
+        } finally {
+          const left = (this.unrecorded.get(url) ?? 1) - 1;
+          if (left > 0) this.unrecorded.set(url, left);
+          else this.unrecorded.delete(url);
+        }
+        if (settled) return;
+        if (repeat + 1 >= MAX_PUT_REPEATS) return this.failTask(token, 'copy', 'store', signal, 'transient');
+      }
+    } finally {
+      release();
+    }
+  }
 
+  private async recordSaved(
+    token: string,
+    value: PutOutcome,
+    context: { kind: AssetKind; template: string | null | undefined; thumb: { bytes: Blob; contentType: string } | undefined },
+    store: PodStorePort,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const { kind, template, thumb } = context;
     let thumbnail: 'attached' | 'waiting' | 'none' = kind === 'model3d' || !thumbnailUrl(template) ? 'none' : 'waiting';
-    if (put.value.thumbnailUrl !== undefined) thumbnail = 'attached';
-    else if (thumb && put.value.thumbnailMissing) {
-      const attached = await store.attachThumbnail(put.value.descriptionUrl, {
+    if (value.thumbnailUrl !== undefined) thumbnail = 'attached';
+    else if (thumb && value.thumbnailMissing) {
+      const attached = await store.attachThumbnail(value.descriptionUrl, {
         bytes: thumb.bytes,
         mutate: thumbnailMutation(thumb.contentType),
         signal,
       });
       if (attached.ok) thumbnail = 'attached';
     }
-    await this.patch(token, {
+    // A delete of this copy that was interrupted earlier was withdrawn by the store's put; if it
+    // could not be (a journal that was down), the veto of the next `resumePending` stops it.
+    await this.patch(
+      token,
+      {
       state: 'saved',
-      descriptionUrl: put.value.descriptionUrl,
-      sha256: put.value.sha256,
+      descriptionUrl: value.descriptionUrl,
+      lastDescriptionUrl: undefined,
+      sha256: value.sha256,
       thumbnail,
-      thumbnailTemplate: thumbnail === 'waiting' ? template : undefined,
+      thumbnailTemplate: thumbnail === 'waiting' ? template ?? undefined : undefined,
       thumbnailAttempts: 0,
       thumbnailNextAt: thumbnail === 'waiting' ? this.o.now() + (this.o.thumbnailDelaysMs[0] ?? 0) : undefined,
       lastError: undefined,
       attempts: 0,
       repeats: undefined,
       nextAttemptAt: undefined,
-    });
+      },
+      true,
+    );
+  }
+
+  /** A paused import starts no copy: this item waits, `pending`, until the run resumes. */
+  private heldByPause(token: string): boolean {
+    return this.importRun.state === 'paused' && this.records.get(token)?.source === 'import';
   }
 
   private async fetchThumbnail(template: string | null | undefined, signal: AbortSignal): Promise<{ bytes: Blob; contentType: string } | undefined> {
@@ -1139,15 +1510,64 @@ export class PodMirror {
 
   private async removeCopy(token: string, signal: AbortSignal): Promise<void> {
     const store = this.store;
-    const record = this.records.get(token);
-    if (!store || !record) return;
-    if (!record.descriptionUrl) return this.dropRecord(token);
-    // Several hosted items can share one copy. It goes only with the last of them.
-    const others = [...(this.pairings.get(record.descriptionUrl) ?? [])].filter((other) => other !== token && this.records.get(other)?.state === 'saved');
-    if (others.length > 0) return this.dropRecord(token);
-    const removed = await store.remove(record.descriptionUrl, signal);
-    if (removed.ok || removed.error.kind === 'not-found') return this.dropRecord(token);
-    return this.storeFailure(token, 'remove', removed.error, signal);
+    const first = this.records.get(token);
+    if (!store || !first) return;
+    const url = first.descriptionUrl;
+    if (!url) return this.dropRecord(token);
+    // The pod copy is named by content hash, so other records (another hosted account on this pod,
+    // or this account holding the same bytes twice) may share it. Decide and delete under the
+    // copy's lock, so a concurrent copy or delete of the same bytes cannot interleave.
+    let repair: string[] = [];
+    await withCopyLock(url, async () => {
+      const record = this.records.get(token);
+      if (!record || record.descriptionUrl !== url || record.state !== 'removing') return;
+      if (signal.aborted) return;
+      // A journal that cannot be written cannot be trusted to say what pairs with a copy.
+      if (this.journalFailing) return this.failTask(token, 'remove', 'unexpected', signal, 'transient');
+      let shared: boolean;
+      try {
+        shared = this.pairedHere(url, token) || (await this.o.journal.isPairedElsewhere(url, { ...this.o.account, token }));
+      } catch {
+        // The journal cannot say who else pairs with this copy: weak evidence never deletes.
+        return this.failTask(token, 'remove', 'unexpected', signal, 'transient');
+      }
+      // Another record still pairs with it: only this token's pairing goes, and a delete the
+      // store has pending for the copy is withdrawn so a later start cannot finish it.
+      if (shared) {
+        const withdrawn = await store.withdrawPending(url, signal).catch(() => undefined);
+        // `incomplete`: an earlier delete already took the description, so the records that still
+        // pair with the copy point at nothing. They are copied again once this lock is released.
+        if (withdrawn?.ok && withdrawn.value === 'incomplete') repair = this.pairedTokens(url, token);
+        return this.dropRecord(token);
+      }
+      let removed: Result<void>;
+      try {
+        removed = await store.remove(url, signal);
+      } finally {
+        // Whatever it answered, a delete that started may have taken the description, and a put
+        // that adopted the copy meanwhile must be repeated, not recorded on a dead link.
+        noteRemoved(url);
+      }
+      // Only the pod's own "not there" (reason `storage`) says the copy is gone. `out-of-scope` and
+      // `no-library` are also `not-found`, and say nothing about the copy: it is kept, and tried again.
+      if (removed.ok || (removed.error.kind === 'not-found' && removed.error.reason === 'storage')) return this.dropRecord(token);
+      return this.storeFailure(token, 'remove', removed.error, signal);
+    });
+    for (const other of repair) await this.requeueMissing(other, signal);
+  }
+
+  /** The records of this account, other than `except`, that are saved on the copy. */
+  private pairedTokens(url: string, except: string): string[] {
+    return [...(this.pairings.get(canonicalUrl(url)) ?? [])].filter((other) => other !== except && this.records.get(other)?.state === 'saved');
+  }
+
+  /** Another record of this account, other than `except`, pairs with the copy and is not itself leaving. */
+  private pairedHere(url: string, except: string): boolean {
+    for (const other of this.pairings.get(canonicalUrl(url)) ?? []) {
+      const state = this.records.get(other)?.state;
+      if (other !== except && state !== undefined && state !== 'removing' && state !== 'remove-failed') return true;
+    }
+    return false;
   }
 
   private async dropRecord(token: string): Promise<void> {
@@ -1163,16 +1583,18 @@ export class PodMirror {
 
   private index(record: JournalRecord): void {
     if (!record.descriptionUrl) return;
-    const tokens = this.pairings.get(record.descriptionUrl) ?? new Set<string>();
+    const key = canonicalUrl(record.descriptionUrl);
+    const tokens = this.pairings.get(key) ?? new Set<string>();
     tokens.add(record.token);
-    this.pairings.set(record.descriptionUrl, tokens);
+    this.pairings.set(key, tokens);
   }
 
   private unindex(record: JournalRecord): void {
     if (!record.descriptionUrl) return;
-    const tokens = this.pairings.get(record.descriptionUrl);
+    const key = canonicalUrl(record.descriptionUrl);
+    const tokens = this.pairings.get(key);
     tokens?.delete(record.token);
-    if (tokens?.size === 0) this.pairings.delete(record.descriptionUrl);
+    if (tokens?.size === 0) this.pairings.delete(key);
   }
 
   // ---- failures ------------------------------------------------------------------------
@@ -1231,6 +1653,8 @@ export class PodMirror {
   private classifyStoreError(error: MediaStoreError): { reason: FailureReason; policy: Policy } {
     switch (error.kind) {
       case 'conflict':
+        // `reentrant`: the copy was busy answering a veto. Not the item's fault; try again.
+        if (error.reason === 'reentrant') return { reason: 'store', policy: 'transient' };
         return { reason: 'conflict', policy: DETERMINISTIC_REPEATS };
       case 'forbidden':
         return { reason: 'forbidden', policy: this.o.blockedAttempts };
@@ -1301,10 +1725,16 @@ export class PodMirror {
   // ---- store and session -----------------------------------------------------------------
 
   private prepare(): Promise<void> {
+    const startedAt = this.generation;
     this.preparing ??= this.prepareOnce().finally(() => {
       this.preparing = null;
       this.changed();
       this.pump();
+      // The session or network changed while this ran, and its own `prepare()` joined this one: no
+      // run is left for that change, so one starts now.
+      if (this.running && this.generation !== startedAt && !this.store && this.o.session.isConnected() && (this.o.network?.isOnline() ?? true)) void this.prepare();
+      // The store is open: the pod pass that could not run at start (or after a reconnect) can.
+      if (this.running && this.store && this.exposureOk) void this.verify(false, this.o.verifyOnStartAfterMs).catch(() => undefined);
     });
     return this.preparing;
   }
@@ -1341,7 +1771,51 @@ export class PodMirror {
     }
     if (this.exposureOk && !this.resumed) {
       this.resumed = true;
-      await this.store.resumePending(signal).catch(() => undefined);
+      await this.resumeDeletes(this.store, signal);
+    }
+  }
+
+  /**
+   * Finishes the deletes the store journalled earlier, except for a copy a record still pairs
+   * with. The store asks just before each destructive request. The answer comes from this
+   * account's records and the journal (never from the store: a call into it for that copy fails
+   * `reentrant` while the question is open): `"withdraw"` if any record of any hosted account
+   * pairs with the copy, `false` if the journal cannot say. A copy whose description is already
+   * gone but that a record pairs with is copied again, for the hosted item that still exists.
+   */
+  private async resumeDeletes(store: PodStorePort, signal: AbortSignal): Promise<void> {
+    const damaged = new Set<string>();
+    const shouldResume = async (entry: PendingDelete): Promise<boolean | 'withdraw'> => {
+      try {
+        // Records that cannot be trusted to be complete (the journal cannot be written or has closed)
+        // decide nothing: the delete stays journalled.
+        if (this.journalFailing || this.journalClosed) return false;
+        const url = canonicalUrl(entry.descriptionUrl);
+        if (this.unrecorded.has(url)) return false;
+        const paired = this.pairedHere(url, '') || (await this.o.journal.isPairedElsewhere(url));
+        if (!paired) return true;
+        if (entry.phase === 'deleted') {
+          // The description is already gone: the entry stays until the records that pair with the
+          // copy have been queued to be copied again (the put that does it withdraws the entry).
+          damaged.add(url);
+          return false;
+        }
+        return 'withdraw';
+      } catch {
+        return false;
+      }
+    };
+    const resumed = await store.resumePending({ signal, shouldResume }).catch(() => undefined);
+    if (resumed?.ok) for (const done of resumed.value.entries) if (done.outcome === 'completed') noteRemoved(done.descriptionUrl);
+    let incomplete = !resumed?.ok;
+    for (const url of damaged) {
+      for (const token of this.pairedTokens(url, '')) if (!(await this.requeueMissing(token, signal))) incomplete = true;
+    }
+    // The resume or a repair could not finish (offline, hosted lookup unavailable, stopped): the
+    // entries are still journalled, so a later prepare asks again.
+    if (incomplete && !signal.aborted) {
+      this.resumed = false;
+      this.retryPrepareLater('failed');
     }
   }
 
@@ -1383,6 +1857,14 @@ export class PodMirror {
     this.changed();
   }
 
+  /** The journal connection is gone: nothing can be recorded, so nothing is copied or removed until a reload. */
+  private onJournalClosed(): void {
+    if (!this.running) return;
+    this.journalClosed = true;
+    for (const { controller } of this.inflight.values()) controller.abort();
+    this.changed();
+  }
+
   private onNetworkChange(): void {
     if (!this.running) return;
     if (this.o.network?.isOnline()) {
@@ -1395,7 +1877,17 @@ export class PodMirror {
 
   // ---- journal and notifications ---------------------------------------------------------------
 
-  private async patch(token: string, patch: RecordPatch): Promise<void> {
+  /**
+   * Updates memory, then the journal. A journal write that fails is not hidden: the mirror says
+   * so (`journalUnavailable`), and a `strict` patch (the one that records `saved`) is undone and
+   * throws, so an item is never `saved` in memory only, where another account's delete cannot
+   * see it.
+   */
+  private async patch(token: string, raw: RecordPatch, strict = false): Promise<void> {
+    // Addresses are kept in the store's canonical form, here and in the journal.
+    const patch: RecordPatch = { ...raw };
+    if (typeof patch.descriptionUrl === 'string') patch.descriptionUrl = canonicalUrl(patch.descriptionUrl);
+    if (typeof patch.lastDescriptionUrl === 'string') patch.lastDescriptionUrl = canonicalUrl(patch.lastDescriptionUrl);
     const now = this.o.now();
     const current = this.records.get(token);
     if (!current) return;
@@ -1408,7 +1900,28 @@ export class PodMirror {
     this.work.delete(token);
     this.schedule(next);
     this.changed();
-    await this.o.journal.update(this.o.account, token, patch, now).catch(() => undefined);
+    try {
+      await this.o.journal.update(this.o.account, token, patch, now);
+      if (this.journalFailing) {
+        this.journalFailing = false;
+        this.changed();
+      }
+    } catch {
+      if (!this.journalFailing) {
+        this.journalFailing = true;
+        this.changed();
+      }
+      if (strict && this.records.get(token) === next) {
+        this.unindex(next);
+        this.records.set(token, current);
+        this.index(current);
+        this.states.set(token, stateFromRecord(current));
+        this.work.delete(token);
+        this.schedule(current);
+        this.changed();
+        throw new JournalWriteError();
+      }
+    }
   }
 
   private changed(): void {
@@ -1423,6 +1936,9 @@ export class PodMirror {
     }
   }
 }
+
+/** A journal write that had to succeed did not. */
+class JournalWriteError extends Error {}
 
 function stateFromRecord(record: JournalRecord): ItemState {
   switch (record.state) {
