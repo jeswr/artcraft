@@ -105,6 +105,9 @@
     },
     {
       "path": "../modal/tsconfig.lib.json"
+    },
+    {
+      "path": "../../pod-session/tsconfig.lib.json"
     }
   ]
 }

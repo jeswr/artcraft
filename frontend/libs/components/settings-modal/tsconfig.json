@@ -66,6 +66,9 @@
       "path": "../modal"
     },
     {
+      "path": "../../pod-session"
+    },
+    {
       "path": "./tsconfig.lib.json"
     },
     {

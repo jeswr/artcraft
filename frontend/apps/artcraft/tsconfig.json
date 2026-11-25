@@ -76,6 +76,9 @@
       "path": "../../libs/pod-mode"
     },
     {
+      "path": "../../libs/pod-session"
+    },
+    {
       "path": "../../libs/state/credits"
     },
     {

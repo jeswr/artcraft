@@ -13,6 +13,9 @@ import { SyncStorytellerApiConfig } from "./api/SyncStorytellerApiConfig";
 import { SoundManager } from "@storyteller/soundboard";
 import { useModelsStore } from "@storyteller/tauri-api";
 import { initPostHogIfAllowed } from "./posthog-init";
+import { PodSessionProvider } from "@storyteller/pod-session";
+import { podSession, startPodSessionNow } from "./pod/pod-session";
+import { notifyPodNotice } from "./pod/pod-notice";
 
 // TODO(bt,2025-04-19): Make these configurable
 const ENV = {
@@ -93,10 +96,16 @@ createRoot(document.getElementById("root")!).render(
   <>
     <StrictMode>
       <BrowserRouter>
-        <GlobalSettingsManager env={ENV} />
-        <div className="topbar-spacer" data-tauri-drag-region={true} />
-        <MainApp />
-        <GlobalFileDropHandler />
+        <PodSessionProvider
+          session={podSession}
+          startNow={startPodSessionNow()}
+          onNotice={notifyPodNotice}
+        >
+          <GlobalSettingsManager env={ENV} />
+          <div className="topbar-spacer" data-tauri-drag-region={true} />
+          <MainApp />
+          <GlobalFileDropHandler />
+        </PodSessionProvider>
       </BrowserRouter>
     </StrictMode>
   </>,

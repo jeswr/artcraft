@@ -1,4 +1,5 @@
 import { ArtcraftAccountBlock } from "./ArtcraftAccountBlock";
+import { PodAccountBlock } from "./PodAccountBlock";
 import { ProviderAccountBlock } from "./ProviderAccountBlock";
 import { GrokGetCredentialInfo, MidjourneyGetCredentialInfo } from "@storyteller/tauri-api";
 
@@ -15,6 +16,7 @@ export const AccountSettingsPane = ({
         globalAccountLogoutCallback={globalAccountLogoutCallback}
       />
       <hr className="border-ui-panel-border" />
+      <PodAccountBlock />
       <ProviderAccountBlock
         name="Grok"
         commandPrefix="grok"
