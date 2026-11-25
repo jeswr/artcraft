@@ -33,6 +33,9 @@
       "@storyteller/pod-mode": [
         "libs/pod-mode/src/index.ts"
       ],
+      "@storyteller/pod-session": [
+        "libs/pod-session/src/index.ts"
+      ],
       "@storyteller/api": [
         "libs/api/src/index.ts"
       ],

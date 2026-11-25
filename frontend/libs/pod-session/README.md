@@ -1,0 +1,79 @@
+# @storyteller/pod-session
+
+Solid pod session for the desktop app: a small state machine over `@jeswr/pod-auth` and
+`@jeswr/desktop-auth`. No Tauri imports; the shell supplies `openUrl`, `onOpenUrl` and the
+pod-mode requests.
+
+States: `disconnected` (with an `outcome` of `disconnected` or `declined` so a rebuilt window
+still shows the answer), `connecting` (the app's native dialog is open), `signing-in`,
+`connected(webId)`, `leaving`, `signed-out-locally` (disconnected here, but the provider could
+not be told), `error(kind)` and `unsupported(reason)`. Error kinds and reasons are closed sets;
+no state, message or log carries a token, a callback URL or a host's error text.
+
+```ts
+const session = createPodSession({
+  config, // readConfig(identifier)
+  createAuth: () => createDefaultAuth(config, { openUrl, onOpenUrl }),
+  wipeStores: () => deletePodAuthDatabases(config),
+  podMode: realPodModePort(requests), // requests: the app's pod-mode commands
+});
+await session.start();           // settle a step left by a rebuild, self-test, restore
+await session.connect(issuer);   // validates, asks the app, which confirms and rebuilds
+const podFetch = session.getFetch(); // pod-auth's fetch, or null unless connected
+await session.leave();           // from any state: revoke, wipe locally, ask the app to leave
+```
+
+## Flow and rules
+
+- `connect` validates the typed issuer (a bare https origin; `http://localhost` only in a dev
+  build with `VITE_SOLID_ALLOW_LOOPBACK=true`), records that a sign-in was asked for and asks
+  the app to enter pod mode. The app shows a native dialog naming the origin; on approval it
+  rebuilds the window. The sign-in then continues in the new window against the issuer the app
+  recorded, not one the page remembered. A declined dialog is shown as such.
+- pod-auth is built only in a pod window, only when `sessionRestoreAllowed()`, only when a
+  narrowing policy is confirmed (`podPolicyApplied()`), and only when the config is valid.
+  Otherwise the state is a closed error. Building it happens inside the guarded section, so a
+  throwing factory is a closed error too.
+- Any failure after the token exchange (including a missing WebID or a cancel) logs out and
+  wipes the stores.
+- `leave()` works from every state. It revokes through pod-auth if it can, **always** deletes
+  the local pod-auth databases, then asks the app to leave pod mode. A failed revocation does
+  not stop the wipe and ends in `signed-out-locally`. A delete that is only queued behind an
+  open connection (`deferred`) is not reported as done: the window is rebuilt and the delete
+  runs before pod-auth opens anything. If the wipe cannot finish, the state is
+  `error('wipe-failed')` and the window stays in pod mode. The order is wipe, then leave; the
+  app cannot check it, so this library enforces it.
+- A small `localStorage` marker with a closed set of words (`connect`, `leave`,
+  `leave-revocation-failed`, `done`, `done-revocation-failed`) carries the flow across window
+  rebuilds. It never holds an origin, token or URL, and a value outside the set is ignored.
+- A start-up self-test checks a secure context, that Web Locks exclude and release, IndexedDB,
+  and that a non-extractable key persists, reopens on a fresh connection and still signs. A
+  failure yields `unsupported(reason)`; leaving still works.
+- All pod HTTP uses `getFetch()`. Never route pod or identity-provider traffic through the
+  Tauri HTTP plugin or `FetchProxy`: that would move tokens and DPoP proofs into Rust.
+
+## Build-time configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `VITE_SOLID_CLIENT_ID` | a `.invalid` placeholder URL | https URL of the Client Identifier Document |
+| `VITE_SOLID_ALLOW_LOOPBACK` | unset | `true` in a dev build only: allow an `http://localhost` issuer |
+
+The redirect is derived from the app identifier (`<identifier>:/oauth/callback`, a private-use
+scheme), so release (`ai.artcraft.app`) and the dev overlays (`ai.artcraft.app.dev`) never
+share a callback or a single-instance lock. The Client Identifier Document must be served as
+`application/ld+json` with `application_type: native` and list exactly that redirect (build it
+with `desktopClientIdDocument` from `@jeswr/desktop-auth`); a dev build needs its own. Where the
+document is hosted is the owner's decision: until a real URL is set the config is
+`not-configured` and Connect stays disabled.
+
+## Verified only in a real webview
+
+Web Locks and key persistence on WebKitGTK/WKWebView/WebView2, that a queued IndexedDB delete
+completes after the rebuild, deep-link delivery, single-instance forwarding, CORS from the
+webview origin, and the window rebuild itself. Unit tests use fakes; the integration spec runs
+real pod-auth and desktop-auth against pod-auth's in-memory provider and `fake-indexeddb`, and
+checks that the wipe finds the database names pod-auth really creates.
+
+`wipe.ts` matches pod-auth's IndexedDB database names (key-value-kit naming) as of the vendored
+packages; the integration spec fails if a later version renames them.

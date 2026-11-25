@@ -133,6 +133,9 @@
       "path": "./libs/pod-mode"
     },
     {
+      "path": "./libs/pod-session"
+    },
+    {
       "path": "./libs/components/provider-setup-modal"
     },
     {
