@@ -99,13 +99,35 @@ use crate::services::worldlabs::commands::worldlabs_open_login_command::worldlab
 use crate::services::worldlabs::commands::worldlabs_receive_bearer_command::worldlabs_receive_bearer_command;
 use crate::services::worldlabs::state::worldlabs_bearer_bridge::WorldlabsBearerBridge;
 use crate::services::worldlabs::state::worldlabs_credential_manager::WorldlabsCredentialManager;
-use log::error;
+use log::{error, warn};
 
 use crate::core::state::artcraft_usage_tracker::artcraft_usage_tracker::ArtcraftUsageTracker;
 use tauri_plugin_dialog;
 use tauri_plugin_http;
 use tauri_plugin_log::Target;
 use tauri_plugin_log::TargetKind;
+
+/// Registers the app's URL schemes with the OS at run time, in debug builds on Linux and Windows
+/// only. There the OS starts a new instance with the URL as its only argument, and it learns the
+/// scheme from the installer (registry key, `.desktop` file); a `tauri dev` run is never
+/// installed, so without this the Solid sign-in callback has nowhere to go. The plugin documents
+/// `register_all` for exactly that case ("ensure the schemes are registered even if the user did
+/// not install the app properly"; Linux needs `xdg-mime` and `update-desktop-database`). macOS
+/// reads schemes from the bundle's Info.plist and the call is unsupported there. Release builds
+/// keep relying on the installer, so they never rewrite another install's registration.
+#[cfg(any(windows, target_os = "linux"))]
+fn register_dev_deep_links(app: &tauri::AppHandle) {
+  use tauri_plugin_deep_link::DeepLinkExt;
+  if !cfg!(debug_assertions) {
+    return;
+  }
+  if let Err(err) = app.deep_link().register_all() {
+    warn!("Could not register the app's URL schemes with the OS: {err}");
+  }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn register_dev_deep_links(_app: &tauri::AppHandle) {}
 
 /// Brings the existing window forward when a second launch (or a deep link) arrives.
 fn focus_main_window(app: &tauri::AppHandle) {
@@ -206,6 +228,7 @@ pub fn run() {
     .setup(move |app| {
       // The controller needs the app handle, and the main window below needs the controller's state.
       app.manage(new_controller(app.handle().clone(), pod_mode_shared.clone()));
+      register_dev_deep_links(app.handle());
       updates::show_previous_outcome(app.handle());
       // TODO(bt): This is broken on windows
       // log_environment_details();
