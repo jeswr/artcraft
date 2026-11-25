@@ -14,8 +14,8 @@ const world = vi.hoisted(() => {
     gate: null as Promise<void> | null,
   };
   function fakeMirror() {
-    const summary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false };
-    return { stateOf: vi.fn(), summary: vi.fn(() => summary), subscribe: vi.fn(() => () => undefined), retry: vi.fn(), retryAllFailed: vi.fn(), recheckExposure: vi.fn(), confirmPrivate: vi.fn(), forgetAccount: vi.fn(async () => undefined), removeGoneFromPod: vi.fn(async () => 3) };
+    const summary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false, import: { state: "idle", pausedBy: null, walked: 0, total: null, saved: 0, skipped: 0, failed: 0, pending: 0, startedAt: null, finishedAt: null } };
+    return { stateOf: vi.fn(), summary: vi.fn(() => summary), subscribe: vi.fn(() => () => undefined), retry: vi.fn(), retryAllFailed: vi.fn(), recheckExposure: vi.fn(), confirmPrivate: vi.fn(), forgetAccount: vi.fn(async () => undefined), removeGoneFromPod: vi.fn(async () => 3), estimateImport: vi.fn(async () => ({ total: 7 })), startImport: vi.fn(async () => true), pauseImport: vi.fn(async () => undefined), resumeImport: vi.fn(async () => true), cancelImport: vi.fn(async () => undefined) };
   }
 });
 vi.mock("~/signals", () => ({ authentication: { userInfo: world.username } }));
@@ -84,6 +84,19 @@ describe("the host that runs the mirror", () => {
     render(<PodMirrorHost session={pod.session}><Probe /></PodMirrorHost>);
     await waitFor(() => expect(screen.getByTestId("probe").textContent).toBe("mirror:summary"));
     expect(world.started.map((s) => [s.webId, s.username])).toEqual([[ALICE, "alice_hosted"]]);
+  });
+
+  it("hands the import controls to the settings, wired to this mirror", async () => {
+    const pod = fakePodSession(connected(ALICE));
+    let controls: ReturnType<typeof usePodMirrorView> = null;
+    const Grab = () => { controls = usePodMirrorView(); return null; };
+    render(<PodMirrorHost session={pod.session}><Grab /></PodMirrorHost>);
+    await waitFor(() => expect(controls?.import).toBeDefined());
+    expect(await controls!.import!.estimate()).toEqual({ total: 7 });
+    await controls!.import!.start(7);
+    expect(world.started[0].mirror.startImport).toHaveBeenCalledWith(7);
+    await controls!.import!.cancel();
+    expect(world.started[0].mirror.cancelImport).toHaveBeenCalledTimes(1);
   });
 
   it("stops the mirror and removes the view when the pod disconnects", async () => {

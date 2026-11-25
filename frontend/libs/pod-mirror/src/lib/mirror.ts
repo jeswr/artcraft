@@ -11,13 +11,14 @@ import {
 } from '@jeswr/pod-media-store';
 import { thumbnailMutation } from './assets-store.js';
 import { BytesError, blobHead, type FetchPublicBytes } from './bytes.js';
-import type { Baseline, ItemMark, JournalRecord, MirrorJournal, RecordPatch } from './journal.js';
+import type { Baseline, ImportRun, ItemMark, JournalRecord, MirrorJournal, RecordPatch } from './journal.js';
 import { type AssetInput, type AssetKind, classify, type Expected, parseDate, referenceTokens, thumbnailUrl, toAssetInput } from './mapping.js';
 import type {
   FailureReason,
   HostedClient,
   HostedMediaFile,
   HostedPrompt,
+  ImportStatus,
   ItemState,
   MirrorAccount,
   MirrorCounts,
@@ -107,6 +108,8 @@ interface Work {
   kind: WorkKind;
   due: number;
   seq: number;
+  /** 0 for live items, 1 for the import's: live work is always taken first. */
+  priority: number;
 }
 
 /** The store's own default binary limit; the mirror holds items to the same ceiling. */
@@ -172,6 +175,9 @@ export function podRefusal(error: MediaStoreError): PodRefusal | undefined {
   }
 }
 
+/** Passes over the listing after the first, to catch items that slid past it while it was read. */
+const CATCH_UP_PASSES = 3;
+
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** How a failure is handled: wait and retry for ever, stop at once, or stop after this many attempts. */
@@ -233,6 +239,10 @@ export class PodMirror {
   private bytesEverOk = false;
   /** Downloads that have failed in a row, with none ever having worked on this install. */
   private byteFailures = 0;
+  private importRun: ImportRun = { state: 'idle', walked: 0 };
+  private importWalker: Promise<void> | null = null;
+  private importTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly importWaiters: (() => void)[] = [];
 
   constructor(options: PodMirrorOptions) {
     this.o = {
@@ -260,6 +270,7 @@ export class PodMirror {
     this.baseline = state?.baseline;
     this.bytesEverOk = state?.bytesEverOk === true;
     this.byteFailures = 0;
+    this.importRun = state?.import ? { ...state.import } : { state: 'idle', walked: 0 };
     this.confirmed.clear();
     for (const url of state?.confirmedPrivate ?? []) this.confirmed.add(url);
     this.records.clear();
@@ -281,6 +292,8 @@ export class PodMirror {
     void this.verify(false, this.o.verifyOnStartAfterMs).catch(() => undefined);
     this.armInterval();
     this.armVerify();
+    // A run that was going when the app closed goes on; one that was not never starts by itself.
+    this.launchImport();
   }
 
   /** Stops copying and aborts what is in flight. The journal keeps every item's state. */
@@ -292,8 +305,9 @@ export class PodMirror {
     for (const { controller } of this.inflight.values()) controller.abort();
     for (const timer of [this.pumpTimer, this.prepareTimer, this.changedTimer, this.intervalTimer, this.verifyTimer]) if (timer) clearTimeout(timer);
     this.pumpTimer = this.prepareTimer = this.changedTimer = this.intervalTimer = this.verifyTimer = null;
+    this.wakeImport();
     await Promise.allSettled([...this.inflight.values()].map((entry) => entry.done));
-    await Promise.allSettled([this.preparing, this.reconciling, this.verifying]);
+    await Promise.allSettled([this.preparing, this.reconciling, this.verifying, this.importWalker]);
     this.store = null;
     this.exposureOk = false;
     this.changed();
@@ -392,6 +406,7 @@ export class PodMirror {
       paused,
       exposureTarget: paused === 'exposed' || paused === 'exposure-unknown' || paused === 'storage-unsafe' ? this.target : null,
       counts,
+      import: this.importStatus(),
       goneFromArtcraft: gone,
       mediaHostBlocked: this.mediaHostBlocked(),
     };
@@ -409,6 +424,7 @@ export class PodMirror {
     this.work.clear();
     this.hints.clear();
     this.deleted.clear();
+    this.importRun = { state: 'idle', walked: 0 };
     this.changed();
   }
 
@@ -426,7 +442,7 @@ export class PodMirror {
 
   // ---- intake -------------------------------------------------------------------------
 
-  private async admit(token: string, hint: HostedMediaFile | undefined, skipped?: SkipReason): Promise<boolean> {
+  private async admit(token: string, hint: HostedMediaFile | undefined, skipped?: SkipReason, source?: 'import'): Promise<boolean> {
     if (this.forgotten || typeof token !== 'string' || !TOKEN_PATTERN.test(token)) return false;
     const now = this.o.now();
     const fresh: JournalRecord = {
@@ -435,6 +451,7 @@ export class PodMirror {
       state: skipped ? 'skipped' : 'pending',
       attempts: 0,
       ...(skipped ? { lastError: skipped } : {}),
+      ...(source ? { source } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -572,12 +589,236 @@ export class PodMirror {
     }, this.o.verifyIntervalMs);
   }
 
+  // ---- copy my existing library -----------------------------------------------------------
+
+  /**
+   * How many items the hosted library holds, when two cheap calls can say (the first and the
+   * last page). Null when it cannot be known now.
+   */
+  async estimateImport(): Promise<{ total: number | null }> {
+    if (!this.canTalk()) return { total: null };
+    const signal = this.lifecycle?.signal;
+    const size = this.o.pageSize;
+    const first = await this.o.hosted.listUserMediaFiles(0, size, signal).catch(() => undefined);
+    if (!first?.ok) return { total: null };
+    const pages = first.value.totalPages;
+    if (pages === null) return { total: first.value.items.length < size ? first.value.items.length : null };
+    if (pages <= 1) return { total: first.value.items.length };
+    const last = await this.o.hosted.listUserMediaFiles(pages - 1, size, signal).catch(() => undefined);
+    return { total: last?.ok ? (pages - 1) * size + last.value.items.length : null };
+  }
+
+  /**
+   * Starts walking the whole hosted library, past the connect baseline, handing every item the
+   * journal does not know to the same queue. Items already copied or skipped are left alone.
+   * An earlier cancelled or finished run starts again from the first page.
+   */
+  async startImport(total: number | null = null): Promise<boolean> {
+    if (!this.running || this.forgotten) return false;
+    if (this.importRun.state === 'running') return true;
+    if (this.importRun.state === 'paused') return this.resumeImport();
+    this.importRun = { state: 'running', walked: 0, total, startedAt: this.o.now(), cursor: { page: 0 } };
+    await this.saveImport();
+    this.launchImport();
+    return true;
+  }
+
+  /** Stops reading the listing. Items already queued still finish; resume goes on from the cursor. */
+  async pauseImport(): Promise<void> {
+    if (this.importRun.state !== 'running') return;
+    this.importRun = { ...this.importRun, state: 'paused' };
+    delete this.importRun.pausedBy;
+    await this.saveImport();
+    this.wakeImport();
+  }
+
+  async resumeImport(): Promise<boolean> {
+    if (!this.running || this.importRun.state !== 'paused') return false;
+    this.importRun = { ...this.importRun, state: 'running' };
+    delete this.importRun.pausedBy;
+    await this.saveImport();
+    this.launchImport();
+    this.pump();
+    return true;
+  }
+
+  /**
+   * Stops for good. Copies already made stay; items of this run that have not started are
+   * dropped from the journal, so a later run picks them up again.
+   */
+  async cancelImport(): Promise<void> {
+    if (this.importRun.state !== 'running' && this.importRun.state !== 'paused') return;
+    this.importRun = { ...this.importRun, state: 'cancelled', finishedAt: this.o.now() };
+    delete this.importRun.pausedBy;
+    delete this.importRun.cursor;
+    await this.saveImport();
+    this.wakeImport();
+    for (const record of [...this.records.values()]) {
+      if (record.source === 'import' && record.state === 'pending' && !this.inflight.has(record.token)) await this.dropRecord(record.token);
+    }
+  }
+
   private mediaHostBlocked(): boolean {
     return !this.bytesEverOk && this.byteFailures >= BLOCKED_AFTER_FAILURES && this.pauseReason() === null;
   }
 
-  /** The pod is full: the item waits (it is not the item's fault) and it is tried again later. */
+  private importStatus(): ImportStatus {
+    const status: ImportStatus = {
+      state: this.importRun.state,
+      pausedBy: this.importRun.pausedBy ?? null,
+      walked: this.importRun.walked,
+      total: this.importRun.total ?? null,
+      saved: 0,
+      skipped: 0,
+      failed: 0,
+      pending: 0,
+      startedAt: this.importRun.startedAt ?? null,
+      finishedAt: this.importRun.finishedAt ?? null,
+    };
+    for (const record of this.records.values()) {
+      if (record.source !== 'import') continue;
+      if (record.state === 'saved') status.saved++;
+      else if (record.state === 'skipped') status.skipped++;
+      else if (record.state === 'failed' || record.state === 'remove-failed') status.failed++;
+      else status.pending++;
+    }
+    return status;
+  }
+
+  private async saveImport(): Promise<void> {
+    await this.o.journal.updateAccountState(this.o.account, { import: { ...this.importRun } }).catch(() => undefined);
+    this.changed();
+  }
+
+  private wakeImport(): void {
+    if (this.importTimer) clearTimeout(this.importTimer);
+    this.importTimer = null;
+    for (const wake of this.importWaiters.splice(0)) wake();
+  }
+
+  private launchImport(): void {
+    if (this.importWalker || this.importRun.state !== 'running' || !this.running) return;
+    this.importWalker = this.importLoop()
+      .catch(() => undefined)
+      .finally(() => {
+        this.importWalker = null;
+        this.changed();
+      });
+  }
+
+  /** Waits until the engine can take more and the queue is not already long. False: stop walking. */
+  private async importReady(): Promise<boolean> {
+    for (;;) {
+      if (!this.running || this.importRun.state !== 'running') return false;
+      if (this.pauseReason() === null && this.importBacklog() < this.o.pageSize) return true;
+      await new Promise<void>((resolve) => this.importWaiters.push(resolve));
+    }
+  }
+
+  /** Import items that are in flight or due now; ones waiting out a backoff do not hold the walk back. */
+  private importBacklog(): number {
+    const now = this.o.now();
+    let count = 0;
+    for (const record of this.records.values()) {
+      if (record.source !== 'import' || record.state !== 'pending') continue;
+      if (this.inflight.has(record.token) || (record.nextAttemptAt ?? 0) <= now) count++;
+    }
+    return count;
+  }
+
+  private importPending(): number {
+    let count = 0;
+    for (const record of this.records.values()) if (record.source === 'import' && record.state === 'pending') count++;
+    return count;
+  }
+
+  /** The run is done when the listing has been walked as often as it will be and nothing it brought in is still waiting. */
+  private async finishImportIfDone(): Promise<void> {
+    if (this.importRun.state !== 'running' || !this.importRun.walkDone || this.importPending() > 0) return;
+    this.importRun = { ...this.importRun, state: 'done', finishedAt: this.o.now() };
+    delete this.importRun.cursor;
+    await this.saveImport();
+  }
+
+  private async importLoop(): Promise<void> {
+    const { hosted, journal, account } = this.o;
+    const running = () => this.running && this.importRun.state === 'running';
+    if (this.importRun.walkDone) return this.finishImportIfDone();
+    // One page back: deletions made while the run was down move older items up a page.
+    let page = Math.max(0, (this.importRun.cursor?.page ?? 0) - 1);
+    let passes = this.importRun.passes ?? 0;
+    this.importRun.walked = Math.min(this.importRun.walked, page * this.o.pageSize);
+    let failures = 0;
+    let admitted = 0;
+    const retryLater = async (): Promise<void> => {
+      failures++;
+      const delay = backoffDelay(failures, this.o.baseDelayMs, this.o.maxDelayMs, this.o.random);
+      await new Promise<void>((resolve) => {
+        this.importTimer = setTimeout(resolve, delay);
+        this.importWaiters.push(resolve);
+      });
+    };
+    for (;;) {
+      if (!(await this.importReady())) return;
+      // Items newer than the connect baseline are the live walk's; they are never the import's.
+      const baseline = await this.ensureBaseline();
+      if (!baseline) {
+        await retryLater();
+        continue;
+      }
+      const listed = await hosted.listUserMediaFiles(page, this.o.pageSize, this.lifecycle?.signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
+      if (!running()) return;
+      if (!listed.ok) {
+        await retryLater();
+        continue;
+      }
+      failures = 0;
+      const { items, totalPages } = listed.value;
+      for (const file of items) {
+        if (!running()) return;
+        if (passes === 0) this.importRun.walked++;
+        if (this.records.has(file.token) || (await journal.get(account, file.token))) continue;
+        admitted++;
+        const created = parseDate(file.created_at)?.getTime();
+        const old = created === undefined || (baseline.kind === 'item' && created <= baseline.createdAt);
+        if (!old) await this.admit(file.token, file);
+        else if (created === undefined) await this.admit(file.token, undefined, 'bad-date', 'import');
+        else await this.admit(file.token, file, undefined, 'import');
+        // A cancel that came in during the admission leaves nothing of this run behind.
+        if (!running() && this.records.get(file.token)?.source === 'import' && !this.inflight.has(file.token)) await this.dropRecord(file.token);
+      }
+      page++;
+      const endOfPass = items.length === 0 || (totalPages !== null && page >= totalPages);
+      if (!endOfPass) {
+        this.importRun.cursor = { page };
+        await this.saveImport();
+        continue;
+      }
+      // Deletions while the walk went on can slide items past it: go over the listing again,
+      // and stop when a pass finds nothing new (at most `CATCH_UP_PASSES` more).
+      passes++;
+      if (passes > 1 && admitted === 0) passes = CATCH_UP_PASSES + 1;
+      if (passes <= CATCH_UP_PASSES) {
+        page = 0;
+        admitted = 0;
+        this.importRun = { ...this.importRun, cursor: { page: 0 }, passes };
+        await this.saveImport();
+        continue;
+      }
+      this.importRun = { ...this.importRun, walkDone: true, passes };
+      delete this.importRun.cursor;
+      await this.saveImport();
+      return this.finishImportIfDone();
+    }
+  }
+
+  /** The pod is full: the item waits (it is not the item's fault) and a running import pauses. */
   private async quotaHit(token: string, signal: AbortSignal): Promise<void> {
+    if (this.importRun.state === 'running') {
+      this.importRun = { ...this.importRun, state: 'paused', pausedBy: 'quota' };
+      await this.saveImport();
+      this.wakeImport();
+    }
     return this.failTask(token, 'copy', 'store', signal, 'transient');
   }
 
@@ -695,9 +936,10 @@ export class PodMirror {
   private schedule(record: JournalRecord, restart = false): void {
     this.work.delete(record.token);
     const due = restart && record.attempts < 3 ? 0 : record.nextAttemptAt ?? 0;
-    if (record.state === 'pending') this.work.set(record.token, { kind: 'copy', due, seq: this.seq++ });
-    else if (record.state === 'removing') this.work.set(record.token, { kind: 'remove', due, seq: this.seq++ });
-    else if (record.state === 'saved' && record.thumbnail === 'waiting') this.work.set(record.token, { kind: 'thumb', due: record.thumbnailNextAt ?? 0, seq: this.seq++ });
+    const priority = record.source === 'import' ? 1 : 0;
+    if (record.state === 'pending') this.work.set(record.token, { kind: 'copy', due, seq: this.seq++, priority });
+    else if (record.state === 'removing') this.work.set(record.token, { kind: 'remove', due, seq: this.seq++, priority: 0 });
+    else if (record.state === 'saved' && record.thumbnail === 'waiting') this.work.set(record.token, { kind: 'thumb', due: record.thumbnailNextAt ?? 0, seq: this.seq++, priority });
   }
 
   private pauseReason(): PauseReason | null {
@@ -720,7 +962,7 @@ export class PodMirror {
     }
     if (this.pauseReason() !== null) return;
     const now = this.o.now();
-    const waiting = [...this.work.entries()].filter(([token]) => !this.inflight.has(token)).sort((a, b) => a[1].due - b[1].due || a[1].seq - b[1].seq);
+    const waiting = [...this.work.entries()].filter(([token]) => !this.inflight.has(token)).sort((a, b) => a[1].priority - b[1].priority || a[1].due - b[1].due || a[1].seq - b[1].seq);
     let earliest = Number.POSITIVE_INFINITY;
     for (const [token, work] of waiting) {
       if (work.due > now) {
@@ -754,6 +996,7 @@ export class PodMirror {
           } else if (!this.work.has(token)) this.schedule(record);
         }
         this.pump();
+        void this.finishImportIfDone().catch(() => undefined);
       }
     })();
     this.inflight.set(token, { controller, done });
@@ -1170,6 +1413,7 @@ export class PodMirror {
 
   private changed(): void {
     this.version++;
+    for (const wake of this.importWaiters.splice(0)) wake();
     for (const listener of [...this.listeners]) {
       try {
         listener();

@@ -137,6 +137,32 @@ describe('the mirror against the real store, model and a memory pod', () => {
     expect(pod).not.toContain('alice_hosted');
   });
 
+  it('copies an existing library to the pod, once, and a second run changes nothing', async () => {
+    const h = await harness();
+    const files = [1, 2, 3, 4, 5].map((n) => hostedFile(n, { maybe_title: `Old ${n}` }));
+    for (const file of files) h.hosted.files.set(file.token, file);
+    h.hosted.listing.push(...[...files].reverse());
+    for (const [url, body] of fakeBytes(h.hosted).bodies) h.bytes.bodies.set(url, body);
+
+    await h.mirror.start();
+    await settle(h.mirror);
+    const before = await h.library()?.list();
+    expect(before?.ok && before.value.items).toHaveLength(0); // connecting copied nothing
+    await h.mirror.startImport();
+    for (let i = 0; i < 20; i++) await settle(h.mirror);
+    expect(h.mirror.summary().import).toMatchObject({ state: 'done', saved: 5, failed: 0 });
+
+    const listed = await h.library()!.list();
+    expect(listed.ok && listed.value.items).toHaveLength(5);
+    const everything = await everythingOnThePod(h.storage);
+    expect(everything).not.toContain(HOSTED_TOKEN_PREFIX);
+
+    await h.mirror.startImport();
+    for (let i = 0; i < 20; i++) await settle(h.mirror);
+    const again = await h.library()!.list();
+    expect(again.ok && again.value.items).toHaveLength(5);
+  });
+
   it('stores a PLY splat as a 3D asset that the model reads back', async () => {
     const h = await harness();
     const file = hostedFile(5, { media_type: 'ply', media_class: 'splat', media_links: { cdn_url: 'https://cdn.example/files/5.ply', thumbnail_template: '' } });

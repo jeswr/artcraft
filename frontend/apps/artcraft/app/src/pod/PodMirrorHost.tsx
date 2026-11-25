@@ -61,6 +61,13 @@ export function PodMirrorHost({ session, children }: { session: PodSession; chil
         recheckExposure: () => mirror.recheckExposure(),
         removeGoneFromPod: () => mirror.removeGoneFromPod(),
         confirmPrivate: () => mirror.confirmPrivate(),
+        import: {
+          estimate: () => mirror.estimateImport(),
+          start: (total) => mirror.startImport(total),
+          pause: () => mirror.pauseImport(),
+          resume: () => mirror.resumeImport(),
+          cancel: () => mirror.cancelImport(),
+        },
         forgetAccount,
       };
     }
@@ -79,6 +86,7 @@ const UNAVAILABLE_SUMMARY = {
   counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 },
   goneFromArtcraft: 0,
   mediaHostBlocked: false,
+  import: { state: "idle", pausedBy: null, walked: 0, total: null, saved: 0, skipped: 0, failed: 0, pending: 0, startedAt: null, finishedAt: null },
 } as const;
 
 /** What the person sees when the local record could not be opened: no mirror, and a line saying so. */

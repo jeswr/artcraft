@@ -1,5 +1,5 @@
 import type { DeleteJournal, DeleteJournalEntry } from '@jeswr/pod-media-store';
-import type { FailureReason, MirrorAccount, SkipReason } from './types.js';
+import type { FailureReason, ImportState, MirrorAccount, SkipReason } from './types.js';
 
 export type RecordState = 'pending' | 'saved' | 'failed' | 'skipped' | 'removing' | 'remove-failed';
 
@@ -17,6 +17,8 @@ export interface JournalRecord {
   lastError?: FailureReason | SkipReason;
   /** Earliest time (ms) the next automatic attempt may run. */
   nextAttemptAt?: number;
+  /** Set when the item came from "copy my existing library", so that run can count and cancel its own. */
+  source?: 'import';
   /** The hosted server's creation time of the item (ms), when it was known at admission. */
   hostedCreatedAt?: number;
   /** The same failure kind this many attempts in a row. */
@@ -49,6 +51,22 @@ export interface ItemMark {
  */
 export type Baseline = { kind: 'empty' } | ({ kind: 'item' } & ItemMark);
 
+/** The durable record of one "copy my existing library" run. */
+export interface ImportRun {
+  state: ImportState;
+  /** The next listing page to read. */
+  cursor?: { page: number };
+  walked: number;
+  /** True once the listing has been walked as often as it will be; what is left is copying. */
+  walkDone?: boolean;
+  /** How many full passes over the listing have finished (the first plus catch-ups). */
+  passes?: number;
+  total?: number | null;
+  startedAt?: number;
+  finishedAt?: number;
+  pausedBy?: 'quota';
+}
+
 /** What the walk and the verification pass remember per (WebID, hosted user). */
 export interface AccountState {
   baseline?: Baseline;
@@ -60,6 +78,8 @@ export interface AccountState {
   verifiedAt?: number;
   /** Library containers the person confirmed are private, for servers that cannot say. */
   confirmedPrivate?: string[];
+  /** The last "copy my existing library" run; only a `running` one resumes by itself. */
+  import?: ImportRun;
 }
 export type AccountStatePatch = Partial<Omit<AccountState, 'baseline'>>;
 

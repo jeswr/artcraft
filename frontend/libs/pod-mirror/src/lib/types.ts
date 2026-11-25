@@ -136,10 +136,30 @@ export interface MirrorCounts {
   removing: number;
 }
 
+export type ImportState = 'idle' | 'running' | 'paused' | 'cancelled' | 'done';
+
+/** Where "copy my existing library" stands. Counts are of the items this run brought in. */
+export interface ImportStatus {
+  state: ImportState;
+  /** Set while the run is paused by the pod rather than by the person: its storage is full. */
+  pausedBy: 'quota' | null;
+  /** Hosted items the walk has gone past, whether or not they were already copied. */
+  walked: number;
+  /** The library's size when it was known cheaply at the start, else null. */
+  total: number | null;
+  saved: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
 export interface MirrorSummary extends MirrorStatus {
   /** Changes whenever anything visible changes. */
   version: number;
   counts: MirrorCounts;
+  import: ImportStatus;
   /** Saved items ArtCraft no longer lists. Their pod copies stay until the person asks to remove them. */
   goneFromArtcraft: number;
   /** Every download from ArtCraft's media host has failed since this install began, while the pod works. */
