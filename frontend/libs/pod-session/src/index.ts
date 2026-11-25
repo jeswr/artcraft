@@ -7,3 +7,4 @@ export * from './lib/wipe.js';
 export * from './lib/pod-session.js';
 export * from './lib/default-auth.js';
 export * from './lib/react.js';
+export * from './lib/storage-origins.js';

@@ -1,4 +1,5 @@
 import {
+  addStorageOrigin,
   consumeFreshConnect,
   credentialsCleared,
   enterPodMode,
@@ -14,6 +15,7 @@ import { checkConfig, type ConfigCheck, type PodSessionConfig } from './config.j
 import { parseIssuerInput } from './issuer.js';
 import { runSelfTest, type SelfTestResult } from './self-test.js';
 import type { PodSessionErrorKind, PodSessionState } from './state.js';
+import { createOriginGate, gateFetch, type OriginAdmission } from './storage-origins.js';
 import type { WipeOutcome } from './wipe.js';
 
 /** The part of `@jeswr/pod-auth`'s `PodAuth` this machine uses. */
@@ -51,6 +53,11 @@ export interface PodModePort {
   leave(): Promise<void>;
   /** Tells the shell a wipe succeeded in a window that is not in pod mode. */
   credentialsCleared(): Promise<void>;
+  /**
+   * How a request to an origin the policy does not list asks the shell to admit it. Absent where
+   * there is no shell (a plain browser), in which case `getFetch()` is pod-auth's fetch as is.
+   */
+  admission?: OriginAdmission;
 }
 
 /**
@@ -105,7 +112,11 @@ export interface PodSession {
    * reported and the window stays in pod mode.
    */
   leave(): Promise<void>;
-  /** The credentialed fetch, or null unless connected. */
+  /**
+   * The credentialed fetch, or null unless connected. In the desktop app a request to an origin
+   * the window's policy does not list first asks the app to admit it (native dialog); a
+   * refusal rejects the request with `StorageOriginRefused`.
+   */
   getFetch(): typeof fetch | null;
   /** Whether this window is a pod window, as the app recorded it. */
   inPodMode(): boolean;
@@ -127,6 +138,8 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   let abort: AbortController | null = null;
   let started: Promise<PodSessionState> | null = null;
   let leaving: Promise<void> | null = null;
+  const originGate = podMode.admission ? createOriginGate(podMode.admission) : null;
+  let gated: { source: typeof fetch; fetch: typeof fetch } | null = null;
 
   const set = (next: PodSessionState): void => {
     state = next;
@@ -413,7 +426,12 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       return leaving;
     },
 
-    getFetch: () => (state.kind === 'connected' && auth ? auth.fetch : null),
+    getFetch() {
+      if (state.kind !== 'connected' || !auth) return null;
+      if (!originGate) return auth.fetch;
+      if (gated?.source !== auth.fetch) gated = { source: auth.fetch, fetch: gateFetch(auth.fetch, originGate) };
+      return gated.fetch;
+    },
     inPodMode: () => podMode.isPodMode(),
     configCheck: () => checkConfig(deps.config),
   };
@@ -446,6 +464,17 @@ export function realPodModePort(requests?: PodModeRequests): PodModePort {
     requestReload: () => reloadPodWindow(deps),
     leave: () => leavePodMode(async () => undefined, deps),
     credentialsCleared: () => credentialsCleared(deps),
+    ...(requests
+      ? {
+          admission: {
+            known: () => {
+              const host = readHostPodMode();
+              return host === null ? [] : [...(host.issuer === undefined ? [] : [host.issuer]), ...host.storageOrigins];
+            },
+            request: (origin: string) => addStorageOrigin(origin, deps),
+          },
+        }
+      : {}),
   };
 }
 

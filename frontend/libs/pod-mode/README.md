@@ -29,6 +29,27 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
   cannot be raised that way).
   No credential ever reaches Rust: the commands take origins only, and only the main window may
   call them. Commands are serialised: a second one while one is in progress answers `busy`.
+- **Storage origins (a pod that lives on another origin than its sign-in server).** The policy
+  starts with the issuer only. `@storyteller/pod-session` wraps the session's authenticated
+  `getFetch()` so that, before the first request to an origin the window's policy does not list
+  (the WebID document's origin, the storage root discovered from it, a Type Index elsewhere), it
+  calls `addStorageOrigin(origin)` with that bare origin, nothing else. The app then validates it
+  (https only, plus the debug-build loopback allowance that `enter` has; no path, wildcard,
+  userinfo, explicit default port or list separator; the issuer's own origin and an origin already
+  saved need no dialog; at most `MAX_STORAGE_ORIGINS` = 8 are saved) and shows the same kind of
+  native dialog as `enter`, which names the origin and says it comes from the person's profile.
+  Only a considered "Allow" persists it and rebuilds the window; the rebuilt window restores the
+  session with the origin already in its header policy, and so does every later launch, because
+  the record is persisted. **A hostile profile cannot put an origin into `connect-src`
+  silently:** the profile can only cause a dialog, never a policy change. Limits on that
+  annoyance: a refusal, or any error from the app (cap reached, cool-down, invalid origin), is
+  remembered for the life of the window and later unadmitted origins fail without another
+  dialog; a window opens at most four such dialogs; a too-fast answer counts as a refusal and
+  the app turns the next ask away for 5 s. If the person refuses, the request rejects with
+  `StorageOriginRefused` (fixed message, no URL) and the mirror shows its usual offline or
+  failed state. What is left: a person who clicks Allow on a hostile origin, and requests that
+  a redirect sends to an unadmitted origin (the policy blocks those; the gate only sees the
+  first URL). Entering pod mode again starts from an empty list.
 - **One CSP header, read live.** In pod mode the app sets a single `Content-Security-Policy`
   response header on every response of the main window, **replacing** the static one (macOS
   keeps one header per name, so a second header is not reliable). The pod policy therefore

@@ -55,6 +55,10 @@ await session.leave();           // from any state: revoke, wipe locally, ask th
 - A start-up self-test checks a secure context, that Web Locks exclude and release, IndexedDB,
   and that a non-extractable key persists, reopens on a fresh connection and still signs. A
   failure yields `unsupported(reason)`; leaving still works.
+- `getFetch()` is pod-auth's fetch wrapped by an origin gate (`storage-origins.ts`): the first
+  request to an origin the window's policy does not list asks the app to admit it (see the
+  pod-mode README, "Storage origins"). Only the origin is sent; a refusal rejects with
+  `StorageOriginRefused`. Without a shell (a plain browser) the fetch is returned unwrapped.
 - All pod HTTP uses `getFetch()`. Never route pod or identity-provider traffic through the
   Tauri HTTP plugin or `FetchProxy`: that would move tokens and DPoP proofs into Rust.
 
