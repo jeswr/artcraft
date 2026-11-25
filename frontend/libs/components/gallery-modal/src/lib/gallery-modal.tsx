@@ -99,6 +99,8 @@ import {
   usePodGalleryAccess,
   type GallerySource,
 } from "@storyteller/pod-gallery";
+import { PodPanelBoundary } from "./pod/PodPanelBoundary";
+import { PodPanelFrame, PodSkeleton } from "./pod/PodPanelFrame";
 
 // The "My pod" source: a separate chunk, fetched only when a connected pod's gallery shows it.
 const PodGalleryPanel = React.lazy(() => import("./pod/PodGalleryPanel"));
@@ -138,7 +140,7 @@ async function fetchCurrentUsername(): Promise<string | null> {
 // ─── Skeleton loader component ────────────────────────────────────────────────
 const SKELETON_COUNT = 15;
 
-export const SkeletonGrid = ({ columns }: { columns: number }) => {
+const SkeletonGrid = ({ columns }: { columns: number }) => {
   const gapClass = columns <= 4 ? "gap-2" : columns <= 7 ? "gap-2" : "gap-0.5";
   return (
     <div className="space-y-6 p-4 animate-in fade-in duration-200">
@@ -635,11 +637,16 @@ export const GalleryModal = React.memo(
       // A disconnected pod takes the choice with it: reconnecting starts on the ArtCraft library.
       if (!podAccess) setSource("hosted");
     }, [podAccess]);
-    const showPod =
-      mode === "view" &&
-      podAccess !== null &&
-      source === "pod" &&
-      galleryModalVisibleViewMode.value;
+    // Not tied to the gallery being visible: while the modal fades out the pod view stays, so the
+    // ArtCraft library never flashes through. The modal unmounts it (releasing every picture)
+    // once it has closed.
+    const showPod = mode === "view" && podAccess !== null && source === "pod";
+    // Focus returns to the source switch when the person changed source with it.
+    const [switchFocus, setSwitchFocus] = useState(false);
+    const chooseSource = useCallback((next: GallerySource) => {
+      setSwitchFocus(true);
+      setSource(next);
+    }, []);
     const minColumns = 3;
     const maxColumns = 12;
     // Default gridColumns to 5 on desktop; narrow screens are locked to 2 columns
@@ -2620,29 +2627,43 @@ export const GalleryModal = React.memo(
             </Modal.DragHandle>
           )}
           {showPod && podAccess ? (
-            <Suspense fallback={<SkeletonGrid columns={gridColumns} />}>
-              <PodGalleryPanel
-                access={podAccess}
-                sourceSwitch={<PodSourceSwitch source={source} onChange={setSource} />}
-                onClose={() => {
-                  clearBulkSelection();
-                  galleryModalVisibleViewMode.value = false;
-                }}
-                sliderValue={sliderValue}
-                onSliderChange={setSliderValue}
-                minColumns={minColumns}
-                maxColumns={maxColumns}
-                gridColumns={gridColumns}
-                imageFit={imageFit}
-              />
-            </Suspense>
+            (() => {
+              const closePod = () => {
+                clearBulkSelection();
+                galleryModalVisibleViewMode.value = false;
+              };
+              const podSwitch = <PodSourceSwitch source={source} onChange={chooseSource} focusOnMount={switchFocus} />;
+              const frame = (body: React.ReactNode) => (
+                <PodPanelFrame sourceSwitch={podSwitch} onClose={closePod}>
+                  {body}
+                </PodPanelFrame>
+              );
+              return (
+                <PodPanelBoundary frame={frame} onBack={() => setSource("hosted")}>
+                  <Suspense fallback={frame(<PodSkeleton columns={gridColumns} />)}>
+                    <PodGalleryPanel
+                      key={podAccess.sessionKey}
+                      access={podAccess}
+                      sourceSwitch={podSwitch}
+                      onClose={closePod}
+                      sliderValue={sliderValue}
+                      onSliderChange={setSliderValue}
+                      minColumns={minColumns}
+                      maxColumns={maxColumns}
+                      gridColumns={gridColumns}
+                      imageFit={imageFit}
+                    />
+                  </Suspense>
+                </PodPanelBoundary>
+              );
+            })()
           ) : (
           <div className="relative flex h-full flex-col">
             <div className="border-b border-ui-panel-border p-4 py-3 bg-ui-panel">
               <div className="flex flex-wrap justify-between items-center gap-y-2">
                 <div className="flex items-center gap-3 flex-wrap gap-y-1">
                   {mode === "view" && (
-                    <PodSourceSwitch source={source} onChange={setSource} />
+                    <PodSourceSwitch source={source} onChange={chooseSource} focusOnMount={switchFocus} />
                   )}
                   {(mode === "view" || mode === "select") && (
                     <div className="flex items-center gap-0.5 rounded-[3px] bg-ui-controls/40 p-0.5 relative z-[51]">

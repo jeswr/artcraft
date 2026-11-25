@@ -8,6 +8,8 @@ export const VIEW_ONLY_NOTE =
 /** Short, fixed sentences per closed error code. No pod text, URL or server message is ever shown. */
 export function describeMediaError(code: MediaErrorCode): string {
   switch (code) {
+    case "over-budget":
+      return "Waiting for room to load";
     case "too-large":
       return "Too large to preview";
     case "unsupported-type":
@@ -26,12 +28,19 @@ export function describeMediaError(code: MediaErrorCode): string {
   }
 }
 
+/** Failures a second attempt can cure: the tile offers "Try again" for these. */
+export function isRetryable(code: MediaErrorCode | undefined): boolean {
+  return code === "over-budget" || code === "offline" || code === "failed";
+}
+
 export function describeListError(kind: PodAssetsErrorKind): { title: string; detail: string } {
   switch (kind) {
     case "offline":
       return { title: "You're offline", detail: "Your pod can't be reached. This list reloads when you're back online." };
+    case "sign-in":
+      return { title: "Sign in to your pod again", detail: "Your pod session has ended. Open Settings, under Solid pod, to sign in again; this list reloads when you press Retry." };
     case "forbidden":
-      return { title: "Your pod refused access", detail: "Sign in again from Settings, under Solid pod." };
+      return { title: "Your pod refused access", detail: "This account is not allowed to read the library. Settings, under Solid pod, shows which account is connected." };
     case "not-connected":
       return { title: "No pod is connected", detail: "Connect a pod from Settings, under Solid pod." };
     default:
@@ -44,6 +53,15 @@ export const EMPTY_DETAIL =
   "ArtCraft saves a copy of new generations, uploads and edits to your pod while it is connected. Settings, under Solid pod, shows what has been copied so far.";
 
 const UNDATED = "Undated";
+
+/** A sortable local-day key ("2026-06-01"), or "" for an item with no usable date. */
+export function dayKey(createdAt: string | null): string {
+  if (!createdAt) return "";
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
 
 /** The day heading for a group of tiles, in the same style as the ArtCraft library's. */
 export function dayHeading(createdAt: string | null, now: Date = new Date()): string {

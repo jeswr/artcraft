@@ -23,6 +23,8 @@
     "**/*.test.js",
     "**/*.spec.jsx",
     "**/*.test.jsx",
+    "src/lib/pod/podTestKit.tsx",
+    "src/lib/pod/podMount.tsx",
     "vite.config.ts",
     "vite.config.mts",
     "vitest.config.ts",
