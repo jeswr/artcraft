@@ -461,9 +461,11 @@ export class PodMirror {
   }
 
   /**
-   * Checks journalled `saved` items against the hosted library, in chunks: on start (if the last
-   * pass was over an hour ago), then at most once a day (unless `force`). An item the hosted side definitively no longer has gets its pod copy
-   * removed. An error, an offline moment or an item that is someone else's never removes anything.
+   * Two checks, each recorded on its own (`verifiedAt`, `podVerifiedAt`) and each run on start when
+   * its last pass was over an hour ago (the pod one once the store is open), then at most once a
+   * day (unless `force`): saved items the hosted side no longer lists are marked (their pod copy
+   * stays until the person asks for it to go), and saved items whose pod copy the pod says is gone
+   * are queued to be copied again. Neither ever deletes anything on its own.
    */
   verify(force = false, minGapMs = this.o.verifyIntervalMs): Promise<VerifyResult> {
     if (!this.running) return Promise.resolve({ checked: 0, flagged: 0, requeued: 0, stoppedBy: 'not-running' });

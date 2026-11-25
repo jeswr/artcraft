@@ -2516,11 +2516,19 @@ describe('bytes in flight', () => {
     expect(t.mirror.summary().counts.saved).toBe(2);
   });
 
-  it('runs one item larger than the whole budget, alone', async () => {
-    const t = setup([hostedFile(1)], { maxBytesInFlight: 8 });
+  it('runs an item larger than the whole budget, one at a time, and still finishes both', async () => {
+    const t = setup([hostedFile(1), hostedFile(2)], { maxBytesInFlight: 8, concurrency: 2 });
+    let release: () => void = () => undefined;
+    t.store.gate = new Promise<void>((resolve) => (release = resolve));
     await t.mirror.start();
     await t.mirror.enqueue(token(1));
+    await t.mirror.enqueue(token(2));
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
+    expect(t.store.puts).toHaveLength(1);
+    t.store.gate = null;
+    release();
     await settle(t.mirror);
-    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+    expect(t.store.puts).toHaveLength(2);
+    expect(t.mirror.summary().counts.saved).toBe(2);
   });
 });
