@@ -19,13 +19,18 @@ export function PodSourceSwitch({
 }: {
   source: GallerySource;
   onChange: (next: GallerySource) => void;
-  /** The switch was just re-created by choosing a source: put focus back on the chosen button. */
+  /** The switch was re-created by the person choosing a source: put focus back on the chosen button if it was lost. */
   focusOnMount?: boolean;
 }) {
   const access = usePodGalleryAccess();
   const group = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (focusOnMount) group.current?.querySelector<HTMLButtonElement>('button[aria-pressed="true"]')?.focus();
+    if (!focusOnMount) return;
+    // Only when focus was lost with the switch that was replaced (it is on the page body then): focus
+    // the person has since moved somewhere else is left alone.
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    group.current?.querySelector<HTMLButtonElement>('button[aria-pressed="true"]')?.focus();
   }, [focusOnMount]);
   if (!access) return null;
   return (

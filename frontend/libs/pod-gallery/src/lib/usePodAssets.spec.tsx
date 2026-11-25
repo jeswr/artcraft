@@ -128,6 +128,24 @@ describe('listing the pod library', () => {
     await waitFor(() => expect(source.list).toHaveBeenCalledTimes(2));
   });
 
+  it('keeps why a "load more" failed: an ended session is not shown as a plain failure', async () => {
+    const source = fakeSource([page([asset(2)], 'c2'), { ok: false, error: 'sign-in' }]);
+    const view = harness(accessFor(fakeLibrary(source)));
+    await waitFor(() => expect(view.current.state.status).toBe('ready'));
+    act(() => view.current.loadMore());
+    await waitFor(() => expect(view.current.state.status === 'ready' && view.current.state.loadMoreError).toBe('sign-in'));
+  });
+
+  it('survives a source that throws while paging', async () => {
+    const source = fakeSource([page([asset(2)], 'c2')]);
+    const view = harness(accessFor(fakeLibrary(source)));
+    await waitFor(() => expect(view.current.state.status).toBe('ready'));
+    source.list.mockRejectedValueOnce(new Error('boom'));
+    act(() => view.current.loadMore());
+    await waitFor(() => expect(view.current.state.status === 'ready' && view.current.state.loadMoreFailed).toBe(true));
+    expect(view.current.state.status === 'ready' && view.current.state.loadingMore).toBe(false);
+  });
+
   it('reports a session that has ended as its own state', async () => {
     const source = fakeSource([{ ok: false, error: 'sign-in' }]);
     const view = harness(accessFor(fakeLibrary(source)));

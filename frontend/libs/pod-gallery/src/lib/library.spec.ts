@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mintPodAssetRef, podAssetKey } from './ref.js';
 import { createPodLibraryController, PodLibraryOpenError } from './library.js';
 import { fakeLibrary } from './testing.js';
 
@@ -87,5 +88,17 @@ describe('the pod library controller', () => {
     expect(JSON.stringify(error)).not.toContain('secret');
     expect((error as Error).message).toBe('failed');
     await expect(controller.open()).resolves.toBeDefined();
+  });
+
+  it('forgets the keys it handed out for the previous account on teardown', async () => {
+    const { controller } = setup();
+    const ref = mintPodAssetRef('https://alice.example/lib/2026/06/d1');
+    const other = mintPodAssetRef('https://alice.example/lib/2026/06/d2');
+    expect(podAssetKey(ref)).toBe('pod-1');
+    expect(podAssetKey(other)).toBe('pod-2');
+    await controller.open();
+    controller.dispose();
+    // The map no longer holds the old account's URLs: counting starts again.
+    expect(podAssetKey(other)).toBe('pod-1');
   });
 });

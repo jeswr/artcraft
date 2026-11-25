@@ -46,3 +46,11 @@ export function podAssetKey(ref: PodAssetRef): string {
   }
   return key;
 }
+
+/**
+ * Forget the keys handed out so far. Called when a library is torn down (sign-out, account
+ * change): the map holds the previous account's description URLs and must not outlive it.
+ */
+export function clearPodAssetKeys(): void {
+  keys.clear();
+}

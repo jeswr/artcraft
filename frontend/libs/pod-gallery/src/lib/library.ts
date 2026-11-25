@@ -1,4 +1,5 @@
 import type { MediaLoader } from '@jeswr/pod-media-loader';
+import { clearPodAssetKeys } from './ref.js';
 import type { PodLibrarySource } from './types.js';
 
 /** What the gallery panel needs once a pod is open: the read-only source and two media loaders. */
@@ -11,6 +12,12 @@ export interface PodLibrary {
   readonly tileLoader: MediaLoader;
   /** Originals, for the one item the viewer shows: a larger per-file limit, very few at once. */
   readonly viewerLoader: MediaLoader;
+  /**
+   * True while the pod session is known to have ended or been refused (a 401, an expired or changed
+   * session): a failed read is then "sign in again", not "offline" or "refused". Tiles and the
+   * viewer ask it when a loader reports a failure.
+   */
+  sessionEnded?(): boolean;
   /** Forget the container listings the source cached, so the next page lists the pod again. */
   invalidateListing?(): void;
   /** Anything else to release with the library (both loaders are purged by the controller). */
@@ -21,7 +28,7 @@ export interface PodLibrary {
  * The most tiles the grid mounts at once. The app sizes the tile loader from it (`maxEntries` is a
  * multiple of it) and the grid never mounts more, whatever the window size.
  */
-export const MAX_MOUNTED_TILES = 160;
+export const MAX_MOUNTED_TILES = 320;
 
 /** `sign-in`: the session has ended or was refused. `forbidden`: the pod refused this account. */
 export type PodLibraryOpenErrorKind = 'not-connected' | 'offline' | 'sign-in' | 'forbidden' | 'failed';
@@ -75,6 +82,7 @@ export function createPodLibraryController(deps: PodLibraryDeps): PodLibraryCont
     if (!old) return;
     old.abort.abort();
     if (old.library) release(old.library);
+    clearPodAssetKeys();
   };
 
   return {

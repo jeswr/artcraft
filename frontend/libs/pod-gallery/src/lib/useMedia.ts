@@ -33,8 +33,12 @@ export function usePodOriginal(loader: MediaLoader, address: PodMediaAddress | n
   const [result, setResult] = useState<{ status: PodOriginalStatus; url?: string; contentType?: string; error?: MediaError }>({ status: 'loading' });
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
 
+  // Keyed on the URL, not the address object: a refreshed description mints a new object for the
+  // same file, and that must not abort and restart the read.
+  const url = address ? unwrapPodMediaAddress(address) : null;
+
   useEffect(() => {
-    if (!address) return;
+    if (url === null) return;
     const abort = new AbortController();
     let release: (() => void) | undefined;
     setResult({ status: 'loading' });
@@ -43,7 +47,7 @@ export function usePodOriginal(loader: MediaLoader, address: PodMediaAddress | n
       release = undefined;
       setResult({ status: 'error', error: { code: 'purged', message: 'purged' } });
     });
-    void loader.acquire(unwrapPodMediaAddress(address), { signal: abort.signal }).then((acquired) => {
+    void loader.acquire(url, { signal: abort.signal }).then((acquired) => {
       if (abort.signal.aborted) {
         if (acquired.ok) acquired.value.release();
         return;
@@ -58,7 +62,7 @@ export function usePodOriginal(loader: MediaLoader, address: PodMediaAddress | n
       release?.();
       setResult({ status: 'loading' });
     };
-  }, [loader, address, attempt]);
+  }, [loader, url, attempt]);
 
-  return { status: address ? result.status : 'error', url: result.url, contentType: result.contentType, error: result.error, retry };
+  return { status: url !== null ? result.status : 'error', url: result.url, contentType: result.contentType, error: result.error, retry };
 }

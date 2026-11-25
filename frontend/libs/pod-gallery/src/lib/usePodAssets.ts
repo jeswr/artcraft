@@ -17,6 +17,8 @@ export type PodAssetsState =
       loadingMore: boolean;
       /** The last "load more" failed; the items already shown stay. */
       loadMoreFailed: boolean;
+      /** Why it failed: `sign-in` when the session has ended, so it is never shown as "offline". */
+      loadMoreError: PodAssetsErrorKind | null;
       /** Descriptions in the library that cannot be shown (other apps' documents, unreadable ones). */
       unreadable: number;
     };
@@ -78,6 +80,7 @@ export function usePodAssets(access: PodGalleryAccess): PodAssets {
           hasMore: first.value.next !== null,
           loadingMore: false,
           loadMoreFailed: false,
+          loadMoreError: null,
           unreadable: first.value.unreadable,
         });
       } catch (error) {
@@ -98,7 +101,7 @@ export function usePodAssets(access: PodGalleryAccess): PodAssets {
     if (busyRef.current || cursor === null || !abort || !library || abort.signal.aborted) return;
     if (!options?.force && Date.now() < notBeforeRef.current) return;
     busyRef.current = true;
-    setState((current) => (current.status === 'ready' ? { ...current, loadingMore: true, loadMoreFailed: false } : current));
+    setState((current) => (current.status === 'ready' ? { ...current, loadingMore: true, loadMoreFailed: false, loadMoreError: null } : current));
     void (async () => {
       try {
         const page = await library.source.list({ cursor, signal: abort.signal });
@@ -106,7 +109,8 @@ export function usePodAssets(access: PodGalleryAccess): PodAssets {
         if (!page.ok) {
           failuresRef.current += 1;
           notBeforeRef.current = Date.now() + Math.min(RETRY_BACKOFF_CAP_MS, RETRY_BACKOFF_MS * 2 ** (failuresRef.current - 1));
-          setState((current) => (current.status === 'ready' ? { ...current, loadingMore: false, loadMoreFailed: true } : current));
+          const error = page.error;
+          setState((current) => (current.status === 'ready' ? { ...current, loadingMore: false, loadMoreFailed: true, loadMoreError: error } : current));
           return;
         }
         failuresRef.current = 0;
@@ -122,6 +126,11 @@ export function usePodAssets(access: PodGalleryAccess): PodAssets {
               }
             : current,
         );
+      } catch {
+        if (abort.signal.aborted) return;
+        failuresRef.current += 1;
+        notBeforeRef.current = Date.now() + Math.min(RETRY_BACKOFF_CAP_MS, RETRY_BACKOFF_MS * 2 ** (failuresRef.current - 1));
+        setState((current) => (current.status === 'ready' ? { ...current, loadingMore: false, loadMoreFailed: true, loadMoreError: 'failed' } : current));
       } finally {
         if (abortRef.current === abort) busyRef.current = false;
       }

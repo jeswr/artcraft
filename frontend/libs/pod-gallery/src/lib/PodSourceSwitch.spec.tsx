@@ -44,4 +44,17 @@ describe('the gallery source switch', () => {
     );
     expect(document.activeElement).toBe(document.body);
   });
+
+  it('leaves focus alone when the person has moved it elsewhere since', () => {
+    const other = document.createElement('button');
+    document.body.append(other);
+    other.focus();
+    render(
+      <PodGalleryProvider access={{ sessionKey: 'k', open: async () => Promise.reject(new Error('unused')) }}>
+        <PodSourceSwitch source="pod" onChange={() => undefined} focusOnMount />
+      </PodGalleryProvider>,
+    );
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  });
 });
