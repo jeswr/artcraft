@@ -136,6 +136,9 @@
       "path": "./libs/pod-session"
     },
     {
+      "path": "./libs/pod-mirror"
+    },
+    {
       "path": "./libs/components/provider-setup-modal"
     },
     {
