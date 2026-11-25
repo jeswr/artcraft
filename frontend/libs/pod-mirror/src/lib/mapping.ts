@@ -22,23 +22,51 @@ export interface AssetInput {
 export const MAX_NAME = 500;
 export const MAX_PROMPT = 50_000;
 export const MAX_SETTING_VALUE = 1_000;
+const MAX_DURATION_SECONDS = 31_536_000_000;
 
-export type Classification = { copy: true } | { copy: false; reason: SkipReason };
-
-const COPYABLE_TYPES = new Set(['image', 'video', 'glb']);
+/** The hosted `media_class` values (`MediaFileClass` in crates/schema, `dimensional` is deprecated). */
+export const MEDIA_CLASSES = ['unknown', 'audio', 'image', 'video', 'dimensional', 'mesh', 'splat', 'project'] as const;
+export type MediaClass = (typeof MEDIA_CLASSES)[number];
 
 /**
- * Decides from the hosted record alone whether an item is worth downloading. The bytes are
- * sniffed again after the download, which stays the authority.
+ * The hosted `media_type` values and the class each belongs to (`MediaFileType::to_media_class`
+ * in crates/schema). `audio`, `image` and `video` are the deprecated coarse types: current
+ * records carry the format (`png`, `mp4`, ...), so classification keys on the class first.
+ */
+export const CLASS_OF_TYPE: Readonly<Record<string, MediaClass>> = {
+  audio: 'audio', wav: 'audio', mp3: 'audio', opus: 'audio', ogg: 'audio', aac: 'audio', m4a: 'audio', flac: 'audio',
+  image: 'image', jpg: 'image', png: 'image', gif: 'image', webp: 'image',
+  video: 'video', mp4: 'video', webm: 'video', mov: 'video',
+  fbx: 'mesh', obj: 'mesh', glb: 'mesh', gltf: 'mesh', pmd: 'mesh', pmx: 'mesh',
+  spz: 'splat', ply: 'splat',
+  bvh: 'dimensional', vmd: 'dimensional', csv: 'dimensional',
+  scene_ron: 'project', scene_json: 'project', mood_json: 'project', timeline_json: 'project', editor_json: 'project', json: 'project',
+};
+
+/** What family of bytes the hosted record says to expect; `any` lets the sniffer decide. */
+export type Expected = 'image' | 'video' | 'model' | 'any';
+export type Classification = { copy: true; expects: Expected } | { copy: false; reason: SkipReason };
+
+const lower = (value: unknown): string => (typeof value === 'string' ? value.toLowerCase() : '');
+
+/**
+ * Decides from the hosted record whether an item is worth downloading, by media class first and
+ * the media type second. The bytes are sniffed after the download, which stays the authority:
+ * a record this does not know is downloaded and the sniffer decides.
  */
 export function classify(file: HostedMediaFile, options: { isIntermediate?: (file: HostedMediaFile) => boolean } = {}): Classification {
   if (options.isIntermediate?.(file)) return { copy: false, reason: 'intermediate' };
-  const type = String(file.media_type).toLowerCase();
-  const mediaClass = file.media_class === null ? null : String(file.media_class).toLowerCase();
-  if (type === 'audio' || mediaClass === 'audio') return { copy: false, reason: 'audio-unsupported' };
-  if (type === 'scene' || type === 'scene_json' || mediaClass === 'scene') return { copy: false, reason: 'scene' };
-  if (!COPYABLE_TYPES.has(type)) return { copy: false, reason: 'unsupported-type' };
-  return { copy: true };
+  const klass = lower(file.media_class);
+  const byType = CLASS_OF_TYPE[lower(file.media_type)];
+  if (klass === 'audio' || byType === 'audio') return { copy: false, reason: 'audio-unsupported' };
+  if (klass === 'project' || byType === 'project') return { copy: false, reason: 'scene' };
+  const effective = klass === 'image' || klass === 'video' || klass === 'mesh' || klass === 'splat' ? klass : byType;
+  if (effective === 'image' || effective === 'video') return { copy: true, expects: effective };
+  if (effective === 'mesh' || effective === 'splat') return { copy: true, expects: 'model' };
+  // The deprecated `dimensional` class held 3D files before it was split; a format with no
+  // 3D meaning (animation, CSV) is not copied.
+  if (effective === 'dimensional' || klass === 'dimensional') return klass === 'dimensional' && byType === undefined ? { copy: true, expects: 'model' } : { copy: false, reason: 'unsupported-type' };
+  return { copy: true, expects: 'any' };
 }
 
 const clean = (value: unknown, max: number): string | undefined => {
@@ -53,6 +81,8 @@ const clean = (value: unknown, max: number): string | undefined => {
 export function durationFromMillis(millis: number | null | undefined): string | undefined {
   if (typeof millis !== 'number' || !Number.isFinite(millis) || millis < 0) return undefined;
   const seconds = Math.round(millis) / 1000;
+  // Beyond a thousand years the number prints in exponent form, which the model rejects.
+  if (seconds > MAX_DURATION_SECONDS) return undefined;
   return `PT${seconds}S`;
 }
 

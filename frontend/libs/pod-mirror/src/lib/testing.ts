@@ -32,6 +32,12 @@ export function mp4(seed = 0): Uint8Array {
   return bytes;
 }
 
+export function glb(): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set([0x67, 0x6c, 0x54, 0x46, 2, 0, 0, 0, 32, 0, 0, 0]);
+  return bytes;
+}
+
 export function wav(): Uint8Array {
   const bytes = new Uint8Array(32);
   bytes.set([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45]);
@@ -42,7 +48,7 @@ export function hostedFile(n: number, overrides: Partial<HostedMediaFile> = {}):
   const token = `${HOSTED_TOKEN_PREFIX}${n}`;
   return {
     token,
-    media_type: 'image',
+    media_type: 'png',
     media_class: 'image',
     maybe_prompt_token: null,
     maybe_original_filename: null,
@@ -87,6 +93,9 @@ export interface FakeHosted extends HostedClient {
   /** Tokens whose lookup reports `unavailable`. */
   down: Set<string>;
   listDown: boolean;
+  /** The batch lookup reports `unavailable`. */
+  batchDown: boolean;
+  user: string | null;
   /** Newest first unless a test reorders it. */
   listing: HostedMediaFile[];
 }
@@ -98,7 +107,15 @@ export function fakeHosted(files: HostedMediaFile[] = []): FakeHosted {
     calls: [],
     down: new Set(),
     listDown: false,
+    batchDown: false,
+    user: ACCOUNT.username,
     listing: [...files].sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    currentUsername: () => hosted.user,
+    async getMediaFiles(tokens) {
+      hosted.calls.push(`batch:${tokens.length}`);
+      if (hosted.batchDown) return { ok: false, kind: 'unavailable' };
+      return { ok: true, value: tokens.map((t) => hosted.files.get(t)).filter((f): f is HostedMediaFile => f !== undefined) };
+    },
     async getMediaFile(token) {
       hosted.calls.push(`file:${token}`);
       if (hosted.down.has(token)) return { ok: false, kind: 'unavailable' };
@@ -137,6 +154,10 @@ export interface FakeStore extends PodStorePort {
   /** Link the thumbnail on put, as the real store does when it creates the description. */
   linkThumbnail: boolean;
   resumed: number;
+  /** When set, every put answers with this description URL, as the real store does for identical bytes. */
+  fixedUrl: string | null;
+  /** What `exposureTarget()` says. */
+  target: string | null;
   gate: Promise<void> | null;
 }
 
@@ -154,6 +175,8 @@ export function fakeStore(): FakeStore {
     existed: false,
     linkThumbnail: true,
     resumed: 0,
+    fixedUrl: null,
+    target: 'https://pod.example/alice/creative-assets/',
     gate: null,
     async put(input) {
       const { bytes, signal: _signal, ...rest } = input as PutInput<unknown> & { bytes: Uint8Array };
@@ -165,7 +188,7 @@ export function fakeStore(): FakeStore {
       counter++;
       const hasThumb = Boolean(input.thumbnail);
       const outcome: PutOutcome = {
-        descriptionUrl: `https://pod.example/alice/creative-assets/2026/06/desc${counter}`,
+        descriptionUrl: store.fixedUrl ?? `https://pod.example/alice/creative-assets/2026/06/desc${counter}`,
         binaryUrl: `https://pod.example/alice/creative-assets/2026/06/bin${counter}.png`,
         thumbnailUrl: hasThumb && store.linkThumbnail ? `https://pod.example/alice/creative-assets/2026/06/desc${counter}-thumb.webp` : undefined,
         thumbnailMissing: hasThumb && !store.linkThumbnail,
@@ -188,6 +211,7 @@ export function fakeStore(): FakeStore {
       store.removed.push(url);
       return { ok: true, value: undefined };
     },
+    exposureTarget: () => store.target,
     async resumePending() {
       store.resumed++;
       return { ok: true, value: { completed: 0, failed: 0, rejected: 0 } };
@@ -282,7 +306,7 @@ export function fakeBytes(hosted?: FakeHosted): FakeBytes {
       urls.push(url);
       const body = bodies.get(url);
       if (body instanceof BytesError) throw body;
-      if (!body) throw new BytesError('unavailable');
+      if (!body) throw new BytesError('gone');
       return body;
     },
   };
@@ -296,13 +320,17 @@ export function fakeBytes(hosted?: FakeHosted): FakeBytes {
   return fake;
 }
 
-export function openFake(store: PodStorePort | (() => PodStorePort)): OpenStore & { calls: number; fail: 'offline' | 'failed' | null } {
-  const open = (async () => {
+export type FakeOpen = OpenStore & { calls: number; fail: 'offline' | 'failed' | null; allowed: boolean[] };
+
+export function openFake(store: PodStorePort | (() => PodStorePort)): FakeOpen {
+  const open = (async (_signal: AbortSignal, options: { allowUnknownExposure: boolean }) => {
     open.calls++;
+    open.allowed.push(options.allowUnknownExposure);
     if (open.fail) return { ok: false as const, reason: open.fail };
     return { ok: true as const, store: typeof store === 'function' ? store() : store };
-  }) as unknown as OpenStore & { calls: number; fail: 'offline' | 'failed' | null };
+  }) as unknown as FakeOpen;
   open.calls = 0;
+  open.allowed = [];
   open.fail = null;
   return open;
 }

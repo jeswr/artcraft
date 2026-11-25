@@ -61,38 +61,58 @@ describe.each([
     expect(await journal.update(ACCOUNT, 'm_missing', { state: 'saved' }, 1)).toBeUndefined();
   });
 
-  it('sets the watermark once per account', async () => {
+  it('sets the baseline once per account and keeps walk state apart from it', async () => {
     const journal = await fresh();
-    expect(await journal.getWatermark(ACCOUNT)).toBeUndefined();
-    expect(await journal.ensureWatermark(ACCOUNT, 100)).toBe(100);
-    expect(await journal.ensureWatermark(ACCOUNT, 900)).toBe(100);
-    expect(await journal.ensureWatermark(OTHER_USER, 700)).toBe(700);
+    expect(await journal.getAccountState(ACCOUNT)).toBeUndefined();
+    const first = { kind: 'item', token: 'm_9', createdAt: 100 } as const;
+    expect(await journal.ensureBaseline(ACCOUNT, first)).toEqual(first);
+    expect(await journal.ensureBaseline(ACCOUNT, { kind: 'empty' })).toEqual(first);
+    expect(await journal.ensureBaseline(OTHER_USER, { kind: 'empty' })).toEqual({ kind: 'empty' });
+    await journal.updateAccountState(ACCOUNT, { mark: { token: 'm_10', createdAt: 200 }, cursor: { page: 3 }, confirmedPrivate: ['https://p/lib/'] });
+    await journal.updateAccountState(ACCOUNT, { cursor: undefined });
+    expect(await journal.getAccountState(ACCOUNT)).toEqual({ baseline: first, mark: { token: 'm_10', createdAt: 200 }, confirmedPrivate: ['https://p/lib/'] });
   });
 
-  it('forgetting an account purges its records, watermark and delete entries and no other account', async () => {
+  it('forgetting an account purges its records, state and delete entries and no other account', async () => {
     const journal = await fresh();
     await journal.create(record(ACCOUNT, 'm_1'));
     await journal.create(record(OTHER_USER, 'm_2'));
-    await journal.ensureWatermark(ACCOUNT, 1);
-    await journal.ensureWatermark(OTHER_USER, 2);
-    await journal.deletes.put({ descriptionUrl: 'https://p/d', shardUrl: 'https://p/', phase: 'intent' });
+    await journal.ensureBaseline(ACCOUNT, { kind: 'empty' });
+    await journal.ensureBaseline(OTHER_USER, { kind: 'empty' });
+    await journal.deletesFor(ACCOUNT.webId, 'https://p/').put({ descriptionUrl: 'https://p/d', shardUrl: 'https://p/', phase: 'intent' });
+    await journal.deletesFor(OTHER_POD.webId, 'https://q/').put({ descriptionUrl: 'https://q/d', shardUrl: 'https://q/', phase: 'intent' });
     await journal.forgetAccount(ACCOUNT);
     expect(await journal.list(ACCOUNT)).toEqual([]);
-    expect(await journal.getWatermark(ACCOUNT)).toBeUndefined();
-    expect(await journal.deletes.list()).toEqual([]);
+    expect(await journal.getAccountState(ACCOUNT)).toBeUndefined();
+    expect(await journal.deletesFor(ACCOUNT.webId, 'https://p/').list()).toEqual([]);
     expect(await journal.list(OTHER_USER)).toHaveLength(1);
-    expect(await journal.getWatermark(OTHER_USER)).toBe(2);
+    expect(await journal.getAccountState(OTHER_USER)).toEqual({ baseline: { kind: 'empty' } });
+    // Another account's half-finished delete is still there.
+    expect((await journal.deletesFor(OTHER_POD.webId, 'https://q/').list()).map((e) => e.descriptionUrl)).toEqual(['https://q/d']);
+  });
+
+  it('keeps one delete journal per WebID and storage', async () => {
+    const journal = await fresh();
+    const a = journal.deletesFor(ACCOUNT.webId, 'https://p/');
+    const b = journal.deletesFor(ACCOUNT.webId, 'https://other-storage/');
+    await a.put({ descriptionUrl: 'https://p/x', shardUrl: 'https://p/', phase: 'intent' });
+    await b.put({ descriptionUrl: 'https://p/x', shardUrl: 'https://p/', phase: 'deleted' });
+    expect((await a.list()).map((e) => e.phase)).toEqual(['intent']);
+    await a.delete('https://p/x');
+    expect(await a.list()).toEqual([]);
+    expect(await b.list()).toHaveLength(1);
   });
 
   it('keeps the delete journal as the pod-media-store expects', async () => {
     const journal = await fresh();
-    await journal.deletes.put({ descriptionUrl: 'https://p/a', shardUrl: 'https://p/', phase: 'intent' });
-    await journal.deletes.put({ descriptionUrl: 'https://p/a', shardUrl: 'https://p/', phase: 'deleted', binaryUrl: 'https://p/a.png' });
-    await journal.deletes.put({ descriptionUrl: 'https://p/b', shardUrl: 'https://p/' });
-    expect(await journal.deletes.list()).toHaveLength(2);
-    await journal.deletes.delete('https://p/a');
-    await journal.deletes.delete('https://p/never');
-    expect((await journal.deletes.list()).map((e) => e.descriptionUrl)).toEqual(['https://p/b']);
+    const deletes = journal.deletesFor(ACCOUNT.webId, 'https://p/');
+    await deletes.put({ descriptionUrl: 'https://p/a', shardUrl: 'https://p/', phase: 'intent' });
+    await deletes.put({ descriptionUrl: 'https://p/a', shardUrl: 'https://p/', phase: 'deleted', binaryUrl: 'https://p/a.png' });
+    await deletes.put({ descriptionUrl: 'https://p/b', shardUrl: 'https://p/' });
+    expect(await deletes.list()).toHaveLength(2);
+    await deletes.delete('https://p/a');
+    await deletes.delete('https://p/never');
+    expect((await deletes.list()).map((e) => e.descriptionUrl)).toEqual(['https://p/b']);
   });
 });
 
@@ -101,20 +121,23 @@ describe('indexeddb journal durability', () => {
     const factory = new IDBFactory();
     const first = await open(factory);
     await first.create(record(ACCOUNT, 'm_1', { state: 'saved', descriptionUrl: 'https://p/d' }));
-    await first.ensureWatermark(ACCOUNT, 42);
-    await first.deletes.put({ descriptionUrl: 'https://p/x', shardUrl: 'https://p/', phase: 'intent' });
+    await first.ensureBaseline(ACCOUNT, { kind: 'item', token: 'm_5', createdAt: 42 });
+    await first.deletesFor(ACCOUNT.webId, 'https://p/').put({ descriptionUrl: 'https://p/x', shardUrl: 'https://p/', phase: 'intent' });
     first.close();
     const second = await open(factory);
     open1.push(second);
     expect((await second.get(ACCOUNT, 'm_1'))?.descriptionUrl).toBe('https://p/d');
-    expect(await second.getWatermark(ACCOUNT)).toBe(42);
-    expect(await second.deletes.list()).toHaveLength(1);
+    expect((await second.getAccountState(ACCOUNT))?.baseline).toEqual({ kind: 'item', token: 'm_5', createdAt: 42 });
+    expect(await second.deletesFor(ACCOUNT.webId, 'https://p/').list()).toHaveLength(1);
   });
 
   it('runs the upgrade over a database that already holds some stores without losing rows', async () => {
     const factory = new IDBFactory();
     const prior = await openRaw(factory, 1, (db) => {
       db.createObjectStore('items', { keyPath: ['webId', 'username', 'token'] });
+      // What version 1 also held: a clock-based watermark and one unscoped delete store.
+      db.createObjectStore('watermarks', { keyPath: ['webId', 'username'] });
+      db.createObjectStore('deletes', { keyPath: 'descriptionUrl' });
     });
     await new Promise<void>((resolve) => {
       const tx = prior.transaction('items', 'readwrite');
@@ -122,8 +145,8 @@ describe('indexeddb journal durability', () => {
       tx.oncomplete = () => resolve();
     });
     prior.close();
-    const upgraded = await openRaw(factory, 2, (db) => upgradeJournal(db, 0));
-    expect(Array.from(upgraded.objectStoreNames).sort()).toEqual(['deletes', 'items', 'watermarks']);
+    const upgraded = await openRaw(factory, 2, (db) => upgradeJournal(db, 1));
+    expect(Array.from(upgraded.objectStoreNames).sort()).toEqual(['accounts', 'deletes', 'items']);
     const rows = await new Promise<unknown[]>((resolve) => {
       const req = upgraded.transaction('items').objectStore('items').getAll();
       req.onsuccess = () => resolve(req.result);
@@ -154,7 +177,7 @@ describe('indexeddb journal durability', () => {
     await journal.create(record());
     // A newer window upgrading must not be blocked by this one.
     await new Promise<void>((resolve, reject) => {
-      const req = factory.open(DB_NAME, 2);
+      const req = factory.open(DB_NAME, 3);
       req.onsuccess = () => {
         req.result.close();
         resolve();

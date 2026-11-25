@@ -4,7 +4,7 @@ import { createTypeIndex } from '@jeswr/pod-type-index';
 import { createMemoryStorage } from '@jeswr/storage-client/memory';
 import type { StorageClient } from '@jeswr/storage-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { openCreativeAssetStore } from './assets-store.js';
+import { asPodStorePort, openCreativeAssetStore } from './assets-store.js';
 import { createMemoryMirrorJournal } from './journal.js';
 import { PodMirror } from './mirror.js';
 import {
@@ -46,16 +46,17 @@ async function harness(exposure: ExposureCheck = async () => 'private') {
     network: fakeNetwork(),
     events,
     random: () => 0.5,
-    openStore: async (signal) => {
+    openStore: async (signal, options) => {
       store = await openCreativeAssetStore({
         storage,
         features: storage.features,
         typeIndex: createTypeIndex({ storage, features: storage.features, profile: WEB_ID }),
         exposure,
-        journal: journal.deletes,
+        journal: journal.deletesFor(WEB_ID, ROOT),
+        allowUnknownExposure: options.allowUnknownExposure,
         signal,
       });
-      return store.ok ? { ok: true, store: store.value } : { ok: false, reason: 'failed' };
+      return store.ok ? { ok: true, store: asPodStorePort(store.value, ROOT) } : { ok: false, reason: 'failed' };
     },
   });
   return { storage, journal, hosted, bytes, events, mirror, library: () => (store?.ok ? store.value : undefined) };
@@ -150,6 +151,17 @@ describe('the mirror against the real store, model and a memory pod', () => {
     expect(h.mirror.stateOf(b.token)?.kind).toBe('saved');
     const listed = await h.library()!.list();
     expect(listed.ok && listed.value.items).toHaveLength(1);
+    // Both hosted items point at the one pod copy. Deleting one must leave it for the other.
+    h.events.emit({ type: 'deleted', token: a.token });
+    await settle(h.mirror);
+    expect(h.mirror.stateOf(a.token)).toBeUndefined();
+    expect(h.mirror.stateOf(b.token)).toMatchObject({ kind: 'saved' });
+    const kept = await h.library()!.list();
+    expect(kept.ok && kept.value.items).toHaveLength(1);
+    h.events.emit({ type: 'deleted', token: b.token });
+    await settle(h.mirror);
+    const gone = await h.library()!.list();
+    expect(gone.ok && gone.value.items).toHaveLength(0);
   });
 
   it('removes the description and both files when the hosted item is deleted', async () => {
@@ -168,7 +180,7 @@ describe('the mirror against the real store, model and a memory pod', () => {
     expect(h.mirror.stateOf(file.token)).toBeUndefined();
     const listed = await h.library()!.list();
     expect(listed.ok && listed.value.items).toHaveLength(0);
-    expect(await h.journal.deletes.list()).toEqual([]);
+    expect(await h.journal.deletesFor(WEB_ID, ROOT).list()).toEqual([]);
     const after = await everythingOnThePod(h.storage);
     expect(after).not.toMatch(/\.png/);
   });
@@ -183,5 +195,50 @@ describe('the mirror against the real store, model and a memory pod', () => {
     await settle(h.mirror);
     expect(h.mirror.summary().paused).toBe('exposed');
     expect(await everythingOnThePod(h.storage)).not.toMatch(/\.png/);
+  });
+
+  it('writes to a server that cannot say only after the person confirms the container, and remembers it', async () => {
+    const h = await harness(async () => 'unknown');
+    const file = hostedFile(1);
+    h.hosted.files.set(file.token, file);
+    h.bytes.bodies.set(file.media_links.cdn_url, fakeBytes(h.hosted).bodies.get(file.media_links.cdn_url)!);
+    await h.mirror.start();
+    await h.mirror.enqueue(file.token);
+    await settle(h.mirror);
+    expect(h.mirror.summary()).toMatchObject({ paused: 'exposure-unknown', exposureTarget: expect.stringContaining(ROOT) });
+    expect(await everythingOnThePod(h.storage)).not.toMatch(/\.png/);
+
+    expect(await h.mirror.confirmPrivate()).toBe(true);
+    await settle(h.mirror);
+    expect(h.mirror.stateOf(file.token)?.kind).toBe('saved');
+    expect(await everythingOnThePod(h.storage)).toMatch(/\.png/);
+    await h.mirror.stop();
+
+    // A later run needs no second confirmation for the same container.
+    const again = new PodMirror({
+      account: ACCOUNT,
+      journal: h.journal,
+      hosted: fakeHosted([]),
+      fetchPublicBytes: h.bytes.fetch,
+      session: fakeSession(),
+      network: fakeNetwork(),
+      random: () => 0.5,
+      openStore: async (signal, options) => {
+        const opened = await openCreativeAssetStore({
+          storage: h.storage,
+          features: h.storage.features,
+          typeIndex: createTypeIndex({ storage: h.storage, features: h.storage.features, profile: WEB_ID }),
+          exposure: async () => 'unknown',
+          journal: h.journal.deletesFor(WEB_ID, ROOT),
+          allowUnknownExposure: options.allowUnknownExposure,
+          signal,
+        });
+        return opened.ok ? { ok: true, store: asPodStorePort(opened.value, ROOT) } : { ok: false, reason: 'failed' };
+      },
+    });
+    await again.start();
+    await settle(again);
+    expect(again.summary().paused).toBeNull();
+    await again.stop();
   });
 });

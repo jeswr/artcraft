@@ -15,6 +15,7 @@ import {
   serializeAssetDocument,
 } from '@jeswr/solid-creative-assets';
 import type { AssetInput } from './mapping.js';
+import type { PodStorePort } from './mirror.js';
 
 /**
  * The creative-assets model plugged into `@jeswr/pod-media-store`: its description parser and
@@ -88,8 +89,10 @@ export interface OpenCreativeAssetStoreDeps {
   features: MediaStoreOptions<AssetDescription, AssetInput>['features'];
   typeIndex: MediaStoreOptions<AssetDescription, AssetInput>['typeIndex'];
   exposure: ExposureCheck;
-  /** The durable delete journal (`MirrorJournal.deletes`). */
+  /** The durable delete journal for this WebID and storage (`MirrorJournal.deletesFor`). */
   journal: DeleteJournal;
+  /** Let writes proceed when the exposure probe cannot tell; only after the person confirmed. */
+  allowUnknownExposure?: boolean;
   signal?: AbortSignal;
 }
 
@@ -105,6 +108,22 @@ export function openCreativeAssetStore(deps: OpenCreativeAssetStoreDeps) {
     typeIndex: deps.typeIndex,
     exposure: deps.exposure,
     journal: deps.journal,
+    ...(deps.allowUnknownExposure ? { allowUnknownExposure: true } : {}),
     ...(deps.signal ? { signal: deps.signal } : {}),
   });
+}
+
+/**
+ * The mirror's view of an opened store. The exposure target is the library once it exists, and
+ * the storage root before that (the store probes the root then).
+ */
+export function asPodStorePort(store: CreativeAssetStore, storageRoot: string): PodStorePort {
+  return {
+    put: (input) => store.put(input),
+    attachThumbnail: (url, input) => store.attachThumbnail(url, input),
+    remove: (url, signal) => store.remove(url, signal),
+    resumePending: (signal) => store.resumePending(signal),
+    checkExposure: (signal) => store.checkExposure(signal),
+    exposureTarget: () => store.library ?? storageRoot,
+  };
 }

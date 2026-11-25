@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { BytesError, createPublicBytesFetcher, isPublicHttpsUrl, readBounded } from './bytes.js';
+import { createPublicBytesFetcher, isPublicHttpsUrl, readBounded } from './bytes.js';
 
 const streamOf = (chunks: Uint8Array[], headers: Record<string, string> = {}) =>
   new Response(
@@ -47,11 +47,23 @@ describe('createPublicBytesFetcher', () => {
     expect(fetchMock).toHaveBeenCalledWith('https://cdn.example/a.png', expect.objectContaining({ credentials: 'omit', referrerPolicy: 'no-referrer' }));
   });
 
+  it('treats a download that outlasts its timeout as a server failure, and a caller abort as neither', async () => {
+    const hang = ((_url: string, init: RequestInit) => new Promise((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(new DOMException('x', 'AbortError'))))) as unknown as typeof fetch;
+    const fetcher = createPublicBytesFetcher({ fetch: hang });
+    await expect(fetcher('https://cdn.example/a', { maxBytes: 5, timeoutMs: 10 })).rejects.toMatchObject({ kind: 'unavailable' });
+    const controller = new AbortController();
+    const pending = fetcher('https://cdn.example/a', { maxBytes: 5, timeoutMs: 60_000, signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ kind: 'network' });
+  });
+
   it('turns network failures, bad statuses and unsafe addresses into closed kinds', async () => {
     const failing = createPublicBytesFetcher({ fetch: (async () => { throw new TypeError('secret detail'); }) as typeof fetch });
-    await expect(failing('https://cdn.example/a', { maxBytes: 5 })).rejects.toMatchObject({ kind: 'unavailable' });
+    await expect(failing('https://cdn.example/a', { maxBytes: 5 })).rejects.toMatchObject({ kind: 'network' });
     const missing = createPublicBytesFetcher({ fetch: (async () => new Response('', { status: 404 })) as typeof fetch });
-    await expect(missing('https://cdn.example/a', { maxBytes: 5 })).rejects.toBeInstanceOf(BytesError);
+    await expect(missing('https://cdn.example/a', { maxBytes: 5 })).rejects.toMatchObject({ kind: 'gone' });
+    const broken = createPublicBytesFetcher({ fetch: (async () => new Response('', { status: 503 })) as typeof fetch });
+    await expect(broken('https://cdn.example/a', { maxBytes: 5 })).rejects.toMatchObject({ kind: 'unavailable' });
     const never = vi.fn();
     const plain = createPublicBytesFetcher({ fetch: never as unknown as typeof fetch });
     for (const url of ['http://cdn.example/a', 'https://u:p@cdn.example/a', 'file:///etc/passwd', 'nonsense']) {

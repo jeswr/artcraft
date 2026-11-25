@@ -31,6 +31,32 @@ export interface JournalRecord {
 
 export type RecordPatch = Partial<Omit<JournalRecord, 'webId' | 'username' | 'token' | 'createdAt'>>;
 
+/** A hosted item named by its token and the hosted server's own creation time (ms). */
+export interface ItemMark {
+  token: string;
+  createdAt: number;
+}
+
+/**
+ * Where "new" starts for an account: the newest hosted item at first connect, or an empty
+ * library. It comes from the hosted side only; no local clock is in it.
+ */
+export type Baseline = { kind: 'empty' } | ({ kind: 'item' } & ItemMark);
+
+/** What the walk and the verification pass remember per (WebID, hosted user). */
+export interface AccountState {
+  baseline?: Baseline;
+  /** The newest item of the last walk that ran to its stopping point. */
+  mark?: ItemMark;
+  /** Where an interrupted walk got to (a page index), so the next one can skip ahead. */
+  cursor?: { page: number };
+  /** When the hosted deletions were last checked (ms, local clock, scheduling only). */
+  verifiedAt?: number;
+  /** Library containers the person confirmed are private, for servers that cannot say. */
+  confirmedPrivate?: string[];
+}
+export type AccountStatePatch = Partial<Omit<AccountState, 'baseline'>>;
+
 export interface MirrorJournal {
   get(account: MirrorAccount, token: string): Promise<JournalRecord | undefined>;
   /** Insert only when absent. Returns the stored record and whether this call created it. */
@@ -39,12 +65,17 @@ export interface MirrorJournal {
   update(account: MirrorAccount, token: string, patch: RecordPatch, now: number): Promise<JournalRecord | undefined>;
   remove(account: MirrorAccount, token: string): Promise<void>;
   list(account: MirrorAccount): Promise<JournalRecord[]>;
-  /** The connect-time watermark (ms), set once per account; returns the stored value. */
-  ensureWatermark(account: MirrorAccount, now: number): Promise<number>;
-  getWatermark(account: MirrorAccount): Promise<number | undefined>;
-  /** The pod-media-store's durable delete journal, on the same database. */
-  readonly deletes: DeleteJournal;
-  /** Purges this account's records and watermark, and every pending delete entry. */
+  getAccountState(account: MirrorAccount): Promise<AccountState | undefined>;
+  /** Sets the baseline once per account; returns the stored one. */
+  ensureBaseline(account: MirrorAccount, baseline: Baseline): Promise<Baseline>;
+  /** Merges into the account's state; an `undefined` value clears that field. */
+  updateAccountState(account: MirrorAccount, patch: AccountStatePatch): Promise<void>;
+  /**
+   * The pod-media-store's durable delete journal for one WebID and storage. Views of other
+   * WebIDs or storages never see or drop these entries.
+   */
+  deletesFor(webId: string, storage: string): DeleteJournal;
+  /** Purges this account's records and state, and the delete entries of its WebID only. */
   forgetAccount(account: MirrorAccount): Promise<void>;
   close(): void;
 }
@@ -57,10 +88,13 @@ export class JournalError extends Error {
 }
 
 export const DB_NAME = 'artcraft-pod-mirror';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 const ITEMS = 'items';
-const MARKS = 'watermarks';
+const ACCOUNTS = 'accounts';
 const DELETES = 'deletes';
+
+type StoredDelete = DeleteJournalEntry & { scope: string; webId: string };
+const scopeOf = (webId: string, storage: string) => JSON.stringify([webId, storage]);
 
 type ItemKey = [string, string, string];
 const itemKey = (a: MirrorAccount, token: string): ItemKey => [a.webId, a.username, token];
@@ -87,8 +121,12 @@ function done(tx: IDBTransaction): Promise<void> {
 export function upgradeJournal(db: IDBDatabase, oldVersion: number): void {
   if (oldVersion < 1) {
     if (!db.objectStoreNames.contains(ITEMS)) db.createObjectStore(ITEMS, { keyPath: ['webId', 'username', 'token'] });
-    if (!db.objectStoreNames.contains(MARKS)) db.createObjectStore(MARKS, { keyPath: ['webId', 'username'] });
-    if (!db.objectStoreNames.contains(DELETES)) db.createObjectStore(DELETES, { keyPath: 'descriptionUrl' });
+  }
+  if (oldVersion < 2) {
+    // Version 1 kept one unscoped delete store and a clock-based watermark; neither shipped.
+    for (const name of ['watermarks', DELETES]) if (db.objectStoreNames.contains(name)) db.deleteObjectStore(name);
+    db.createObjectStore(ACCOUNTS, { keyPath: ['webId', 'username'] });
+    db.createObjectStore(DELETES, { keyPath: ['scope', 'descriptionUrl'] });
   }
 }
 
@@ -121,25 +159,38 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
   // A version change from another window must not wedge this one.
   db.onversionchange = () => db.close();
 
-  const deletes: DeleteJournal = {
-    async put(entry: DeleteJournalEntry) {
-      const tx = db.transaction(DELETES, 'readwrite');
-      tx.objectStore(DELETES).put({ ...entry });
-      await done(tx);
-    },
-    async delete(descriptionUrl: string) {
-      const tx = db.transaction(DELETES, 'readwrite');
-      tx.objectStore(DELETES).delete(descriptionUrl);
-      await done(tx);
-    },
-    async list() {
-      const tx = db.transaction(DELETES, 'readonly');
-      return (await request(tx.objectStore(DELETES).getAll())) as DeleteJournalEntry[];
-    },
+  const deletesFor = (webId: string, storage: string): DeleteJournal => {
+    const scope = scopeOf(webId, storage);
+    return {
+      async put(entry: DeleteJournalEntry) {
+        const tx = db.transaction(DELETES, 'readwrite');
+        tx.objectStore(DELETES).put({ ...entry, scope, webId } satisfies StoredDelete);
+        await done(tx);
+      },
+      async delete(descriptionUrl: string) {
+        const tx = db.transaction(DELETES, 'readwrite');
+        tx.objectStore(DELETES).delete([scope, descriptionUrl]);
+        await done(tx);
+      },
+      async list() {
+        const tx = db.transaction(DELETES, 'readonly');
+        const all = (await request(tx.objectStore(DELETES).getAll())) as StoredDelete[];
+        return all.filter((entry) => entry.scope === scope).map(({ scope: _scope, webId: _webId, ...entry }) => entry);
+      },
+    };
+  };
+
+  const stateKey = (a: MirrorAccount) => [a.webId, a.username];
+  const readState = async (account: MirrorAccount): Promise<AccountState | undefined> => {
+    const tx = db.transaction(ACCOUNTS, 'readonly');
+    const found = (await request(tx.objectStore(ACCOUNTS).get(stateKey(account)))) as (AccountState & MirrorAccount) | undefined;
+    if (!found) return undefined;
+    const { webId: _w, username: _u, ...state } = found;
+    return state;
   };
 
   return {
-    deletes,
+    deletesFor,
     async get(account, token) {
       const tx = db.transaction(ITEMS, 'readonly');
       return (await request(tx.objectStore(ITEMS).get(itemKey(account, token)))) as JournalRecord | undefined;
@@ -174,25 +225,37 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       const tx = db.transaction(ITEMS, 'readonly');
       return (await request(tx.objectStore(ITEMS).getAll(accountRange(KR, account)))) as JournalRecord[];
     },
-    async ensureWatermark(account, now) {
-      const tx = db.transaction(MARKS, 'readwrite');
-      const store = tx.objectStore(MARKS);
-      const existing = (await request(store.get([account.webId, account.username]))) as { at: number } | undefined;
-      if (existing) return existing.at;
-      store.put({ webId: account.webId, username: account.username, at: now });
+    getAccountState: readState,
+    async ensureBaseline(account, baseline) {
+      const tx = db.transaction(ACCOUNTS, 'readwrite');
+      const store = tx.objectStore(ACCOUNTS);
+      const existing = (await request(store.get(stateKey(account)))) as (AccountState & MirrorAccount) | undefined;
+      if (existing?.baseline) return existing.baseline;
+      store.put({ ...existing, webId: account.webId, username: account.username, baseline });
       await done(tx);
-      return now;
+      return baseline;
     },
-    async getWatermark(account) {
-      const tx = db.transaction(MARKS, 'readonly');
-      const found = (await request(tx.objectStore(MARKS).get([account.webId, account.username]))) as { at: number } | undefined;
-      return found?.at;
+    async updateAccountState(account, patch) {
+      const tx = db.transaction(ACCOUNTS, 'readwrite');
+      const store = tx.objectStore(ACCOUNTS);
+      const existing = (await request(store.get(stateKey(account)))) as (AccountState & MirrorAccount) | undefined;
+      const next = { ...existing, ...patch, webId: account.webId, username: account.username } as AccountState & MirrorAccount;
+      for (const [key, value] of Object.entries(patch)) if (value === undefined) delete (next as unknown as Record<string, unknown>)[key];
+      store.put(next);
+      await done(tx);
     },
     async forgetAccount(account) {
-      const tx = db.transaction([ITEMS, MARKS, DELETES], 'readwrite');
+      const tx = db.transaction([ITEMS, ACCOUNTS, DELETES], 'readwrite');
       tx.objectStore(ITEMS).delete(accountRange(KR, account));
-      tx.objectStore(MARKS).delete([account.webId, account.username]);
-      tx.objectStore(DELETES).clear();
+      tx.objectStore(ACCOUNTS).delete(stateKey(account));
+      const deletes = tx.objectStore(DELETES);
+      const cursor = deletes.openCursor();
+      cursor.onsuccess = () => {
+        const at = cursor.result;
+        if (!at) return;
+        if ((at.value as StoredDelete).webId === account.webId) at.delete();
+        at.continue();
+      };
       await done(tx);
     },
     close() {
@@ -204,21 +267,25 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
 /** An in-memory journal with the same behaviour, for the engine's tests. Keeps nothing. */
 export function createMemoryMirrorJournal(): MirrorJournal {
   const items = new Map<string, JournalRecord>();
-  const marks = new Map<string, number>();
-  const pending = new Map<string, DeleteJournalEntry>();
+  const states = new Map<string, AccountState>();
+  const pending = new Map<string, StoredDelete>();
   const key = (a: MirrorAccount, token: string) => JSON.stringify([a.webId, a.username, token]);
   const accountKey = (a: MirrorAccount) => JSON.stringify([a.webId, a.username]);
   return {
-    deletes: {
-      async put(entry) {
-        pending.set(entry.descriptionUrl, { ...entry });
-      },
-      async delete(url) {
-        pending.delete(url);
-      },
-      async list() {
-        return [...pending.values()];
-      },
+    deletesFor(webId, storage) {
+      const scope = scopeOf(webId, storage);
+      const at = (url: string) => JSON.stringify([scope, url]);
+      return {
+        async put(entry) {
+          pending.set(at(entry.descriptionUrl), { ...entry, scope, webId });
+        },
+        async delete(url) {
+          pending.delete(at(url));
+        },
+        async list() {
+          return [...pending.values()].filter((entry) => entry.scope === scope).map(({ scope: _s, webId: _w, ...entry }) => entry);
+        },
+      };
     },
     async get(a, t) {
       const r = items.get(key(a, t));
@@ -244,20 +311,25 @@ export function createMemoryMirrorJournal(): MirrorJournal {
     async list(a) {
       return [...items.values()].filter((r) => r.webId === a.webId && r.username === a.username).map((r) => ({ ...r }));
     },
-    async ensureWatermark(a, now) {
-      const k = accountKey(a);
-      const found = marks.get(k);
-      if (found !== undefined) return found;
-      marks.set(k, now);
-      return now;
+    async getAccountState(a) {
+      const found = states.get(accountKey(a));
+      return found && structuredClone(found);
     },
-    async getWatermark(a) {
-      return marks.get(accountKey(a));
+    async ensureBaseline(a, baseline) {
+      const existing = states.get(accountKey(a));
+      if (existing?.baseline) return existing.baseline;
+      states.set(accountKey(a), { ...existing, baseline });
+      return baseline;
+    },
+    async updateAccountState(a, patch) {
+      const next = { ...states.get(accountKey(a)), ...patch } as AccountState;
+      for (const [k, v] of Object.entries(patch)) if (v === undefined) delete (next as unknown as Record<string, unknown>)[k];
+      states.set(accountKey(a), structuredClone(next));
     },
     async forgetAccount(a) {
       for (const [k, r] of [...items]) if (r.webId === a.webId && r.username === a.username) items.delete(k);
-      marks.delete(accountKey(a));
-      pending.clear();
+      states.delete(accountKey(a));
+      for (const [k, entry] of [...pending]) if (entry.webId === a.webId) pending.delete(k);
     },
     close() {},
   };

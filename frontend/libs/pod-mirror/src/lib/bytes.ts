@@ -1,4 +1,9 @@
-export type BytesErrorKind = 'too-large' | 'unavailable' | 'bad-url';
+/**
+ * `unavailable`: the server failed or timed out (try later). `network`: the request itself
+ * was refused or blocked before any answer (offline, or the browser's CORS rule). `gone`: the
+ * server answered with a client error such as 404. `too-large` and `bad-url` never change.
+ */
+export type BytesErrorKind = 'too-large' | 'unavailable' | 'network' | 'gone' | 'bad-url';
 
 /** A failed byte download. Carries a closed kind only, never a URL or a server message. */
 export class BytesError extends Error {
@@ -12,6 +17,8 @@ export interface FetchBytesOptions {
   /** Largest body accepted; a longer one fails as `too-large` without being buffered whole. */
   maxBytes: number;
   signal?: AbortSignal;
+  /** Gives up on one download after this long (it counts as `unavailable`). */
+  timeoutMs?: number;
 }
 
 /** Downloads a public address without credentials. Rejects with a {@link BytesError}. */
@@ -61,29 +68,35 @@ export function isPublicHttpsUrl(value: string): boolean {
   }
 }
 
+const DEFAULT_TIMEOUT_MS = 120_000;
+
 /**
  * Plain `fetch` with no credentials, referrer or cookies, for the hosted CDN's public files.
- * The app may wrap it with a fallback that loads bytes only (never pod traffic) another way.
+ * It is the only way bytes are fetched: there is no fallback through the app's own network layer.
  */
 export function createPublicBytesFetcher(options: { fetch?: typeof fetch } = {}): FetchPublicBytes {
-  return async (url, { maxBytes, signal }) => {
+  return async (url, { maxBytes, signal, timeoutMs = DEFAULT_TIMEOUT_MS }) => {
     if (!isPublicHttpsUrl(url)) throw new BytesError('bad-url');
     const doFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const failure = (): BytesError => (timeout.aborted && !signal?.aborted ? new BytesError('unavailable') : new BytesError('network'));
     let response: Response;
     try {
-      response = await doFetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'follow', signal });
+      response = await doFetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'follow', signal: combined });
     } catch {
-      throw new BytesError('unavailable');
+      throw failure();
     }
     if (!response.ok) {
       void response.body?.cancel().catch(() => undefined);
-      throw new BytesError('unavailable');
+      const retryable = response.status >= 500 || response.status === 429 || response.status === 408;
+      throw new BytesError(retryable ? 'unavailable' : 'gone');
     }
     try {
       return await readBounded(response, maxBytes);
     } catch (error) {
       if (error instanceof BytesError) throw error;
-      throw new BytesError('unavailable');
+      throw failure();
     }
   };
 }

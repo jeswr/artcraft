@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BytesError } from './bytes.js';
 import { createMemoryMirrorJournal, type MirrorJournal } from './journal.js';
-import { PodMirror, type PodMirrorOptions, backoffDelay } from './mirror.js';
+import { type OpenStore, PodMirror, type PodMirrorOptions, backoffDelay } from './mirror.js';
 import {
   ACCOUNT,
   HOSTED_TOKEN_PREFIX,
@@ -11,6 +11,7 @@ import {
   fakeNetwork,
   fakeSession,
   fakeStore,
+  glb,
   hostedFile,
   hostedPrompt,
   mp4,
@@ -193,10 +194,10 @@ describe('failures at each point', () => {
     await t.mirror.start();
     await t.mirror.enqueue(file.token);
     await settle(t.mirror);
-    expect(t.mirror.stateOf(file.token)).toEqual({ kind: 'pending', attempts: 1 });
+    expect(t.mirror.stateOf(file.token)).toEqual({ kind: 'pending', attempts: 1, lastError: 'hosted-unavailable' });
     await vi.advanceTimersByTimeAsync(5_000);
     await settle(t.mirror);
-    expect(t.mirror.stateOf(file.token)).toEqual({ kind: 'pending', attempts: 2 });
+    expect(t.mirror.stateOf(file.token)).toMatchObject({ kind: 'pending', attempts: 2 });
     const calls = t.hosted.calls.filter((c) => c.startsWith('file:')).length;
     await vi.advanceTimersByTimeAsync(4_000); // second delay is longer than the first
     expect(t.hosted.calls.filter((c) => c.startsWith('file:')).length).toBe(calls);
@@ -209,33 +210,53 @@ describe('failures at each point', () => {
   it('backoff grows, is capped and is jittered', () => {
     const delays = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => backoffDelay(n, 1000, 60_000, () => 0.5));
     for (let i = 1; i < delays.length; i++) expect(delays[i]).toBeGreaterThanOrEqual(delays[i - 1]);
+    expect(delays[1]).toBeGreaterThan(delays[0]);
+    expect(delays[2]).toBeGreaterThan(delays[1]);
     expect(delays[delays.length - 1]).toBeLessThanOrEqual(60_000 * 1.2);
     expect(backoffDelay(3, 1000, 60_000, () => 0)).toBeLessThan(backoffDelay(3, 1000, 60_000, () => 1));
   });
 
-  it('fails a download that is too large for good and a missing one after the attempts run out', async () => {
+  it('spaces the engine retries further apart each time, up to the ceiling', async () => {
+    const t = setup([hostedFile(1)], { baseDelayMs: 1_000, maxDelayMs: 8_000 });
+    t.hosted.down.add(token(1));
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    const attemptsAt: number[] = [];
+    let last = 0;
+    for (let elapsed = 0; elapsed < 40_000; elapsed += 250) {
+      await settle(t.mirror);
+      const now = t.hosted.calls.filter((c) => c === `file:${token(1)}`).length;
+      if (now > last) attemptsAt.push(elapsed);
+      last = now;
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    const gaps = attemptsAt.slice(1).map((at, i) => at - attemptsAt[i]);
+    expect(gaps[1]).toBeGreaterThan(gaps[0]);
+    expect(gaps[2]).toBeGreaterThan(gaps[1]);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(8_000 * 1.2 + 250);
+  });
+
+  it('too large to write is skipped, not failed, and never retried; a missing file fails for good', async () => {
     const big = hostedFile(1);
     const gone = hostedFile(2);
-    const t = setup([big, gone], { maxAttempts: 3 });
+    const t = setup([big, gone]);
     t.bytes.bodies.set(big.media_links.cdn_url, new BytesError('too-large'));
-    t.bytes.bodies.delete(gone.media_links.cdn_url);
+    t.bytes.bodies.set(gone.media_links.cdn_url, new BytesError('gone'));
     await t.mirror.start();
     await t.mirror.enqueue(big.token);
     await t.mirror.enqueue(gone.token);
-    for (let i = 0; i < 6; i++) {
-      await settle(t.mirror);
-      await vi.advanceTimersByTimeAsync(60_000);
-    }
     await settle(t.mirror);
-    expect(t.mirror.stateOf(big.token)).toEqual({ kind: 'failed', reason: 'too-large', attempts: 1 });
-    expect(t.mirror.stateOf(gone.token)).toEqual({ kind: 'failed', reason: 'bytes-unavailable', attempts: 3 });
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(big.token)).toEqual({ kind: 'skipped', reason: 'too-large' });
+    expect(t.mirror.stateOf(gone.token)).toEqual({ kind: 'failed', reason: 'bytes-unavailable', attempts: 1 });
+    expect(t.bytes.urls.filter((u) => u === big.media_links.cdn_url)).toHaveLength(1);
   });
 
   it.each([
     ['conflict', { kind: 'conflict', reason: 'hash-mismatch' }, 'conflict'],
-    ['forbidden', { kind: 'forbidden', reason: 'storage' }, 'forbidden'],
-    ['too-large', { kind: 'too-large', reason: 'bytes-too-large' }, 'too-large'],
     ['unsupported', { kind: 'unsupported', reason: 'unsniffable' }, 'unsupported'],
+    ['failed (input)', { kind: 'failed', reason: 'invalid-input' }, 'invalid-description'],
   ] as const)('a store %s is terminal and is never retried or overwritten', async (_n, error, reason) => {
     const t = setup([hostedFile(1)]);
     t.store.putFailures.push({ ...error });
@@ -248,13 +269,47 @@ describe('failures at each point', () => {
     expect(t.store.puts).toHaveLength(1);
   });
 
+  it('a store that is too large for the pod is skipped with its own reason', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.putFailures.push({ kind: 'too-large', reason: 'bytes-too-large' });
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'skipped', reason: 'too-large' });
+  });
+
+  it('a refusal that may be an expired session is tried again with a fresh store before it is final', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.putFailures.push({ kind: 'forbidden', reason: 'storage' });
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'pending', attempts: 1, lastError: 'forbidden' });
+    expect(t.open.calls).toBe(2); // the store was opened again
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('a refusal that keeps coming is final after a few attempts', async () => {
+    const t = setup([hostedFile(1)]);
+    for (let i = 0; i < 10; i++) t.store.putFailures.push({ kind: 'forbidden', reason: 'storage' });
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    for (let i = 0; i < 6; i++) {
+      await settle(t.mirror);
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'failed', reason: 'forbidden', attempts: 3 });
+  });
+
   it('retries a store outage and an unexpected store error with backoff', async () => {
     const t = setup([hostedFile(1)]);
     t.store.putFailures.push({ kind: 'offline', reason: 'storage' }, { kind: 'failed', reason: 'unexpected' });
     await t.mirror.start();
     await t.mirror.enqueue(token(1));
     await settle(t.mirror);
-    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'pending', attempts: 1 });
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'pending', attempts: 1, lastError: 'offline' });
     await vi.advanceTimersByTimeAsync(60_000);
     await settle(t.mirror);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -263,16 +318,90 @@ describe('failures at each point', () => {
     expect(t.store.puts).toHaveLength(3);
   });
 
+  it('an outage never ends an item: hours of failures later it is still pending, and it saves when the pod is back', async () => {
+    const files = [hostedFile(1), hostedFile(2), hostedFile(3)];
+    const t = setup(files);
+    for (let i = 0; i < 1000; i++) t.store.putFailures.push({ kind: 'offline', reason: 'storage' });
+    await t.mirror.start();
+    for (const f of files) await t.mirror.enqueue(f.token);
+    for (let i = 0; i < 12; i++) {
+      await settle(t.mirror);
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+    }
+    expect(t.mirror.summary().counts).toMatchObject({ failed: 0, pending: 3 });
+    t.store.putFailures.length = 0;
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
+    await settle(t.mirror);
+    expect(t.mirror.summary().counts).toMatchObject({ saved: 3, failed: 0 });
+  });
+
+  it('waits at most about fifteen minutes between attempts, however long the outage', async () => {
+    const t = setup([hostedFile(1)]);
+    for (let i = 0; i < 1000; i++) t.store.putFailures.push({ kind: 'offline', reason: 'storage' });
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    for (let i = 0; i < 14; i++) {
+      await settle(t.mirror);
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    const before = t.store.puts.length;
+    await vi.advanceTimersByTimeAsync(19 * 60_000);
+    await settle(t.mirror);
+    expect(t.store.puts.length).toBeGreaterThan(before);
+  });
+
+  it('re-queues the retrying items at once when the app restarts', async () => {
+    const t = setup([hostedFile(1)]);
+    for (let i = 0; i < 1000; i++) t.store.putFailures.push({ kind: 'offline', reason: 'storage' });
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    for (let i = 0; i < 12; i++) {
+      await settle(t.mirror);
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+    }
+    await t.mirror.stop();
+    const again = setup([hostedFile(1)], {}, t.journal);
+    await again.mirror.start();
+    await settle(again.mirror);
+    expect(again.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('a download that keeps being refused before any answer is reported as blocked after a few tries', async () => {
+    const t = setup([hostedFile(1)]);
+    t.bytes.bodies.set(hostedFile(1).media_links.cdn_url, new BytesError('network'));
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    for (let i = 0; i < 6; i++) {
+      await settle(t.mirror);
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'failed', reason: 'cdn-blocked', attempts: 3 });
+  });
+
   it('retry() puts a failed item back at the front with its attempts reset', async () => {
     const t = setup([hostedFile(1)]);
     t.store.putFailures.push({ kind: 'conflict', reason: 'hash-mismatch' });
     await t.mirror.start();
     await t.mirror.enqueue(token(1));
     await settle(t.mirror);
-    expect(t.mirror.stateOf(token(1))?.kind).toBe('failed');
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'failed', attempts: 1 });
     await t.mirror.retry(token(1));
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'pending', attempts: 0 });
     await settle(t.mirror);
     expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('retryAllFailed puts every failed item back and leaves the others alone', async () => {
+    const t = setup([hostedFile(1), hostedFile(2), hostedFile(3)]);
+    t.store.putFailures.push({ kind: 'conflict', reason: 'hash-mismatch' }, { kind: 'conflict', reason: 'hash-mismatch' });
+    await t.mirror.start();
+    for (const n of [1, 2, 3]) await t.mirror.enqueue(token(n));
+    await settle(t.mirror);
+    expect(t.mirror.summary().counts).toMatchObject({ failed: 2, saved: 1 });
+    expect(await t.mirror.retryAllFailed()).toBe(2);
+    await settle(t.mirror);
+    expect(t.mirror.summary().counts).toMatchObject({ failed: 0, saved: 3 });
+    expect(await t.mirror.retryAllFailed()).toBe(0);
   });
 
   it('retries an unknown token as a no-op', async () => {
@@ -478,59 +607,175 @@ describe('exposure', () => {
 
 describe('reconcile', () => {
   const library = (count: number) => Array.from({ length: count }, (_, i) => hostedFile(i + 1));
+  const empty = (t: ReturnType<typeof setup>) => t.journal.ensureBaseline(ACCOUNT, { kind: 'empty' });
+  const add = (t: ReturnType<typeof setup>, file: HostedMediaFile) => {
+    t.hosted.files.set(file.token, file);
+    t.hosted.listing.unshift(file);
+    const n = Number(file.token.replace(HOSTED_TOKEN_PREFIX, ''));
+    t.bytes.bodies.set(file.media_links.cdn_url, png(n));
+    t.bytes.bodies.set(`https://cdn.example/thumbs/${n}/512.png`, png(n + 100));
+  };
 
-  it('stops at the connect watermark', async () => {
-    const files = library(6); // created minutes 1..6 of 2026-06-01
-    const t = setup(files, { pageSize: 2 });
-    // Connect happened between item 3 and item 4.
-    await t.journal.ensureWatermark(ACCOUNT, new Date(files[3].created_at).getTime() - 1);
+  it('takes its baseline from the newest hosted item, not from the local clock', async () => {
+    const files = library(3);
+    const t = setup(files);
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z')); // a local clock far ahead of the server
     await t.mirror.start();
     await settle(t.mirror);
-    for (const n of [6, 5, 4]) expect(t.mirror.stateOf(token(n))?.kind).toBe('saved');
-    for (const n of [3, 2, 1]) expect(t.mirror.stateOf(token(n))).toBeUndefined();
+    expect((await t.journal.getAccountState(ACCOUNT))?.baseline).toEqual({ kind: 'item', token: token(3), createdAt: new Date(files[2].created_at).getTime() });
+    expect(t.mirror.summary().counts).toMatchObject({ saved: 0, pending: 0 });
+    // Something uploaded after connecting has a server time after the baseline, whatever the clock says.
+    add(t, hostedFile(9, { created_at: '2026-06-02T00:00:00.000Z' }));
+    await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(9))?.kind).toBe('saved');
+    expect(t.mirror.stateOf(token(2))).toBeUndefined();
   });
 
-  it('stops at the first journalled item', async () => {
-    const files = library(5);
-    const t = setup(files, { pageSize: 2 });
-    await t.journal.ensureWatermark(ACCOUNT, 0);
-    await t.journal.create({ ...ACCOUNT, token: token(3), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: 'https://pod.example/d3' });
+  it('records an empty library as empty, and then copies everything that appears', async () => {
+    const t = setup([]);
     await t.mirror.start();
     await settle(t.mirror);
-    expect(t.mirror.stateOf(token(5))?.kind).toBe('saved');
-    expect(t.mirror.stateOf(token(4))?.kind).toBe('saved');
-    expect(t.mirror.stateOf(token(2))).toBeUndefined();
-    expect(t.hosted.calls.filter((c) => c.startsWith('list:'))).toEqual(['list:0', 'list:1']);
+    expect((await t.journal.getAccountState(ACCOUNT))?.baseline).toEqual({ kind: 'empty' });
+    add(t, hostedFile(1));
+    await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('waits for the baseline while the hosted listing is down and copies nothing old', async () => {
+    const t = setup(library(2));
+    t.hosted.listDown = true;
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect((await t.mirror.reconcile()).stoppedBy).toBe('hosted-unavailable');
+    expect((await t.journal.getAccountState(ACCOUNT))?.baseline).toBeUndefined();
+    t.hosted.listDown = false;
+    await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect(t.mirror.summary().counts.saved).toBe(0);
+  });
+
+  it('stops at the baseline item and not before', async () => {
+    const files = library(6);
+    const t = setup(files.slice(0, 3), { pageSize: 2 }); // connect with items 1..3 listed
+    await t.mirror.start();
+    await settle(t.mirror);
+    for (const n of [4, 5, 6]) add(t, files[n - 1]);
+    await t.mirror.reconcile();
+    await settle(t.mirror);
+    for (const n of [4, 5, 6]) expect(t.mirror.stateOf(token(n))?.kind).toBe('saved');
+    for (const n of [1, 2, 3]) expect(t.mirror.stateOf(token(n))).toBeUndefined();
+  });
+
+  it('does not stop at a journalled item: an upload behind a typed event is still copied', async () => {
+    const t = setup([hostedFile(1)]);
+    await t.mirror.start();
+    await settle(t.mirror);
+    add(t, hostedFile(2)); // an upload: no event
+    add(t, hostedFile(3)); // a generation: its event journals it directly
+    t.events.emit({ type: 'added', tokens: [token(3)] });
+    await settle(t.mirror);
+    const result = await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect(result.enqueued).toBe(1);
+    expect(t.mirror.stateOf(token(2))?.kind).toBe('saved');
+    expect(t.mirror.stateOf(token(3))?.kind).toBe('saved');
+  });
+
+  it('stops at the last completed walk and saves its place when it is interrupted', async () => {
+    const t = setup([hostedFile(1)], { pageSize: 2 });
+    await t.mirror.start();
+    await settle(t.mirror);
+    for (const n of [2, 3, 4, 5, 6]) add(t, hostedFile(n));
+    const list = t.hosted.listUserMediaFiles.bind(t.hosted);
+    let fail = true;
+    t.hosted.listUserMediaFiles = async (page, size, signal) => (page >= 1 && fail ? { ok: false, kind: 'unavailable' } : list(page, size, signal));
+    const first = await t.mirror.reconcile();
+    expect(first).toMatchObject({ stoppedBy: 'hosted-unavailable', enqueued: 2 });
+    expect((await t.journal.getAccountState(ACCOUNT))?.mark).toMatchObject({ token: token(1) }); // still the last completed walk's
+    expect((await t.journal.getAccountState(ACCOUNT))?.cursor).toEqual({ page: 1 });
+    fail = false;
+    const second = await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect(second.stoppedBy).toBe('mark');
+    for (const n of [2, 3, 4, 5, 6]) expect(t.mirror.stateOf(token(n))?.kind).toBe('saved');
+    const done = await t.journal.getAccountState(ACCOUNT);
+    expect(done?.mark).toMatchObject({ token: token(6) });
+    expect(done?.cursor).toBeUndefined();
+    // The next walk stops at the mark at once.
+    const calls = t.hosted.calls.length;
+    expect((await t.mirror.reconcile()).stoppedBy).toBe('mark');
+    expect(t.hosted.calls.slice(calls)).toEqual(['list:0']);
+  });
+
+  it('skips ahead to where an interrupted walk got to when nothing new arrived', async () => {
+    const t = setup([hostedFile(1)], { pageSize: 2 });
+    await t.mirror.start();
+    await settle(t.mirror);
+    for (const n of [2, 3, 4, 5, 6, 7, 8]) add(t, hostedFile(n));
+    const list = t.hosted.listUserMediaFiles.bind(t.hosted);
+    let failFrom = 3;
+    t.hosted.listUserMediaFiles = async (page, size, signal) => (page >= failFrom ? { ok: false, kind: 'unavailable' } : list(page, size, signal));
+    await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect((await t.journal.getAccountState(ACCOUNT))?.cursor).toEqual({ page: 3 });
+    failFrom = 99;
+    const before = t.hosted.calls.length;
+    await t.mirror.reconcile();
+    await settle(t.mirror);
+    const pages = t.hosted.calls.slice(before).filter((c) => c.startsWith('list:'));
+    expect(pages[0]).toBe('list:0');
+    expect(pages).not.toContain('list:1');
+    for (const n of [2, 3, 4, 5, 6, 7, 8]) expect(t.mirror.stateOf(token(n))?.kind).toBe('saved');
   });
 
   it('walks more than one page when many items arrived since the last run', async () => {
-    const t = setup(library(7), { pageSize: 3 });
-    await t.journal.ensureWatermark(ACCOUNT, 0);
+    const t = setup([], { pageSize: 3 });
     await t.mirror.start();
     await settle(t.mirror);
+    for (const file of library(7)) add(t, file);
+    const result = await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect(result.pages).toBe(3);
     expect(t.mirror.summary().counts.saved).toBe(7);
-    expect(t.hosted.calls.filter((c) => c.startsWith('list:'))).toEqual(['list:0', 'list:1', 'list:2']);
   });
 
   it('does not stop early when the hosted listing is not newest first', async () => {
     const files = library(4);
     const t = setup(files, { pageSize: 10 });
     t.hosted.listing = [files[1], files[3], files[0], files[2]];
-    await t.journal.ensureWatermark(ACCOUNT, 0);
-    await t.journal.create({ ...ACCOUNT, token: token(4), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1 });
+    await empty(t);
     await t.mirror.start();
     await settle(t.mirror);
     const result = await t.mirror.reconcile();
+    await settle(t.mirror);
     expect(result.orderUnverified).toBe(true);
-    for (const n of [1, 2, 3]) expect(t.mirror.stateOf(token(n))?.kind).toBe('saved');
+    for (const n of [1, 2, 3, 4]) expect(t.mirror.stateOf(token(n))?.kind).toBe('saved');
+  });
+
+  it('shows an item whose date cannot be read as skipped, instead of copying or losing it, and retries it', async () => {
+    const t = setup([hostedFile(1)]);
+    await t.mirror.start();
+    await settle(t.mirror);
+    add(t, hostedFile(2, { created_at: 'last tuesday' }));
+    await t.mirror.reconcile();
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(2))).toEqual({ kind: 'skipped', reason: 'bad-date' });
+    expect(t.store.puts).toHaveLength(0);
+    await t.mirror.retryAllFailed();
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(2))?.kind).toBe('saved');
   });
 
   it('reports a hosted outage and tries again on the next call', async () => {
-    const t = setup(library(2));
-    await t.journal.ensureWatermark(ACCOUNT, 0);
-    t.hosted.listDown = true;
+    const t = setup([]);
+    await empty(t);
     await t.mirror.start();
     await settle(t.mirror);
+    add(t, hostedFile(1));
+    add(t, hostedFile(2));
+    t.hosted.listDown = true;
     expect((await t.mirror.reconcile()).stoppedBy).toBe('hosted-unavailable');
     t.hosted.listDown = false;
     const result = await t.mirror.reconcile();
@@ -539,9 +784,9 @@ describe('reconcile', () => {
   });
 
   it('journals what it skips so the gallery can say why', async () => {
-    const files = [hostedFile(1), hostedFile(2, { media_type: 'audio', media_class: 'audio' })];
+    const files = [hostedFile(1), hostedFile(2, { media_type: 'mp3', media_class: 'audio' })];
     const t = setup(files);
-    await t.journal.ensureWatermark(ACCOUNT, 0);
+    await empty(t);
     await t.mirror.start();
     await settle(t.mirror);
     expect(t.mirror.stateOf(token(2))).toEqual({ kind: 'skipped', reason: 'audio-unsupported' });
@@ -557,7 +802,7 @@ describe('events', () => {
   it('copies items the app reports and walks the listing once for a burst of changes', async () => {
     const files = [hostedFile(1), hostedFile(2), hostedFile(3)];
     const t = setup(files);
-    await t.journal.ensureWatermark(ACCOUNT, 0);
+    await t.journal.ensureBaseline(ACCOUNT, { kind: 'empty' });
     t.hosted.listing = [];
     await t.mirror.start();
     await settle(t.mirror);
@@ -602,13 +847,13 @@ describe('delete pairing', () => {
   });
 
   it('keeps a failed half visible, retries it, and finishes', async () => {
-    const t = setup([hostedFile(1)], { maxAttempts: 2 });
+    const t = setup([hostedFile(1)]);
     await t.mirror.start();
     await saved(t);
-    t.store.removeFailures.push({ kind: 'forbidden', reason: 'storage' });
+    t.store.removeFailures.push({ kind: 'conflict', reason: 'hash-mismatch' });
     t.events.emit({ type: 'deleted', token: token(1) });
     await settle(t.mirror);
-    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'remove-failed', reason: 'forbidden', attempts: 1 });
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'remove-failed', reason: 'conflict', attempts: 1 });
     expect(t.mirror.summary().counts.failed).toBe(1);
     await t.mirror.retry(token(1));
     await settle(t.mirror);
@@ -618,7 +863,7 @@ describe('delete pairing', () => {
 
   it('resumes a removal that a crash interrupted', async () => {
     const journal = createMemoryMirrorJournal();
-    await journal.ensureWatermark(ACCOUNT, 0);
+    await journal.ensureBaseline(ACCOUNT, { kind: 'empty' });
     await journal.create({ ...ACCOUNT, token: token(1), state: 'removing', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: 'https://pod.example/alice/creative-assets/2026/06/descX' });
     const t = setup([], {}, journal);
     await t.mirror.start();
@@ -666,7 +911,7 @@ describe('delete pairing', () => {
 describe('restart, accounts and forgetting', () => {
   it('resumes what was pending when the app closed', async () => {
     const journal = createMemoryMirrorJournal();
-    await journal.ensureWatermark(ACCOUNT, 0);
+    await journal.ensureBaseline(ACCOUNT, { kind: 'empty' });
     await journal.create({ ...ACCOUNT, token: token(1), state: 'pending', attempts: 2, createdAt: 1, updatedAt: 1 });
     const t = setup([hostedFile(1)], {}, journal);
     await t.mirror.start();
@@ -715,5 +960,409 @@ describe('restart, accounts and forgetting', () => {
     expect(await t.journal.get(ACCOUNT, token(1))).toMatchObject({ state: 'saved' });
     expect(new Set(seen).size).toBeGreaterThan(2);
     expect(t.mirror.summary().paused).toBe('stopped');
+  });
+});
+
+describe('one pod copy for several hosted items', () => {
+  const twins = async () => {
+    const t = setup([hostedFile(1), hostedFile(2)]);
+    t.store.fixedUrl = 'https://pod.example/alice/creative-assets/2026/06/shared';
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await t.mirror.enqueue(token(2));
+    await settle(t.mirror);
+    return t;
+  };
+
+  it('keeps the copy while another hosted item still points at it, and removes it with the last one', async () => {
+    const t = await twins();
+    expect(t.mirror.summary().counts.saved).toBe(2);
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([]);
+    expect(t.mirror.stateOf(token(1))).toBeUndefined();
+    expect(t.mirror.stateOf(token(2))).toMatchObject({ kind: 'saved', descriptionUrl: 'https://pod.example/alice/creative-assets/2026/06/shared' });
+    expect(await t.journal.get(ACCOUNT, token(2))).toMatchObject({ state: 'saved' });
+    t.events.emit({ type: 'deleted', token: token(2) });
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual(['https://pod.example/alice/creative-assets/2026/06/shared']);
+  });
+
+  it('counts only this account: another account holding the same URL is not a pairing', async () => {
+    const journal = createMemoryMirrorJournal();
+    const url = 'https://pod.example/alice/creative-assets/2026/06/shared';
+    await journal.create({ ...ACCOUNT, username: 'someone_else', token: token(9), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: url });
+    const t = setup([hostedFile(1)], {}, journal);
+    t.store.fixedUrl = url;
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([url]);
+  });
+});
+
+describe('deletions that happened while no mirror was running', () => {
+  const saved = async (count: number, overrides: Partial<PodMirrorOptions> = {}) => {
+    const files = Array.from({ length: count }, (_, i) => hostedFile(i + 1));
+    const t = setup(files, overrides);
+    await t.mirror.start();
+    for (const f of files) await t.mirror.enqueue(f.token);
+    await settle(t.mirror);
+    expect(t.mirror.summary().counts.saved).toBe(count);
+    t.hosted.calls.length = 0;
+    return t;
+  };
+
+  it('removes the pod copy of an item the hosted side no longer has, and only that one', async () => {
+    const t = await saved(3);
+    t.hosted.files.delete(token(2));
+    expect(await t.mirror.verify(true)).toMatchObject({ checked: 3, removed: 1, stoppedBy: 'done' });
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(2))).toBeUndefined();
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+    expect(t.mirror.stateOf(token(3))?.kind).toBe('saved');
+    expect(t.store.removed).toHaveLength(1);
+  });
+
+  it('looks items up in chunks and confirms a missing one by itself before removing', async () => {
+    const t = await saved(5, { verifyChunk: 2 });
+    t.hosted.files.delete(token(4));
+    await t.mirror.verify(true);
+    await settle(t.mirror);
+    expect(t.hosted.calls.filter((c) => c.startsWith('batch:'))).toEqual(['batch:2', 'batch:2', 'batch:1']);
+    expect(t.hosted.calls).toContain(`file:${token(4)}`);
+    expect(t.store.removed).toHaveLength(1);
+  });
+
+  it('removes nothing when the lookup fails, when the item cannot be confirmed, or when offline', async () => {
+    const t = await saved(2);
+    t.hosted.files.delete(token(1));
+    t.hosted.batchDown = true;
+    expect((await t.mirror.verify(true)).stoppedBy).toBe('hosted-unavailable');
+    t.hosted.batchDown = false;
+    t.hosted.down.add(token(1)); // the item's own lookup errors instead of answering "not found"
+    expect((await t.mirror.verify(true)).stoppedBy).toBe('hosted-unavailable');
+    t.hosted.down.clear();
+    t.network.set(false);
+    t.hosted.calls.length = 0;
+    expect((await t.mirror.verify(true)).stoppedBy).toBe('hosted-unavailable');
+    expect(t.hosted.calls).toEqual([]);
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([]);
+    expect(t.mirror.summary().counts.saved).toBe(2);
+  });
+
+  it('removes nothing under a different hosted user than the one the journal belongs to', async () => {
+    const t = await saved(1);
+    t.hosted.files.delete(token(1));
+    t.hosted.user = 'someone_else';
+    expect((await t.mirror.verify(true)).stoppedBy).toBe('hosted-unavailable');
+    t.hosted.user = null;
+    expect((await t.mirror.verify(true)).stoppedBy).toBe('hosted-unavailable');
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([]);
+  });
+
+  it('runs on start and then at most once a day', async () => {
+    const files = [hostedFile(1)];
+    const t = setup(files);
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.hosted.calls.filter((c) => c.startsWith('batch:'))).toHaveLength(0); // nothing was saved at start
+    expect((await t.mirror.verify()).stoppedBy).toBe('too-soon'); // the pass on start has just run
+    await vi.advanceTimersByTimeAsync(23 * 3_600_000);
+    expect((await t.mirror.verify()).stoppedBy).toBe('too-soon');
+    t.hosted.files.delete(token(1));
+    await vi.advanceTimersByTimeAsync(2 * 3_600_000);
+    await settle(t.mirror);
+    expect(t.store.removed).toHaveLength(1); // the daily timer found it
+    expect(t.hosted.calls.filter((c) => c.startsWith('batch:'))).toHaveLength(1); // not before
+  });
+
+  it('finds a deletion made while the app was closed when it starts again', async () => {
+    const t = await saved(2);
+    await t.mirror.stop();
+    await vi.advanceTimersByTimeAsync(2 * 3_600_000);
+    const again = setup([hostedFile(2)], {}, t.journal);
+    again.hosted.files.delete(token(1));
+    await again.mirror.start();
+    await settle(again.mirror);
+    expect(again.mirror.stateOf(token(1))).toBeUndefined();
+    expect(again.mirror.stateOf(token(2))?.kind).toBe('saved');
+    expect(again.store.removed).toHaveLength(1);
+  });
+});
+
+describe('exposure pauses the person can act on', () => {
+  it('checks again on request and goes on once the container is private', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.exposure = 'exposed';
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary()).toMatchObject({ paused: 'exposed', exposureTarget: 'https://pod.example/alice/creative-assets/' });
+    t.store.exposure = 'private';
+    t.mirror.recheckExposure();
+    await settle(t.mirror);
+    expect(t.mirror.summary()).toMatchObject({ paused: null, exposureTarget: null });
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('tries an inconclusive probe again by itself, with backoff', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.exposure = 'offline';
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    t.store.exposure = 'private';
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('asks the person when the pod cannot say, and writes only to the container they confirmed', async () => {
+    const t = setup([hostedFile(1), hostedFile(2)]);
+    t.store.exposure = 'unknown';
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary()).toMatchObject({ paused: 'exposure-unknown', exposureTarget: 'https://pod.example/alice/creative-assets/' });
+    expect(t.store.puts).toEqual([]);
+    expect(t.open.allowed).toEqual([false]);
+
+    expect(await t.mirror.confirmPrivate()).toBe(true);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+    expect(t.open.allowed.at(-1)).toBe(true);
+    expect((await t.journal.getAccountState(ACCOUNT))?.confirmedPrivate).toEqual(['https://pod.example/alice/creative-assets/']);
+
+    // Nothing is left to confirm, so a second confirmation is not accepted.
+    expect(await t.mirror.confirmPrivate()).toBe(false);
+
+    // A different container is not covered by the earlier confirmation.
+    t.store.target = 'https://pod.example/alice/other-library/';
+    await t.mirror.stop();
+    const again = setup([hostedFile(2)], {}, t.journal);
+    again.store.exposure = 'unknown';
+    again.store.target = 'https://pod.example/alice/other-library/';
+    await again.mirror.start();
+    await again.mirror.enqueue(token(2));
+    await settle(again.mirror);
+    expect(again.mirror.summary().paused).toBe('exposure-unknown');
+    expect(again.store.puts).toEqual([]);
+  });
+
+  it('remembers the confirmation across a restart and never extends it to an exposed answer', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.exposure = 'unknown';
+    await t.mirror.start();
+    await settle(t.mirror);
+    await t.mirror.confirmPrivate();
+    await t.mirror.stop();
+    const again = setup([hostedFile(1)], {}, t.journal);
+    again.store.exposure = 'unknown';
+    await again.mirror.start();
+    await again.mirror.enqueue(token(1));
+    await settle(again.mirror);
+    expect(again.mirror.stateOf(token(1))?.kind).toBe('saved');
+    expect(again.open.allowed).toContain(true);
+    await again.mirror.stop();
+    const exposed = setup([hostedFile(2)], {}, t.journal);
+    exposed.store.exposure = 'exposed';
+    await exposed.mirror.start();
+    await exposed.mirror.enqueue(token(2));
+    await settle(exposed.mirror);
+    expect(exposed.mirror.summary().paused).toBe('exposed');
+    expect(exposed.store.puts).toEqual([]);
+    expect(await exposed.mirror.confirmPrivate()).toBe(false);
+  });
+
+  it('treats a container below a confirmed one as confirmed', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.target = 'https://pod.example/alice/';
+    t.store.exposure = 'unknown';
+    await t.mirror.start();
+    await settle(t.mirror);
+    await t.mirror.confirmPrivate();
+    await t.mirror.stop();
+    const again = setup([hostedFile(1)], {}, t.journal);
+    again.store.exposure = 'unknown';
+    again.store.target = 'https://pod.example/alice/creative-assets/';
+    await again.mirror.start();
+    await settle(again.mirror);
+    expect(again.mirror.summary().paused).toBeNull();
+  });
+});
+
+describe('races between a hosted delete and a copy', () => {
+  it('removes the copy of an item deleted while it was being written, even after a duplicate added event', async () => {
+    const t = setup([hostedFile(1)]);
+    let release: () => void = () => undefined;
+    t.store.gate = new Promise((resolve) => (release = resolve));
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await vi.advanceTimersByTimeAsync(0);
+    t.events.emit({ type: 'deleted', token: token(1) });
+    t.events.emit({ type: 'added', tokens: [token(1)] });
+    await vi.advanceTimersByTimeAsync(0);
+    // The write is not cut short: a copy the pod accepted would be left with nothing pointing at it.
+    expect((t.store.puts[0] as { signal?: AbortSignal }).signal?.aborted).toBe(false);
+    release();
+    await settle(t.mirror);
+    expect(t.store.removed).toHaveLength(1);
+    expect(t.mirror.stateOf(token(1))).toBeUndefined();
+  });
+});
+
+describe('stopping and losing the session mid-copy', () => {
+  const inFlight = async () => {
+    const t = setup([hostedFile(1)]);
+    let release: () => void = () => undefined;
+    t.store.gate = new Promise((resolve) => (release = resolve));
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.store.puts).toHaveLength(1);
+    const signal = (t.store.puts[0] as { signal: AbortSignal }).signal;
+    return { t, release, signal };
+  };
+
+  it('aborts the write when the mirror stops, and counts nothing against the item', async () => {
+    const { t, release, signal } = await inFlight();
+    t.store.putFailures.push({ kind: 'failed', reason: 'unexpected' });
+    const stopping = t.mirror.stop();
+    expect(signal.aborted).toBe(true);
+    release();
+    await stopping;
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'pending', attempts: 0 });
+    expect((await t.journal.get(ACCOUNT, token(1)))?.attempts).toBe(0);
+  });
+
+  it('aborts the write when the pod session ends, and counts nothing against the item', async () => {
+    const { t, release, signal } = await inFlight();
+    t.store.putFailures.push({ kind: 'failed', reason: 'unexpected' });
+    t.session.set(false);
+    expect(signal.aborted).toBe(true);
+    release();
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'pending', attempts: 0 });
+  });
+
+  it('does not count a failure that arrives after the network went away unnoticed', async () => {
+    const { t, release } = await inFlight();
+    t.store.putFailures.push({ kind: 'failed', reason: 'unexpected' });
+    t.network.online = false; // no event yet, so nothing was aborted
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await t.mirror.idle();
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'pending', attempts: 0 });
+  });
+
+  it('does not count a failure that arrives after the session went away unnoticed', async () => {
+    const { t, release } = await inFlight();
+    t.store.putFailures.push({ kind: 'failed', reason: 'unexpected' });
+    t.session.connected = false;
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await t.mirror.idle();
+    expect(t.mirror.stateOf(token(1))).toEqual({ kind: 'pending', attempts: 0 });
+  });
+
+  it('opens the store again when the session reconnects, even from a connected state', async () => {
+    const t = setup([hostedFile(1)]);
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.open.calls).toBe(1);
+    t.session.set(true);
+    await settle(t.mirror);
+    expect(t.open.calls).toBe(2);
+  });
+
+  it('does not use a store that finished opening after the session changed', async () => {
+    const t = setup([hostedFile(1)]);
+    let finish: (value: { ok: true; store: ReturnType<typeof fakeStore> }) => void = () => undefined;
+    const slow = fakeStore();
+    const opened = new Promise<{ ok: true; store: ReturnType<typeof fakeStore> }>((resolve) => (finish = resolve));
+    const mirror = new PodMirror({
+      account: ACCOUNT, journal: t.journal, hosted: t.hosted, fetchPublicBytes: t.bytes.fetch, session: t.session, random: () => 0.5,
+      openStore: (async () => opened) as unknown as OpenStore,
+    });
+    await mirror.start();
+    await vi.advanceTimersByTimeAsync(0);
+    t.session.set(true); // the session changed while the store was opening
+    finish({ ok: true, store: slow });
+    await vi.advanceTimersByTimeAsync(0);
+    await mirror.enqueue(token(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(slow.puts).toEqual([]);
+    await mirror.stop();
+  });
+});
+
+describe('what the hosted side says about an item', () => {
+  it('holds an item back while its prompt cannot be read, then saves it with the prompt', async () => {
+    const file = hostedFile(1, { maybe_prompt_token: 'p_1' });
+    const t = setup([file]);
+    t.hosted.prompts.set('p_1', hostedPrompt('p_1'));
+    t.hosted.down.add('p_1');
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.store.puts).toEqual([]);
+    expect(t.mirror.stateOf(file.token)).toEqual({ kind: 'pending', attempts: 1, lastError: 'hosted-unavailable' });
+    t.hosted.down.clear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    expect((t.store.puts[0] as { description: { generation?: { prompt?: string } } }).description.generation?.prompt).toBe('a red fox at sunset');
+  });
+
+  it('does not link a reference image that is not saved', async () => {
+    const reference = hostedFile(2);
+    const file = hostedFile(1, { maybe_prompt_token: 'p_1' });
+    const t = setup([file, reference]);
+    t.hosted.prompts.set('p_1', hostedPrompt('p_1', { maybe_context_images: [{ media_token: token(2), semantic: 'reference' }] }));
+    t.store.putFailures.push({ kind: 'conflict', reason: 'hash-mismatch' }); // the reference ends failed
+    await t.mirror.start();
+    await t.mirror.enqueue(token(2));
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(2))?.kind).toBe('failed');
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    const put = t.store.puts[1] as { description: { generation?: { usedAssets?: string[] } } };
+    expect(put.description.generation?.usedAssets).toBeUndefined();
+  });
+
+  it('does not fetch a thumbnail for a 3D model', async () => {
+    const file = hostedFile(1, { media_type: 'glb', media_class: 'mesh', media_links: { cdn_url: 'https://cdn.example/files/1.glb', thumbnail_template: 'https://cdn.example/thumbs/1/{WIDTH}.png' } });
+    const t = setup([file]);
+    t.bytes.bodies.set(file.media_links.cdn_url, glb());
+    t.bytes.bodies.set('https://cdn.example/thumbs/1/512.png', png(1));
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(file.token)).toMatchObject({ kind: 'saved', thumbnail: 'none' });
+    expect(t.bytes.urls).not.toContain('https://cdn.example/thumbs/1/512.png');
+  });
+
+  it('skips a 3D record whose bytes are a cover image, instead of mirroring the image as the model', async () => {
+    const file = hostedFile(1, { media_type: 'glb', media_class: 'mesh' });
+    const t = setup([file]);
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(file.token)).toEqual({ kind: 'skipped', reason: 'unsupported-type' });
+    expect(t.store.puts).toEqual([]);
+  });
+
+  it('copies a record whose media_type is a format it has never seen, when the bytes are an image', async () => {
+    const file = hostedFile(1, { media_type: 'avif_future', media_class: null });
+    const t = setup([file]);
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(file.token)?.kind).toBe('saved');
   });
 });
