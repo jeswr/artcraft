@@ -107,28 +107,6 @@ use tauri_plugin_http;
 use tauri_plugin_log::Target;
 use tauri_plugin_log::TargetKind;
 
-/// Registers the app's URL schemes with the OS at run time, in debug builds on Linux and Windows
-/// only. There the OS starts a new instance with the URL as its only argument, and it learns the
-/// scheme from the installer (registry key, `.desktop` file); a `tauri dev` run is never
-/// installed, so without this the Solid sign-in callback has nowhere to go. The plugin documents
-/// `register_all` for exactly that case ("ensure the schemes are registered even if the user did
-/// not install the app properly"; Linux needs `xdg-mime` and `update-desktop-database`). macOS
-/// reads schemes from the bundle's Info.plist and the call is unsupported there. Release builds
-/// keep relying on the installer, so they never rewrite another install's registration.
-#[cfg(any(windows, target_os = "linux"))]
-fn register_dev_deep_links(app: &tauri::AppHandle) {
-  use tauri_plugin_deep_link::DeepLinkExt;
-  if !cfg!(debug_assertions) {
-    return;
-  }
-  if let Err(err) = app.deep_link().register_all() {
-    warn!("Could not register the app's URL schemes with the OS: {err}");
-  }
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
-fn register_dev_deep_links(_app: &tauri::AppHandle) {}
-
 /// Brings the existing window forward when a second launch (or a deep link) arrives.
 fn focus_main_window(app: &tauri::AppHandle) {
   if let Some(window) = app.get_webview_window(MAIN_WINDOW_NAME) {
@@ -387,4 +365,57 @@ pub fn run() {
       _ => {}
     }
   });
+}
+
+/// The scheme the Solid sign-in callback returns on is the app identifier (the
+/// `plugins.deep-link` entry of each config file; a test keeps them equal). Only the dev
+/// overlays' identifier ends in `.dev`.
+fn is_dev_identifier(identifier: &str) -> bool {
+  identifier.ends_with(".dev")
+}
+
+/// Registers the DEV scheme with the OS at run time on Linux and Windows. There the OS learns a
+/// scheme from the installer (registry key, `.desktop` file), and a dev run is never installed,
+/// so the sign-in callback would have nowhere to go. The pinned tauri-plugin-deep-link 2.4.10
+/// documents `register`/`register_all` for an app that was not installed properly; Linux needs
+/// `xdg-mime` and `update-desktop-database`, and macOS reads the bundle (unsupported). Only a dev
+/// identifier registers, and only its own scheme, so a debug binary built from the release config
+/// never takes over an installed release build's `ai.artcraft.app`. `is_registered` is asked
+/// first so the two tools are not run at every start. The release AppImage is deliberately not
+/// registered here: see `frontend/libs/pod-session/README.md`, "Deep links".
+#[cfg(any(windows, target_os = "linux"))]
+fn register_dev_deep_links(app: &tauri::AppHandle) {
+  use tauri_plugin_deep_link::DeepLinkExt;
+  let identifier = app.config().identifier.clone();
+  if !is_dev_identifier(&identifier) {
+    return;
+  }
+  let links = app.deep_link();
+  if links.is_registered(&identifier).unwrap_or(false) {
+    return;
+  }
+  if let Err(err) = links.register(&identifier) {
+    warn!("Could not register the dev URL scheme with the OS: {err}");
+  }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn register_dev_deep_links(_app: &tauri::AppHandle) {}
+
+#[cfg(test)]
+mod deep_link_tests {
+  use super::is_dev_identifier;
+
+  /// The sign-in redirect is `<identifier>:/oauth/callback`, so the scheme each config registers
+  /// must equal its identifier, and only the dev overlays may use a `.dev` one.
+  #[test]
+  fn every_config_registers_exactly_its_own_identifier_as_the_scheme() {
+    for conf in ["tauri.conf.json", "tauri-mac.conf.json", "tauri-dev-hot-reload.conf.json", "tauri-dev-static.conf.json"] {
+      let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(conf);
+      let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+      let identifier = value["identifier"].as_str().unwrap_or_else(|| panic!("{conf}: no identifier"));
+      assert_eq!(value.pointer("/plugins/deep-link/desktop/schemes").unwrap(), &serde_json::json!([identifier]), "{conf}");
+      assert_eq!(is_dev_identifier(identifier), conf.contains("dev"), "{conf}");
+    }
+  }
 }
