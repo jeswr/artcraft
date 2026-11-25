@@ -74,7 +74,14 @@ await session.leave();           // from any state: revoke, wipe locally, ask th
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `VITE_SOLID_CLIENT_ID` | a `.invalid` placeholder URL | https URL of the Client Identifier Document |
-| `VITE_SOLID_ALLOW_LOOPBACK` | unset | `true` in a dev build only: allow an `http://localhost` issuer |
+| `VITE_SOLID_ALLOW_LOOPBACK` | unset | `true` in a Vite dev run only (`import.meta.env.DEV` must also be true): allow an `http://localhost` or `http://127.0.0.1` issuer in the UI. It does not make pod-auth accept an insecure issuer, and the https requirement on the client identifier is unchanged |
+
+Both are read through `import.meta.env`, so they are baked in when the frontend is built; they
+are listed as Nx cache inputs (`nx.json`), so changing one is not served from a stale cache.
+There is no run-time way to change the client identifier. There is also **no variable for the
+redirect**: it is always `<app identifier>:/oauth/callback`, because the shell registers the
+private-use scheme from the same identifier and an override would point the callback at a
+scheme nothing handles.
 
 The redirect is derived from the app identifier (`<identifier>:/oauth/callback`, a private-use
 scheme), so release (`ai.artcraft.app`) and the dev overlays (`ai.artcraft.app.dev`) never

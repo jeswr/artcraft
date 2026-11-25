@@ -14,7 +14,10 @@
       "!{projectRoot}/.eslintrc.json",
       "!{projectRoot}/eslint.config.mjs"
     ],
-    "sharedGlobals": []
+    "sharedGlobals": [
+      { "env": "VITE_SOLID_CLIENT_ID" },
+      { "env": "VITE_SOLID_ALLOW_LOOPBACK" }
+    ]
   },
   "plugins": [
     {
