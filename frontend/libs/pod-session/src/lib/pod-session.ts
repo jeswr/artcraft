@@ -1,12 +1,14 @@
 import {
+  consumeFreshConnect,
+  credentialsCleared,
   enterPodMode,
+  gatePodMode,
   isPodMode,
   leavePodMode,
-  podPolicyApplied,
+  type PodGate,
   type PodModeRequests,
-  readPodModeOrigins,
+  readHostPodMode,
   reloadPodWindow,
-  sessionRestoreAllowed,
 } from '@storyteller/pod-mode';
 import { checkConfig, type ConfigCheck, type PodSessionConfig } from './config.js';
 import { parseIssuerInput } from './issuer.js';
@@ -26,18 +28,29 @@ export interface PodAuthPort {
 
 /** What the machine needs from the window and the shell, replaceable in tests. */
 export interface PodModePort {
+  /** This window was built in pod mode (latched). */
   isPodMode(): boolean;
-  sessionRestoreAllowed(): boolean;
-  /** A narrowing policy (shell header or meta element) is confirmed for this window. */
-  policyApplied(): boolean;
+  /**
+   * Whether pod-auth may be built here. Read afresh from the shell's frozen answer on every
+   * call; in production a meta policy or the page's own latch never satisfies it.
+   */
+  gate(): PodGate;
+  /** An ordinary window the shell says may still hold pod credentials: only disconnecting. */
+  finishing(): boolean;
   /** The issuer the shell recorded for this pod window, if any. */
   recordedIssuer(): string | null;
+  /** The issuer of a connect approved in the shell's dialog in this process, if any. */
+  freshIssuer(): string | null;
   /** Asks the shell to enter pod mode for `issuer` (native dialog). */
   requestEnter(issuer: string): Promise<'requested' | 'declined'>;
+  /** The click that starts a fresh sign-in: the shell hands out the approved issuer, once. */
+  consumeFresh(): Promise<string>;
   /** Asks the shell to rebuild the window, staying in the current mode. */
   requestReload(): Promise<void>;
-  /** Wipes through `wipeCredentials`, then asks the shell to leave pod mode. */
-  leave(wipeCredentials: () => Promise<void>): Promise<void>;
+  /** Asks the shell to leave pod mode (the wipe has already succeeded). */
+  leave(): Promise<void>;
+  /** Tells the shell a wipe succeeded in a window that is not in pod mode. */
+  credentialsCleared(): Promise<void>;
 }
 
 /**
@@ -45,8 +58,8 @@ export interface PodModePort {
  * words, never an origin, token or URL.
  */
 export type MarkerValue =
-  /** Connect was confirmed; start the sign-in in the pod window. */
-  | 'connect'
+  /** The stored data must be deleted before any connection to it opens; then carry on. */
+  | 'wipe'
   /** A disconnect needs the stored data deleted before any connection to it opens. */
   | 'leave'
   | 'leave-revocation-failed'
@@ -77,6 +90,13 @@ export interface PodSession {
   start(): Promise<PodSessionState>;
   /** Asks the app to enter pod mode for the typed issuer. The app confirms in its own dialog. */
   connect(issuerInput: string): Promise<void>;
+  /**
+   * The click that starts a sign-in, in a pod window that has a freshly approved connect. Wipes
+   * stale stores, then opens the system browser. Never called by anything but a click.
+   */
+  beginSignIn(): Promise<void>;
+  /** An ordinary window that may still hold pod credentials shows only the finish flow. */
+  finishing(): boolean;
   /** Abandons a sign-in that is waiting for the browser. */
   cancel(): void;
   /**
@@ -94,7 +114,7 @@ export interface PodSession {
 }
 
 const MARKER_KEY = 'artcraft.podSession.marker';
-const MARKER_VALUES: readonly MarkerValue[] = ['connect', 'leave', 'leave-revocation-failed', 'done', 'done-revocation-failed'];
+const MARKER_VALUES: readonly MarkerValue[] = ['wipe', 'leave', 'leave-revocation-failed', 'done', 'done-revocation-failed'];
 
 export function createPodSession(deps: PodSessionDeps): PodSession {
   const podMode = deps.podMode ?? realPodModePort();
@@ -134,10 +154,9 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     const config = checkConfig(deps.config);
     if (config === 'not-configured') return 'not-configured';
     if (config === 'invalid') return 'invalid-config';
-    if (!podMode.isPodMode()) return 'window-not-clean';
-    if (!podMode.sessionRestoreAllowed()) return 'window-not-clean';
-    if (!podMode.policyApplied()) return 'policy-not-applied';
-    return null;
+    const shell = podMode.gate();
+    if (shell === 'policy-not-applied') return 'policy-not-applied';
+    return shell === 'ok' ? null : 'window-not-clean';
   }
 
   /** Revoke at the provider and purge pod-auth's stored sessions. True when that worked. */
@@ -158,14 +177,20 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     }
   }
 
-  /** After any failure once credentials may exist: revoke and wipe, both best effort. */
+  /**
+   * After any failure once credentials may exist: revoke and wipe, both best effort. A delete
+   * that is only queued, or one that failed, is remembered, so the next window deletes before
+   * anything opens the stores.
+   */
   async function scrub(): Promise<void> {
-    await revoke();
+    const revoked = await revoke();
+    let wiped = false;
     try {
-      await deps.wipeStores();
+      wiped = (await deps.wipeStores()) === 'wiped';
     } catch {
-      // the caller already reports the failure; leave still wipes
+      wiped = false;
     }
+    if (!wiped) marker.set(revoked ? 'wipe' : 'leave-revocation-failed');
   }
 
   async function signIn(issuer: string): Promise<void> {
@@ -176,7 +201,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     set({ kind: 'signing-in', issuer });
     try {
       // A fresh sign-in starts from empty stores: anything already there was not written by
-      // this window's own sign-in. A delete that is only pending is not empty.
+      // this window's own sign-in. A delete that is only queued is not empty.
       if ((await deps.wipeStores()) !== 'wiped') return fail('wipe-failed');
       if (controller.signal.aborted) return settleCancelled();
       const created = deps.createAuth();
@@ -225,7 +250,8 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   async function finishLeave(revoked: boolean): Promise<void> {
     marker.set(revoked ? 'done' : 'done-revocation-failed');
     try {
-      if (podMode.isPodMode()) await podMode.leave(async () => undefined);
+      if (podMode.isPodMode()) await podMode.leave();
+      else if (podMode.finishing()) await podMode.credentialsCleared();
     } catch {
       marker.set(null);
       return fail('request-failed');
@@ -236,17 +262,20 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     set(revoked ? { kind: 'disconnected', outcome: 'disconnected' } : { kind: 'signed-out-locally' });
   }
 
-  async function settleLeaveMarker(value: 'leave' | 'leave-revocation-failed'): Promise<void> {
-    // No pod-auth exists in this window yet, so nothing holds the stored data open.
-    marker.set(null);
-    set({ kind: 'leaving', step: 'clearing' });
-    let outcome: WipeOutcome;
+  /** Delete first, in a window where nothing holds the stored data open. True when it is gone. */
+  async function wipeNow(): Promise<boolean> {
     try {
-      outcome = await deps.wipeStores();
+      return (await deps.wipeStores()) === 'wiped';
     } catch {
-      return fail('wipe-failed');
+      return false;
     }
-    if (outcome !== 'wiped') return fail('wipe-failed');
+  }
+
+  async function settleLeaveMarker(value: 'leave' | 'leave-revocation-failed'): Promise<void> {
+    set({ kind: 'leaving', step: 'clearing' });
+    // The marker stays until the delete is confirmed: a quit in between leaves it for the next start.
+    if (!(await wipeNow())) return fail('wipe-failed');
+    marker.set(null);
     await finishLeave(value === 'leave');
   }
 
@@ -288,22 +317,51 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     start() {
       started ??= (async () => {
         const pending = marker.get();
-        if (podMode.isPodMode() && (pending === 'leave' || pending === 'leave-revocation-failed')) {
+        const inPod = podMode.isPodMode();
+        if (inPod && (pending === 'leave' || pending === 'leave-revocation-failed')) {
           await settleLeaveMarker(pending);
           return state;
         }
-        marker.set(null);
+        if (inPod && pending === 'wipe') {
+          set({ kind: 'leaving', step: 'clearing' });
+          if (!(await wipeNow())) {
+            fail('wipe-failed');
+            return state;
+          }
+          marker.set(null);
+          set({ kind: 'disconnected' });
+        } else if (!inPod && podMode.finishing()) {
+          // Credentials may still be in web storage and the window loaded no analytics. The
+          // only thing to do is delete them; nothing here opens pod-auth.
+          marker.set(null);
+          set({ kind: 'leaving', step: 'clearing' });
+          if (await wipeNow()) await finishLeave(pending !== 'leave-revocation-failed' && pending !== 'done-revocation-failed');
+          else fail('wipe-failed');
+          return state;
+        } else if (pending !== 'done' && pending !== 'done-revocation-failed') {
+          marker.set(null);
+        }
         const result = await selfTest().catch((): SelfTestResult => ({ ok: false, reason: 'key-not-persistable' }));
         if (!result.ok) {
           set({ kind: 'unsupported', reason: result.reason });
           return state;
         }
-        if (pending === 'done') set({ kind: 'disconnected', outcome: 'disconnected' });
-        else if (pending === 'done-revocation-failed') set({ kind: 'signed-out-locally' });
-        if (!podMode.isPodMode()) return state;
-        const issuer = podMode.recordedIssuer();
-        if (pending === 'connect' && issuer !== null) await signIn(issuer);
-        else await restore();
+        if (pending === 'done') {
+          marker.set(null);
+          set({ kind: 'disconnected', outcome: 'disconnected' });
+        } else if (pending === 'done-revocation-failed') {
+          marker.set(null);
+          set({ kind: 'signed-out-locally' });
+        }
+        if (!inPod) return state;
+        // A connect the person approved in the dialog in this process waits for a click. Nothing
+        // starts a sign-in on its own, and a record merely loaded from disk only restores.
+        const fresh = podMode.freshIssuer();
+        if (fresh !== null && fresh === podMode.recordedIssuer() && gate() === null) {
+          set({ kind: 'ready-to-sign-in', issuer: fresh });
+          return state;
+        }
+        if (state.kind !== 'error') await restore();
         return state;
       })();
       return started;
@@ -313,28 +371,39 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       await session.start();
       const k = state.kind;
       if (k !== 'disconnected' && k !== 'error' && k !== 'signed-out-locally') return;
-      if (podMode.isPodMode()) return;
+      if (podMode.isPodMode() || podMode.finishing()) return;
       const config = checkConfig(deps.config);
       if (config !== 'ok') return fail(config === 'invalid' ? 'invalid-config' : 'not-configured');
       const issuer = parseIssuerInput(issuerInput, deps.config.allowLoopbackHttp);
       if (issuer === null) return fail('invalid-issuer');
       set({ kind: 'connecting', issuer });
-      marker.set('connect');
       try {
         const answer = await podMode.requestEnter(issuer);
-        if (answer === 'declined') {
-          marker.set(null);
-          set({ kind: 'disconnected', outcome: 'declined' });
-        }
-        // 'requested': the app rebuilds this window; the sign-in continues in the new one.
+        if (answer === 'declined') set({ kind: 'disconnected', outcome: 'declined' });
+        // 'requested': the app rebuilds this window; the person clicks Continue in the new one.
       } catch {
-        marker.set(null);
         fail('request-failed');
       }
     },
 
+    async beginSignIn() {
+      if (state.kind !== 'ready-to-sign-in') return;
+      const shown = state.issuer;
+      let issuer: string;
+      try {
+        issuer = await podMode.consumeFresh();
+      } catch {
+        return fail('request-failed');
+      }
+      if (issuer !== shown) return fail('request-failed');
+      await signIn(issuer);
+    },
+
+    finishing: () => podMode.finishing(),
+
     cancel() {
       if (state.kind === 'signing-in') abort?.abort();
+      else if (state.kind === 'ready-to-sign-in') set({ kind: 'disconnected' });
     },
 
     leave() {
@@ -365,12 +434,18 @@ export function realPodModePort(requests?: PodModeRequests): PodModePort {
   const deps = requests ? { requests } : {};
   return {
     isPodMode: () => isPodMode(),
-    sessionRestoreAllowed: () => sessionRestoreAllowed(),
-    policyApplied: () => podPolicyApplied(),
-    recordedIssuer: () => readPodModeOrigins()?.issuer ?? null,
+    gate: () => gatePodMode(),
+    finishing: () => {
+      const host = readHostPodMode();
+      return host !== null && !host.enabled && host.credentialsMayExist;
+    },
+    recordedIssuer: () => readHostPodMode()?.issuer ?? null,
+    freshIssuer: () => readHostPodMode()?.freshConnect ?? null,
     requestEnter: (issuer) => enterPodMode({ issuer }, deps),
+    consumeFresh: () => consumeFreshConnect(deps),
     requestReload: () => reloadPodWindow(deps),
-    leave: (wipe) => leavePodMode(wipe, deps),
+    leave: () => leavePodMode(async () => undefined, deps),
+    credentialsCleared: () => credentialsCleared(deps),
   };
 }
 

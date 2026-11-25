@@ -9,36 +9,36 @@ const ours = ['issuer', 'sessions', 'fence'].map((n) => `@jeswr/key-value:${JSON
 const otherClient = `@jeswr/key-value:${JSON.stringify(`${JSON.stringify(['pod-auth', 'https://other.example/id', config.redirectUri])}:v2:sessions`)}:`;
 
 describe('podAuthDatabaseNames', () => {
-  it('picks this configuration\'s databases and nothing else', () => {
+  it('picks every pod-auth database whatever client or redirect it was made for, and nothing else', () => {
     const all = [...ours, otherClient, 'keyval-store', 'video-editor', 'artcraft-pod-session-self-test'];
-    expect(podAuthDatabaseNames(all, config).sort()).toEqual([...ours].sort());
+    expect(podAuthDatabaseNames(all).sort()).toEqual([...ours, otherClient].sort());
   });
 });
 
 describe('deletePodAuthDatabases', () => {
   it('deletes only matching databases', async () => {
     const idb = fakeIdb([...ours, 'video-editor'], 'success');
-    expect(await deletePodAuthDatabases(config, idb)).toBe('wiped');
+    expect(await deletePodAuthDatabases(idb)).toBe('wiped');
     expect(idb.deleted.sort()).toEqual([...ours].sort());
   });
 
   it('counts a blocked delete as deferred', async () => {
-    expect(await deletePodAuthDatabases(config, fakeIdb(ours, 'blocked'))).toBe('deferred');
+    expect(await deletePodAuthDatabases(fakeIdb(ours, 'blocked'))).toBe('deferred');
   });
 
   it('refuses to claim a wipe when the databases cannot be listed', async () => {
     const idb = { deleteDatabase: () => ({}) as IDBOpenDBRequest };
-    await expect(deletePodAuthDatabases(config, idb)).rejects.toThrow();
+    await expect(deletePodAuthDatabases(idb)).rejects.toThrow();
   });
 
   it('reports one blocked database among several as deferred, after trying them all', async () => {
     const idb = fakeIdb(ours, 'success', ours[1]);
-    expect(await deletePodAuthDatabases(config, idb)).toBe('deferred');
+    expect(await deletePodAuthDatabases(idb)).toBe('deferred');
     expect(idb.deleted.sort()).toEqual([...ours].sort());
   });
 
   it('rejects when a database cannot be deleted', async () => {
-    await expect(deletePodAuthDatabases(config, fakeIdb(ours, 'error'))).rejects.toThrow();
+    await expect(deletePodAuthDatabases(fakeIdb(ours, 'error'))).rejects.toThrow();
   });
 });
 

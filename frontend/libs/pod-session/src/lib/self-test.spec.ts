@@ -129,11 +129,23 @@ describe('defaultEnv', () => {
   it('reports what the window really has', () => {
     vi.stubGlobal('isSecureContext', false);
     vi.stubGlobal('indexedDB', undefined);
+    // Node 24 has its own navigator.locks; a window without Web Locks is stubbed explicitly.
+    vi.stubGlobal('navigator', {});
     try {
       const env = defaultEnv();
       expect(env.isSecureContext).toBe(false);
       expect(env.indexedDB).toBeUndefined();
       expect(env.locks).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports the lock manager the window has', () => {
+    const locks = {};
+    vi.stubGlobal('navigator', { locks });
+    try {
+      expect(defaultEnv().locks).toBe(locks);
     } finally {
       vi.unstubAllGlobals();
     }

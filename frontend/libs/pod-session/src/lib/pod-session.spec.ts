@@ -19,8 +19,10 @@ function setup(options: {
   podWindow?: boolean;
   marker?: Parameters<typeof memoryMarker>[0];
   issuer?: string | null;
-  restoreAllowed?: boolean;
-  policy?: boolean;
+  shell?: 'ok' | 'not-pod-window' | 'window-not-clean' | 'policy-not-applied';
+  flagged?: boolean;
+  fresh?: string | null;
+  consumeFails?: boolean;
   answer?: 'requested' | 'declined' | 'throws';
   leaveFails?: boolean;
   auth?: ReturnType<typeof fakeAuth>;
@@ -31,9 +33,11 @@ function setup(options: {
 } = {}) {
   const podMode = fakePodMode({
     podWindow: options.podWindow ?? false,
-    restoreAllowed: options.restoreAllowed ?? true,
-    policy: options.policy ?? true,
+    shell: options.shell ?? 'ok',
+    flagged: options.flagged ?? false,
     issuer: options.issuer ?? null,
+    fresh: options.fresh ?? null,
+    consumeFails: options.consumeFails ?? false,
     answer: options.answer ?? 'requested',
     leaveFails: options.leaveFails ?? false,
   });
@@ -67,7 +71,7 @@ describe('connect', () => {
     const t = setup();
     await t.session.connect(`  ${ISSUER}/ `);
     expect(t.podMode.entered).toEqual([ISSUER]);
-    expect(t.marker.value).toBe('connect');
+    expect(t.marker.value).toBeNull(); // the approval lives in the app, not in page storage
     expect(t.session.getState()).toEqual({ kind: 'connecting', issuer: ISSUER });
     // Nothing that could hold credentials is created in this window.
     expect(t.createAuth).not.toHaveBeenCalled();
@@ -134,13 +138,18 @@ describe('connect', () => {
 });
 
 describe('start in a pod window', () => {
-  it('continues a confirmed sign-in against the issuer the app recorded', async () => {
-    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'connect' });
-    const started = t.session.start();
+  it('waits for a click after an approved connect, then wipes and signs in against the approved issuer', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'ready-to-sign-in', issuer: ISSUER });
+    // Nothing leaves the window and nothing is built before the click.
+    expect(t.createAuth).not.toHaveBeenCalled();
+    expect(t.wipeStores).not.toHaveBeenCalled();
+    expect(t.podMode.log).not.toContain('consume');
+    const started = t.session.beginSignIn();
     await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
     expect(t.order).toEqual(['wipe', 'createAuth']);
     expect(t.auth.loginHints).toEqual([{ issuer: ISSUER }]);
-    expect(t.marker.value).toBeNull();
     expect(t.session.getState()).toEqual({ kind: 'signing-in', issuer: ISSUER });
     t.auth.finish(WEBID);
     await started;
@@ -153,6 +162,20 @@ describe('start in a pod window', () => {
     await t.session.start();
     expect(t.session.getState()).toEqual({ kind: 'connected', webId: WEBID });
     expect(t.wipeStores).not.toHaveBeenCalled();
+  });
+
+  it('does not call a restored session connected when it has no WebID', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restoredWithoutWebId: true }) });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'disconnected' });
+    expect(t.auth.calls).toEqual(['restore', 'dispose']);
+  });
+
+  it('never builds pod-auth when the shell says this is not a pod window', async () => {
+    const t = setup({ podWindow: true, shell: 'not-pod-window', issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'window-not-clean' });
+    expect(t.createAuth).not.toHaveBeenCalled();
   });
 
   it('stays disconnected when there is nothing to restore', async () => {
@@ -170,19 +193,22 @@ describe('start in a pod window', () => {
   });
 
   it('never builds pod-auth when analytics already ran in this window', async () => {
-    const t = setup({ podWindow: true, restoreAllowed: false, marker: 'connect', issuer: ISSUER });
+    const t = setup({ podWindow: true, shell: 'window-not-clean', issuer: ISSUER, fresh: ISSUER });
     await t.session.start();
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'window-not-clean' });
     expect(t.createAuth).not.toHaveBeenCalled();
     expect(t.wipeStores).not.toHaveBeenCalled();
   });
 
-  it('never builds pod-auth when no narrowing policy is confirmed', async () => {
-    const t = setup({ podWindow: true, policy: false, marker: 'connect', issuer: ISSUER });
+  it('never builds pod-auth when no narrowing policy is confirmed, for a sign-in, a restore or a leave', async () => {
+    const t = setup({ podWindow: true, shell: 'policy-not-applied', issuer: ISSUER, fresh: ISSUER });
     await t.session.start();
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'policy-not-applied' });
     expect(t.createAuth).not.toHaveBeenCalled();
-    const restoring = setup({ podWindow: true, policy: false });
+    await t.session.leave();
+    expect(t.createAuth).not.toHaveBeenCalled();
+    expect(t.session.getState()).toEqual({ kind: 'signed-out-locally' });
+    const restoring = setup({ podWindow: true, shell: 'policy-not-applied' });
     await restoring.session.start();
     expect(restoring.session.getState()).toEqual({ kind: 'error', error: 'policy-not-applied' });
     expect(restoring.createAuth).not.toHaveBeenCalled();
@@ -195,26 +221,108 @@ describe('start in a pod window', () => {
     expect(t.createAuth).not.toHaveBeenCalled();
   });
 
-  it('ignores a connect marker without a recorded issuer', async () => {
-    const t = setup({ podWindow: true, issuer: null, marker: 'connect' });
+  it('lets a record loaded from disk restore a session but never start a fresh sign-in', async () => {
+    // No approval in this process (fresh is null): even a page-written marker changes nothing.
+    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'done', auth: fakeAuth({ restored: WEBID }) });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'connected', webId: WEBID });
+    expect(t.wipeStores).not.toHaveBeenCalled();
+    expect(t.auth.calls).not.toContain('login');
+    await t.session.beginSignIn();
+    expect(t.auth.calls).not.toContain('login');
+    expect(t.podMode.log).not.toContain('consume');
+  });
+
+  it('ignores an approval for any issuer other than the recorded one', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: 'https://attacker.example' });
+    await t.session.start();
+    expect(t.session.getState().kind).not.toBe('ready-to-sign-in');
+    expect(t.auth.calls).not.toContain('login');
+  });
+
+  it('refuses a click whose consumed approval is not the one shown, or is gone', async () => {
+    const gone = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER, consumeFails: true });
+    await gone.session.start();
+    await gone.session.beginSignIn();
+    expect(gone.session.getState()).toEqual({ kind: 'error', error: 'request-failed' });
+    expect(gone.createAuth).not.toHaveBeenCalled();
+    const other = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await other.session.start();
+    other.podMode.consumeFresh = async () => 'https://other.example';
+    await other.session.beginSignIn();
+    expect(other.session.getState()).toEqual({ kind: 'error', error: 'request-failed' });
+    expect(other.wipeStores).not.toHaveBeenCalled();
+  });
+
+  it('ignores a page-written connect word: only an approved dialog counts', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'connect' as never, auth: fakeAuth() });
     await t.session.start();
     expect(t.auth.calls).not.toContain('login');
     expect(t.marker.value).toBeNull();
   });
 
-  it('clears a stale connect marker in an ordinary window and does nothing else', async () => {
-    const t = setup({ marker: 'connect' });
+  it('clears a stale marker in an ordinary window and does nothing else', async () => {
+    const t = setup({ marker: 'leave' });
     await t.session.start();
     expect(t.marker.value).toBeNull();
     expect(t.session.getState()).toEqual({ kind: 'disconnected' });
     expect(t.createAuth).not.toHaveBeenCalled();
   });
+
+  it('finishes a wipe left pending before pod-auth opens anything, then goes on', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'wipe' });
+    await t.session.start();
+    expect(t.order.slice(0, 2)).toEqual(['wipe', 'createAuth']);
+    expect(t.marker.value).toBeNull();
+  });
+
+  it('reports wipe-failed and builds nothing when a pending wipe still cannot finish', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'wipe', wipe: () => 'deferred' });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'wipe-failed' });
+    expect(t.createAuth).not.toHaveBeenCalled();
+    expect(t.marker.value).toBe('wipe');
+  });
+});
+
+describe('an ordinary window that may still hold pod credentials', () => {
+  it('shows only the finish flow: deletes first, never opens pod-auth, then asks the shell to clear the flag', async () => {
+    const t = setup({ flagged: true });
+    await t.session.start();
+    expect(t.session.finishing()).toBe(true);
+    expect(t.order).toEqual(['wipe']);
+    expect(t.createAuth).not.toHaveBeenCalled();
+    expect(t.podMode.log).toEqual(['cleared']);
+    expect(t.session.getState()).toEqual({ kind: 'disconnected', outcome: 'disconnected' });
+  });
+
+  it('does not clear the flag when the delete cannot finish, and says so', async () => {
+    const t = setup({ flagged: true, wipe: () => 'deferred' });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'wipe-failed' });
+    expect(t.podMode.log).not.toContain('cleared');
+  });
+
+  it('refuses to connect while credentials may exist', async () => {
+    const t = setup({ flagged: true, wipe: () => 'deferred' });
+    await t.session.connect(ISSUER);
+    expect(t.podMode.entered).toEqual([]);
+  });
+
+  it('can be retried with Leave', async () => {
+    let call = 0;
+    const t = setup({ flagged: true, wipe: () => (call++ === 0 ? 'deferred' : 'wiped') });
+    await t.session.start();
+    await t.session.leave();
+    expect(t.podMode.log).toContain('cleared');
+  });
 });
 
 describe('sign-in failures', () => {
   async function connectThen(act: (t: ReturnType<typeof setup>) => void | Promise<void>, options: Parameters<typeof setup>[0] = {}) {
-    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'connect', ...options });
-    const started = t.session.start();
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER, ...options });
+    await t.session.start();
+    const started = t.session.beginSignIn();
     await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
     await act(t);
     await started;
@@ -266,10 +374,11 @@ describe('sign-in failures', () => {
     const t = setup({
       podWindow: true,
       issuer: ISSUER,
-      marker: 'connect',
+      fresh: ISSUER,
       wipe: (call) => (call === 0 ? new Promise<WipeOutcome>((resolve) => (release = () => resolve('wiped'))) : 'wiped'),
     });
-    const started = t.session.start();
+    await t.session.start();
+    const started = t.session.beginSignIn();
     await vi.waitFor(() => expect(t.session.getState().kind).toBe('signing-in'));
     t.session.cancel();
     release();
@@ -279,22 +388,43 @@ describe('sign-in failures', () => {
   });
 
   it('does not begin when the starting wipe is only queued', async () => {
-    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'connect', wipe: () => 'deferred' });
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER, wipe: () => 'deferred' });
     await t.session.start();
+    await t.session.beginSignIn();
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'wipe-failed' });
     expect(t.createAuth).not.toHaveBeenCalled();
+  });
+
+  it('remembers a delete that could not finish after a failed sign-in, so the next window does it first', async () => {
+    const t = await connectThen((x) => x.auth.fail(Object.assign(new Error('x'), { code: 'timed-out' })), {
+      wipe: (call) => (call === 0 ? 'wiped' : 'deferred'),
+    });
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'sign-in-timed-out' });
+    expect(t.marker.value).toBe('wipe');
+  });
+
+  it('remembers a failed revocation too when that delete could not finish', async () => {
+    const t = await connectThen((x) => x.auth.fail(Object.assign(new Error('x'), { code: 'timed-out' })), {
+      auth: fakeAuth({ logoutError: new Error('down') }),
+      wipe: (call) => {
+        if (call > 0) throw new Error('blocked');
+        return 'wiped';
+      },
+    });
+    expect(t.marker.value).toBe('leave-revocation-failed');
   });
 
   it('builds pod-auth inside the guarded section: a throwing factory is a closed error', async () => {
     const t = setup({
       podWindow: true,
       issuer: ISSUER,
-      marker: 'connect',
+      fresh: ISSUER,
       createAuth: () => {
         throw new Error('https://x/?code=SECRET');
       },
     });
     await t.session.start();
+    await t.session.beginSignIn();
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'sign-in-failed' });
     expect(JSON.stringify(t.states)).not.toContain('SECRET');
   });
@@ -338,7 +468,7 @@ describe('leave', () => {
     });
     await t.session.leave();
     expect(t.auth.calls).toEqual(['restore', 'logout', 'dispose']);
-    expect(t.podMode.log).toEqual(['wipe', 'leave-wipe-start', 'left']);
+    expect(t.podMode.log).toEqual(['wipe', 'left']);
     expect(t.session.getState()).toEqual({ kind: 'disconnected', outcome: 'disconnected' });
     expect(t.session.getFetch()).toBeNull();
     expect(t.marker.value).toBeNull();
@@ -348,9 +478,9 @@ describe('leave', () => {
     const t = await connected();
     let markerAtLeave: unknown = 'unset';
     const original = t.podMode.leave;
-    t.podMode.leave = async (wipe) => {
+    t.podMode.leave = async () => {
       markerAtLeave = t.marker.value;
-      return original(wipe);
+      return original();
     };
     await t.session.leave();
     expect(markerAtLeave).toBe('done');
@@ -368,9 +498,9 @@ describe('leave', () => {
     const t = await connected({ auth: fakeAuth({ restored: WEBID, logoutError: new Error('network') }) });
     let markerAtLeave: unknown = 'unset';
     const original = t.podMode.leave;
-    t.podMode.leave = async (wipe) => {
+    t.podMode.leave = async () => {
       markerAtLeave = t.marker.value;
-      return original(wipe);
+      return original();
     };
     await t.session.leave();
     expect(markerAtLeave).toBe('done-revocation-failed');
@@ -421,7 +551,7 @@ describe('leave', () => {
     await t.session.start();
     expect(t.order).toEqual(['wipe']);
     expect(t.createAuth).not.toHaveBeenCalled();
-    expect(t.podMode.log).toEqual(['leave-wipe-start', 'left']);
+    expect(t.podMode.log).toEqual(['left']);
     expect(t.session.getState()).toEqual({ kind: 'disconnected', outcome: 'disconnected' });
   });
 
@@ -442,7 +572,8 @@ describe('leave', () => {
     await t.session.start();
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'wipe-failed' });
     expect(t.podMode.log).not.toContain('left');
-    expect(t.marker.value).toBeNull();
+    // Kept until the delete is confirmed, so a quit in between does not lose it.
+    expect(t.marker.value).toBe('leave');
   });
 
   it('reports request-failed when the app will not leave, and keeps nothing recorded', async () => {
@@ -456,7 +587,7 @@ describe('leave', () => {
     ['an error', () => setup({ podWindow: true, auth: fakeAuth({ restoreError: new Error('x') }) })],
     ['a disconnected pod window', () => setup({ podWindow: true })],
     ['an unsupported pod window', () => setup({ podWindow: true, selfTest: async () => ({ ok: false, reason: 'web-locks-missing' }) })],
-    ['a window that failed the policy check', () => setup({ podWindow: true, policy: false })],
+    ['a window that failed the policy check', () => setup({ podWindow: true, shell: 'policy-not-applied' })],
   ])('works from %s: wipes locally and leaves', async (_name, make) => {
     const t = make();
     await t.session.start();
@@ -466,8 +597,9 @@ describe('leave', () => {
   });
 
   it('works while a sign-in is running: aborts it, then wipes and leaves', async () => {
-    const t = setup({ podWindow: true, issuer: ISSUER, marker: 'connect' });
-    const started = t.session.start();
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    const started = t.session.beginSignIn();
     await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
     await t.session.leave();
     await started;
@@ -594,7 +726,7 @@ describe('localStorageMarker', () => {
     };
     const marker = localStorageMarker(throwing);
     expect(marker.get()).toBeNull();
-    expect(() => marker.set('connect')).not.toThrow();
+    expect(() => marker.set('wipe')).not.toThrow();
     expect(() => marker.set(null)).not.toThrow();
   });
 });

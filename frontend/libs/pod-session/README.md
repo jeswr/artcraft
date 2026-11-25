@@ -5,7 +5,8 @@ Solid pod session for the desktop app: a small state machine over `@jeswr/pod-au
 pod-mode requests.
 
 States: `disconnected` (with an `outcome` of `disconnected` or `declined` so a rebuilt window
-still shows the answer), `connecting` (the app's native dialog is open), `signing-in`,
+still shows the answer), `connecting` (the app's native dialog is open), `ready-to-sign-in` (the person approved the
+address; nothing starts until they click Continue), `signing-in`,
 `connected(webId)`, `leaving`, `signed-out-locally` (disconnected here, but the provider could
 not be told), `error(kind)` and `unsupported(reason)`. Error kinds and reasons are closed sets;
 no state, message or log carries a token, a callback URL or a host's error text.
@@ -14,11 +15,12 @@ no state, message or log carries a token, a callback URL or a host's error text.
 const session = createPodSession({
   config, // readConfig(identifier)
   createAuth: () => createDefaultAuth(config, { openUrl, onOpenUrl }),
-  wipeStores: () => deletePodAuthDatabases(config),
+  wipeStores: () => deletePodAuthDatabases(),
   podMode: realPodModePort(requests), // requests: the app's pod-mode commands
 });
 await session.start();           // settle a step left by a rebuild, self-test, restore
 await session.connect(issuer);   // validates, asks the app, which confirms and rebuilds
+await session.beginSignIn();     // the click in the rebuilt window that starts the sign-in
 const podFetch = session.getFetch(); // pod-auth's fetch, or null unless connected
 await session.leave();           // from any state: revoke, wipe locally, ask the app to leave
 ```
@@ -26,10 +28,13 @@ await session.leave();           // from any state: revoke, wipe locally, ask th
 ## Flow and rules
 
 - `connect` validates the typed issuer (a bare https origin; `http://localhost` only in a dev
-  build with `VITE_SOLID_ALLOW_LOOPBACK=true`), records that a sign-in was asked for and asks
-  the app to enter pod mode. The app shows a native dialog naming the origin; on approval it
-  rebuilds the window. The sign-in then continues in the new window against the issuer the app
-  recorded, not one the page remembered. A declined dialog is shown as such.
+  build with `VITE_SOLID_ALLOW_LOOPBACK=true`) and asks the app to enter pod mode. The app shows
+  a native dialog naming the origin; on approval it records the issuer, remembers the approval
+  in memory and rebuilds the window. There is no "connect" marker: the rebuilt window starts in
+  `ready-to-sign-in` only when the app reports a fresh approval whose issuer equals the
+  recorded one, and `beginSignIn()` (the Continue button, no autofocus) consumes that approval
+  once and then wipes pod-auth's stores and signs in. A record merely loaded from disk only
+  restores a session and never starts a sign-in. A declined dialog is shown as such.
 - pod-auth is built only in a pod window, only when `sessionRestoreAllowed()`, only when a
   narrowing policy is confirmed (`podPolicyApplied()`), and only when the config is valid.
   Otherwise the state is a closed error. Building it happens inside the guarded section, so a
@@ -41,9 +46,10 @@ await session.leave();           // from any state: revoke, wipe locally, ask th
   not stop the wipe and ends in `signed-out-locally`. A delete that is only queued behind an
   open connection (`deferred`) is not reported as done: the window is rebuilt and the delete
   runs before pod-auth opens anything. If the wipe cannot finish, the state is
-  `error('wipe-failed')` and the window stays in pod mode. The order is wipe, then leave; the
+  `error('wipe-failed')`, the `leave` marker is kept until a wipe is confirmed, and the window
+  stays in pod mode (or, when it is not in pod mode, in the finishing window below). The order is wipe, then leave; the
   app cannot check it, so this library enforces it.
-- A small `localStorage` marker with a closed set of words (`connect`, `leave`,
+- A small `localStorage` marker with a closed set of words (`wipe`, `leave`,
   `leave-revocation-failed`, `done`, `done-revocation-failed`) carries the flow across window
   rebuilds. It never holds an origin, token or URL, and a value outside the set is ignored.
 - A start-up self-test checks a secure context, that Web Locks exclude and release, IndexedDB,
@@ -51,6 +57,10 @@ await session.leave();           // from any state: revoke, wipe locally, ask th
   failure yields `unsupported(reason)`; leaving still works.
 - All pod HTTP uses `getFetch()`. Never route pod or identity-provider traffic through the
   Tauri HTTP plugin or `FetchProxy`: that would move tokens and DPoP proofs into Rust.
+
+- **Finishing.** An ordinary window the app flags as possibly holding credentials
+  (`finishing()`) loads no pod-auth and offers only "Finish disconnecting" (`leave()`); once
+  the wipe is confirmed the app clears its flag (`requestCredentialsCleared`).
 
 ## Build-time configuration
 

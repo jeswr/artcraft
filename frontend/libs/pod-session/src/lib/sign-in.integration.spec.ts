@@ -61,17 +61,18 @@ describe('sign-in through pod-auth and desktop-auth', () => {
     for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
       vi.spyOn(console, level).mockImplementation((...args) => void logged.push(args));
     }
-    const podMode = fakePodMode({ podWindow: true, issuer: op.issuer });
+    const podMode = fakePodMode({ podWindow: true, issuer: op.issuer, fresh: op.issuer });
     const session = createPodSession({
       config,
       createAuth: () => createDefaultAuth(config, host),
       wipeStores: async () => 'wiped',
       podMode,
-      marker: memoryMarker('connect'),
+      marker: memoryMarker(),
       selfTest: async () => ({ ok: true }),
     });
 
     await session.start();
+    await session.beginSignIn();
 
     expect(session.getState()).toEqual({ kind: 'connected', webId: op.webId });
     const podFetch = session.getFetch();
@@ -105,11 +106,12 @@ describe('sign-in through pod-auth and desktop-auth', () => {
       config,
       createAuth: () => createDefaultAuth(config, forging),
       wipeStores: async () => 'wiped',
-      podMode: fakePodMode({ podWindow: true, issuer: op.issuer }),
-      marker: memoryMarker('connect'),
+      podMode: fakePodMode({ podWindow: true, issuer: op.issuer, fresh: op.issuer }),
+      marker: memoryMarker(),
       selfTest: async () => ({ ok: true }),
     });
     await session.start();
+    await session.beginSignIn();
     expect(session.getState()).toEqual({ kind: 'error', error: 'sign-in-failed' });
     expect(session.getFetch()).toBeNull();
     expect(op.stats.tokens).toBe(0);
@@ -121,23 +123,24 @@ describe('the wipe against the databases pod-auth really creates', () => {
     const own: PodSessionConfig = { ...config, clientId: 'https://wipe.example/solid-client-id.jsonld' };
     const { op, host } = world(own);
     const names = async () => (await indexedDB.databases()).flatMap((d) => (d.name ? [d.name] : []));
-    expect(podAuthDatabaseNames(await names(), own)).toEqual([]);
+    const before = podAuthDatabaseNames(await names()).length;
     const session = createPodSession({
       config: own,
       createAuth: () => createDefaultAuth(own, host),
       wipeStores: async () => 'wiped',
-      podMode: fakePodMode({ podWindow: true, issuer: op.issuer }),
-      marker: memoryMarker('connect'),
+      podMode: fakePodMode({ podWindow: true, issuer: op.issuer, fresh: op.issuer }),
+      marker: memoryMarker(),
       selfTest: async () => ({ ok: true }),
     });
     await session.start();
+    await session.beginSignIn();
     expect(session.getState().kind).toBe('connected');
 
     // Not hand-built names: these exist because pod-auth created them.
-    expect(podAuthDatabaseNames(await names(), own).length).toBeGreaterThan(0);
+    expect(podAuthDatabaseNames(await names()).length).toBeGreaterThan(before);
 
     // pod-auth still holds its connections, so the delete can only be queued; it must not
     // be reported as done.
-    expect(await deletePodAuthDatabases(own)).toBe('deferred');
+    expect(await deletePodAuthDatabases()).toBe('deferred');
   });
 });

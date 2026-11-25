@@ -30,6 +30,8 @@ export type PodSessionState =
   | { kind: 'disconnected'; outcome?: 'disconnected' | 'declined' }
   /** The app's own confirmation dialog is open and names the sign-in server. */
   | { kind: 'connecting'; issuer: string }
+  /** A pod window with a connect the person just approved. Nothing starts until they click. */
+  | { kind: 'ready-to-sign-in'; issuer: string }
   | { kind: 'signing-in'; issuer: string }
   | { kind: 'connected'; webId: string }
   | { kind: 'leaving'; step: 'revoking' | 'clearing' | 'reloading' }
