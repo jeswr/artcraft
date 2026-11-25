@@ -181,9 +181,11 @@ impl<D: Dialog, W: Windows, C: Clock, S: Store> Controller<D, W, C, S> {
     let prompt = Prompt {
       title: "Enter Solid pod mode",
       message: format!(
-        "ArtCraft will restart this window in Solid pod mode for the sign-in server:\n\n{origin}\n\n\
-In pod mode ArtCraft loads no analytics and may only contact that server, the servers you add \
-later, and ArtCraft's own services. Only continue if you started this and trust that server."
+        "ArtCraft will restart this window in Solid pod mode for this address, which you typed as \
+your Solid provider or the site of your WebID:\n\n{origin}\n\n\
+In pod mode ArtCraft loads no analytics and may only contact that address, the addresses you \
+approve later, and ArtCraft's own services. Only continue if you started this and trust that \
+address."
       ),
       accept: "Enter pod mode",
     };
@@ -229,7 +231,11 @@ is being asked. If you allow it, this window will reload."
       Confirmation::Accepted => {
         let next = transition::add_storage_origin(&counted, &shown, self.loopback)?;
         self.persist(&counted, &next)?;
-        self.store.set_fresh(None);
+        // A dialog the person just answered, in this process, for the issuer they approved: the
+        // rebuilt window may offer to resume a sign-in this approval interrupted. It still needs
+        // their click, and only the page's own pending-sign-in hint turns it into one; without
+        // that hint the window just restores its session.
+        self.store.set_fresh(next.issuer.clone());
         self.rebuilt().await?;
         Ok(Reply::Applied)
       }
@@ -545,6 +551,22 @@ mod tests {
     let prompts = w.prompts.lock().unwrap().len();
     assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
     assert_eq!(w.prompts.lock().unwrap().len(), prompts);
+  }
+
+  #[tokio::test]
+  async fn an_approved_origin_leaves_the_rebuilt_window_a_one_shot_grant_for_the_recorded_issuer() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
+    assert_eq!(w.fresh.lock().unwrap().as_deref(), Some(ISSUER));
+    assert_eq!(c.consume_fresh(MAIN).await.as_deref(), Ok(ISSUER));
+    assert_eq!(c.consume_fresh(MAIN).await, Err(CommandError::NotFresh));
+    // A decline, a too-fast Allow and a no-op grant nothing.
+    let (w2, c2) = world();
+    in_pod_mode(&w2);
+    *w2.answer.lock().unwrap() = Some((Answer::Declined, 2_000));
+    assert_eq!(c2.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Declined));
+    assert!(w2.fresh.lock().unwrap().is_none());
   }
 
   #[tokio::test]
