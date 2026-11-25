@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseOrigin, validatePodOrigins } from './origins.js';
 
@@ -65,5 +67,19 @@ describe('validatePodOrigins', () => {
     expect(validatePodOrigins({ storage: 'https://b.example' })).toBeNull();
     expect(validatePodOrigins({ issuer: 'https://a.example', storage: 'nope' })).toBeNull();
     expect(validatePodOrigins(null)).toBeNull();
+  });
+});
+
+describe('the validator shared with the Rust twin', () => {
+  type Vector = { origin: string; valid_release: boolean; valid_dev: boolean };
+  const { vectors } = JSON.parse(
+    readFileSync(resolve(__dirname, '../../../../../crates/lib/pod_mode/testdata/origin-vectors.json'), 'utf8'),
+  ) as { vectors: Vector[] };
+
+  it('reads the same table as `cargo test -p pod_mode`', () => expect(vectors.length).toBeGreaterThan(40));
+
+  it.each(vectors.map((v) => [JSON.stringify(v.origin), v] as const))('gets the same answer for %s', (_name, v) => {
+    expect(parseOrigin(v.origin, false) !== null).toBe(v.valid_release);
+    expect(parseOrigin(v.origin, true) !== null).toBe(v.valid_dev);
   });
 });

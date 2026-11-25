@@ -1,0 +1,280 @@
+{
+ "comment": "Shared by the Rust (crates/lib/pod_mode/src/origin.rs) and TypeScript (frontend/libs/pod-mode/src/lib/origins.spec.ts) origin validators. valid_release: loopback http not allowed; valid_dev: loopback allowed.",
+ "vectors": [
+  {
+   "origin": "https://login.example",
+   "valid_release": true,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://login.example:8443",
+   "valid_release": true,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://a-b.c1.example",
+   "valid_release": true,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://a.b",
+   "valid_release": true,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://localhost.example",
+   "valid_release": true,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://login.example:99999",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://pod.example.",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://pod..example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://-",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://.",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://notlocalhost",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a.1",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://-a.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a-.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a.-b.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://localhost",
+   "valid_release": false,
+   "valid_dev": true
+  },
+  {
+   "origin": "http://localhost",
+   "valid_release": false,
+   "valid_dev": true
+  },
+  {
+   "origin": "http://localhost:3000",
+   "valid_release": false,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://localhost:3443",
+   "valid_release": false,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://127.0.0.1",
+   "valid_release": false,
+   "valid_dev": true
+  },
+  {
+   "origin": "http://127.0.0.1:3000",
+   "valid_release": false,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://192.168.1.1:8443",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://169.254.169.254",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://10.0.0.1",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://1.2.3.4",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "http://192.168.0.1",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://[::1]",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://[fe80::1]",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://0x7f.1",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "http://login.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "http://localhost.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "ftp://login.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://xn--bcher-kva.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://xn--a.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://bücher.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://LOGIN.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example:443",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example/",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example/path",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example?x=1",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example#x",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://user:secret@login.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example@evil.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example\n.evil.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": " https://login.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://exa_mple.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "*",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://*.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "login.example",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "javascript:alert(1)",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "data:text/plain,x",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example; script-src *",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example https://other.example",
+   "valid_release": false,
+   "valid_dev": false
+  }
+ ]
+}

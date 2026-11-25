@@ -1,6 +1,8 @@
 use url::Url;
 
 const MAX_ORIGIN_LEN: usize = 255;
+const MAX_HOST_LEN: usize = 253;
+const MAX_LABEL_LEN: usize = 63;
 
 /// Whether `http` is accepted for `localhost` and `127.0.0.1`. Release builds refuse it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,10 +18,16 @@ impl Loopback {
   }
 }
 
-/// Returns `value` when it is exactly an origin: https (or http for `localhost` and `127.0.0.1`
-/// when `loopback` allows it), with a host of `[a-z0-9.-]`. The URL parser's serialised origin
-/// must equal `value`, which rejects paths, queries, fragments, userinfo, trailing slashes,
-/// default ports, upper case, IPv6 literals, embedded control characters and IDN forms.
+/// Returns `value` when it is exactly an origin that a CSP host source can name: https, with a
+/// public DNS-style host. The URL parser's serialised origin must equal `value`, which rejects
+/// paths, queries, fragments, userinfo, trailing slashes, default ports, upper case, IPv6
+/// literals, embedded control characters and Unicode (IDN) forms. The host must have at least two
+/// labels of `[a-z0-9-]` (no empty label, so no trailing dot; none starting or ending with `-`;
+/// none starting with `xn--`, so a punycode name is never shown raw), and its last label must
+/// not be all digits, which refuses every IPv4 literal. `localhost` and `127.0.0.1`, over https
+/// or http, are accepted only when `loopback` allows it. The TypeScript twin
+/// (`frontend/libs/pod-mode/src/lib/origins.ts`) follows the same rules; both are tested against
+/// `testdata/origin-vectors.json`.
 pub fn parse_origin(value: &str, loopback: Loopback) -> Option<String> {
   if value.is_empty() || value.len() > MAX_ORIGIN_LEN {
     return None;
@@ -29,18 +37,27 @@ pub fn parse_origin(value: &str, loopback: Loopback) -> Option<String> {
     return None;
   }
   let host = url.host_str()?;
-  if host.is_empty() || !host.bytes().all(is_host_byte) {
-    return None;
+  if is_loopback_host(host) {
+    return (loopback == Loopback::HttpAllowed && matches!(url.scheme(), "https" | "http")).then(|| value.to_string());
   }
-  match url.scheme() {
-    "https" => Some(value.to_string()),
-    "http" if loopback == Loopback::HttpAllowed && is_loopback_host(host) => Some(value.to_string()),
-    _ => None,
-  }
+  if url.scheme() == "https" && is_public_dns_host(host) { Some(value.to_string()) } else { None }
 }
 
-fn is_host_byte(byte: u8) -> bool {
-  byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+fn is_public_dns_host(host: &str) -> bool {
+  if host.len() > MAX_HOST_LEN {
+    return false;
+  }
+  let labels: Vec<&str> = host.split('.').collect();
+  labels.len() >= 2 && labels.iter().all(|label| is_dns_label(label)) && !labels[labels.len() - 1].bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_dns_label(label: &str) -> bool {
+  !label.is_empty()
+    && label.len() <= MAX_LABEL_LEN
+    && !label.starts_with('-')
+    && !label.ends_with('-')
+    && !label.starts_with("xn--")
+    && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -99,6 +116,27 @@ mod tests {
   fn refuses_overlong_values() {
     let host = "a".repeat(250);
     assert_eq!(parse_origin(&format!("https://{host}.example"), HttpAllowed), None);
+  }
+
+  #[derive(serde::Deserialize)]
+  struct Vector {
+    origin: String,
+    valid_release: bool,
+    valid_dev: bool,
+  }
+
+  #[test]
+  fn every_shared_vector_gets_the_same_answer_as_the_typescript_twin() {
+    let file: serde_json::Value = serde_json::from_str(include_str!("../testdata/origin-vectors.json")).unwrap();
+    let vectors: Vec<Vector> = serde_json::from_value(file["vectors"].clone()).unwrap();
+    assert!(vectors.len() > 40);
+    for v in vectors {
+      assert_eq!(parse_origin(&v.origin, HttpRefused).is_some(), v.valid_release, "release: {:?}", v.origin);
+      assert_eq!(parse_origin(&v.origin, HttpAllowed).is_some(), v.valid_dev, "dev: {:?}", v.origin);
+      if v.valid_dev {
+        assert_eq!(parse_origin(&v.origin, HttpAllowed).as_deref(), Some(v.origin.as_str()));
+      }
+    }
   }
 
   #[test]
