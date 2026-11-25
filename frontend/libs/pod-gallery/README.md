@@ -20,9 +20,14 @@ renders or loads.
   store. Content and thumbnail addresses are the ones the store returns (always inside the library);
   none is built from a container and a name. The parameter type has no write method. Bidirectional
   control characters are removed from pod text.
-- `PodLibrary`: the source, a **tile loader** (thumbnails: image types only, 2 MiB per file,
-  64 MiB total, `maxEntries` twice `MAX_MOUNTED_TILES`) and a **viewer loader** (originals: 25 MiB
-  per file, 4 entries, 2 reads at a time).
+- `PodLibrary`: the source, a **tile loader** (thumbnails: image types only, 512 KiB per file,
+  at most 1.1 megapixels, 64 MiB total, `maxEntries` twice `MAX_MOUNTED_TILES`), a **viewer loader**
+  (originals: 25 MiB per file, 4 entries, 2 reads at a time) and `sessionEnded()`.
+  The pixel cap: a tile is a few hundred pixels across, so a thumbnail up to 1024 x 1024 is already
+  larger than any tile can show, while a 16 MP file (the earlier cap) decodes to about 64 MB and a
+  screen of them is gigabytes. A thumbnail over the cap, or over 512 KiB, is not an error: the tile is
+  the generic tile with the item's name. 512 KiB also keeps a tile that cannot fit the budget from
+  holding a connection open while it waits (`budgetWaitMs` is 5 s).
 - `createPodLibraryController`: owns the one open library and purges both loaders when the pod is
   disconnected, when the WebID changes and on dispose. The loaders also take `getSessionKey` (the
   WebID) and purge themselves when it changes; the controller does not rely on that alone.
@@ -41,19 +46,36 @@ renders or loads.
 - The grid reads **thumbnails only**. An item without a thumbnail is a generic tile with its name;
   its original is read only when the viewer opens it. A model or video never has its file read for a
   tile, and a model's file is never read at all (3D preview is not offered).
-- The grid is drawn by row: only rows near the view are mounted, never more than
-  `MAX_MOUNTED_TILES` (160) tiles, so the tile loader's `maxEntries` (320) is never the limit.
+- The grid is drawn by row: only the rows in the view plus one row of overscan are mounted, so the
+  view is always full. The tile count follows from the window (12 columns in a 1056 x 1400 view is
+  about 240); `MAX_MOUNTED_TILES` (320) sizes the tile loader (`maxEntries` 640) and only trims rows
+  beyond the view. `podLayout.spec.ts` checks the fill at 12 columns.
 - Pod text is rendered as text and nothing in it is followed. Nothing is written to the pod and
   nothing is logged.
-- Media in the viewer and tiles are not draggable, have no context menu, and a `<video>`/`<audio>`
-  has no download, remote-playback or picture-in-picture entry.
+- Media in the viewer and tiles are not draggable and have no context menu, and a `<video>` has no
+  download, remote-playback or picture-in-picture entry (an `<audio>` has no download or
+  remote-playback entry in its controls list).
+- Closing the gallery frees the pictures: the panel purges and resumes both loaders when it
+  unmounts, so every blob URL is revoked (released holds alone would leave them cached).
+- The hooks return the `blob:` URL as a plain string, so the compile-time guarantee ends there: no
+  code passes it to hosted code today, and a `blob:` URL is fetchable by same-origin code. Closing
+  that would take `PodImage`/`PodVideo` components that keep the URL to themselves (not done).
+- A key map (`podAssetKey`) lives at module level; it is cleared when a library is torn down
+  (sign-out, account change).
 
 ## Session problems
 
 A refused request (401), an ended or changed session (`Session expired`, `Session changed during
 authentication`) or a missing session fetch is reported as `sign-in`: "Sign in to your pod again",
-with a pointer to Settings, under Solid pod (the existing reconnect path). It is never reported as
-offline, and nothing starts a sign-in by itself. A 403 from the pod is reported as `forbidden`.
+with a pointer to Settings, under Solid pod (the existing reconnect path). The kind is carried
+through every path: opening, the first page, a failed "load more" (`loadMoreError`), tiles and the
+viewer. The loaders cannot say "session": an expired session reaches them as `offline` and a 401
+as `forbidden`, so a tile or the viewer asks `library.sessionEnded()` (set by the session fetch
+wrapper on a 401 or an ended session, cleared by the next good answer or a new listing) and shows
+"Sign in to your pod again" instead. Nothing in the gallery starts a sign-in. A 403 from the pod
+with the session intact is `forbidden`. Known issue below this library: pod-auth, wired by
+`pod-session`, can itself open the system browser when a token refresh fails during any read
+(`apps/artcraft/app/src/pod/background-read.spec.ts` pins it as a known failure). "Can't reach your pod" is the one sentence for network failures.
 
 ## Requests (measured)
 
