@@ -7,21 +7,27 @@ import { openCreativeAssetStore } from "@storyteller/pod-mirror";
 import { profileDocumentOf } from "./mirror-store";
 
 /**
- * Limits for the grid's thumbnails, sized per the loader's "Grids and galleries" guidance. The
- * grid mounts at most `MAX_MOUNTED_TILES` tiles, each holding one entry, and `maxEntries` leaves
- * room for the same number again as released-but-cached entries. Nothing larger than a
- * thumbnail is read for a tile (a bigger file is a "too large to preview" tile), and only
- * images are allowed: the one narrowing of the loader's default type list.
+ * Limits for the grid's thumbnails, sized per the loader's "Grids and galleries" guidance.
+ *
+ * - `maxPixels` 1.1 MP: a tile is at most a few hundred pixels across, so a thumbnail up to 1024 x
+ *   1024 is already larger than any tile needs. A 16 MP file (the loader's old limit here) decodes to
+ *   about 64 MB, and a screen of them is gigabytes; a thumbnail above the cap is shown as a generic
+ *   tile with the item's name.
+ * - `maxBytes` 512 KiB: a thumbnail that big is not a thumbnail, and a small file keeps a tile that
+ *   cannot fit in the budget from waiting with its connection open (`budgetWaitMs` bounds the wait).
+ * - `maxEntries` is twice `MAX_MOUNTED_TILES`: each mounted tile holds one entry and the same number
+ *   again can stay cached after release.
+ * - Only images are allowed: the one narrowing of the loader's default type list.
  */
 export const TILE_LIMITS = {
-  maxBytes: 2 * 1024 * 1024,
+  maxBytes: 512 * 1024,
   maxTotalBytes: 64 * 1024 * 1024,
   maxEntries: MAX_MOUNTED_TILES * 2,
   /** Reserved when a response declares no length: a thumbnail, not a full-size original. */
-  assumedBytes: 128 * 1024,
-  maxPixels: 16_000_000,
+  assumedBytes: 64 * 1024,
+  maxPixels: 1_100_000,
   maxConcurrent: 6,
-  budgetWaitMs: 20_000,
+  budgetWaitMs: 5_000,
   allow: ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"],
 } as const;
 
@@ -81,6 +87,7 @@ export async function openPodLibrary({ storage, features, typeIndex, signal, get
   const viewerLoader = createMediaLoader({ storage: cached.storage, scope, getSessionKey, ...VIEWER_LIMITS });
   return {
     source: sessionAware(createPodLibrarySource(store), problem),
+    sessionEnded: () => problem.rejected,
     tileLoader,
     viewerLoader,
     invalidateListing: () => {
@@ -191,7 +198,9 @@ export async function buildPodLibrary({ getFetch, getSessionKey, webId, signal }
     }
     try {
       const response = await current(input, init);
+      // A refusal marks the session; a good answer later means it works again.
       if (response.status === 401) problem.rejected = true;
+      else if (response.ok) problem.rejected = false;
       return response;
     } catch (error) {
       if (isEndedSession(error)) problem.rejected = true;

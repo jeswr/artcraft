@@ -105,3 +105,45 @@ describe("requests per page", () => {
     expect(counts.reduce((sum, entry) => sum + entry.heads, 0)).toBe(0);
   });
 });
+
+describe("the loaders and the session's state", () => {
+  const SOMEWHERE = `${HTTP_POD_ROOT}creative-assets/2026/06/x.png`;
+  const open = async (pod: Awaited<ReturnType<typeof scenario>>, wrap: (inner: typeof fetch) => typeof fetch) =>
+    buildPodLibrary({ getFetch: () => wrap(pod.fetch), getSessionKey: () => WEB_ID, webId: WEB_ID, signal: new AbortController().signal });
+
+  it("a session that expires after opening makes tile and viewer reads fail as offline AND marks the session ended", async () => {
+    const pod = await scenario("populated", 3);
+    let expired = false;
+    const library = await open(pod, (inner) => (async (input, init) => (expired ? Promise.reject(new Error("Session expired")) : inner(input, init))) as typeof fetch);
+    expect(library.sessionEnded?.()).toBe(false);
+    expired = true;
+    for (const loader of [library.tileLoader, library.viewerLoader]) {
+      const result = await loader.acquire(SOMEWHERE);
+      expect(result.ok ? "ok" : result.error.code).toBe("offline");
+    }
+    // The tiles and the viewer turn that into "sign in again" by asking this.
+    expect(library.sessionEnded?.()).toBe(true);
+  });
+
+  it("a 401 reaches the loaders as 'forbidden' and marks the session ended; a good answer later clears it", async () => {
+    const pod = await scenario("populated", 3);
+    let refuse = false;
+    const library = await open(pod, (inner) => (async (input, init) => (refuse ? new Response(null, { status: 401 }) : inner(input, init))) as typeof fetch);
+    refuse = true;
+    const result = await library.tileLoader.acquire(SOMEWHERE);
+    expect(result.ok ? "ok" : result.error.code).toBe("forbidden");
+    expect(library.sessionEnded?.()).toBe(true);
+    refuse = false;
+    await library.source.list({});
+    expect(library.sessionEnded?.()).toBe(false);
+  });
+
+  it("a plain network failure is not an ended session", async () => {
+    const pod = await scenario("populated", 3);
+    let down = false;
+    const library = await open(pod, (inner) => (async (input, init) => (down ? Promise.reject(new TypeError("Failed to fetch")) : inner(input, init))) as typeof fetch);
+    down = true;
+    await library.tileLoader.acquire(SOMEWHERE);
+    expect(library.sessionEnded?.()).toBe(false);
+  });
+});
