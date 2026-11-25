@@ -156,24 +156,38 @@ These packages are experimental and security critical; they are unreleased and u
 
 ## Pod media loader (added with the "My pod" gallery source)
 
-`jeswr-pod-media-loader-0.1.0.tgz` is the packed `@jeswr/pod-media-loader` (MIT, `securityCritical`, private
-in the SDK, experimental and unaudited). It reads authenticated pod media through the storage client, sniffs
-the bytes against a passive-media allowlist and hands out reference-counted `blob:` URLs typed by the sniffed
-type only. It was packed from `origin/feat/pod-media-loader` of the SDK at commit
-`5810c65bf4922b6b57baa1b8eb1a434bba154e9b` ("feat(pod-media-loader): safe authenticated pod media as blob
-object URLs"), built and packed in its own worktree of that commit:
+`jeswr-pod-media-loader-0.1.0-fdf084a.tgz` is the packed `@jeswr/pod-media-loader` (MIT, `securityCritical`,
+private in the SDK, experimental and unaudited). It reads authenticated pod media through the storage
+client, sniffs the bytes against a passive-media allowlist and hands out reference-counted `blob:` URLs typed by
+the sniffed type only, inside a hard memory budget. It was packed from `origin/feat/pod-media-loader` of the SDK
+at commit `fdf084ab4029a2d2cf8cd4ac2cacdf2f8be48a68` ("fix(pod-media-loader): reserve declared length at header
+time, wait for room, retryable over-budget"). An earlier build (5810c65) was replaced: it had no hard memory bound
+and a pixel-limit bypass for GIF.
+
+`jeswr-storage-client-0.1.0-fdf084a.tgz` was re-packed from the same commit, because the loader reads the new
+optional `ReadResult.contentLength` that the storage client gained there. Against the previous tarball the
+built output differs only by that field (`http.js`, `memory.js`, `types.d.ts`, `http.d.ts`); its manifest and
+dependencies are unchanged, so every vendored package that depends on it (`pod-media-store`, `pod-type-index`,
+`pod-access`, `solid-creative-assets` through them) still resolves to it. The file names carry the short SDK
+commit so a re-vendor is visible in the name.
 
 ```sh
 pnpm install --frozen-lockfile --filter "@jeswr/pod-media-loader..." --filter "@jeswr/solid-sdk-workspace"
 pnpm exec turbo run build --filter "@jeswr/pod-media-loader..."
 (cd packages/pod-media-loader && pnpm pack --pack-destination <this directory>)
+(cd packages/storage-client && pnpm pack --pack-destination <this directory>)
+# then rename each to <name>-0.1.0-fdf084a.tgz
 ```
 
-Its two dependencies, `@jeswr/storage-client` and `@jeswr/guarded-fetch`, are the tarballs already vendored
-above (the packed manifest names both as `0.1.0`); nothing else is added. Its only peer, `react`, is optional and
-already present. `frontend/package.json` references it with a `file:` spec like the other direct dependencies.
-No new third-party package enters the production closure; the licence (MIT) is on the allowlist.
+Nothing else is added: the loader's dependencies are `@jeswr/storage-client` and `@jeswr/guarded-fetch`, both
+vendored; its only peer, `react`, is optional and already present. No new third-party package enters the
+production closure; the licence (MIT) is on the allowlist. The lockfile integrity values are the real sha512 of
+these files.
 
 ```
-4ce4e9b98503c2a4a5b9e3c9f643f70cbb396cc6612ec16b028b21ac6a31f6d6  jeswr-pod-media-loader-0.1.0.tgz
+b69d680862d923516b339df849693303ca7b73416f4f3feca8079e9163b3e9fc  jeswr-pod-media-loader-0.1.0-fdf084a.tgz
+a72b3814f2769d25916e6e273f9c7395465a5e8b8129f1c5e3f39cd86c6f87bf  jeswr-storage-client-0.1.0-fdf084a.tgz
 ```
+
+The hash listed for `jeswr-storage-client-0.1.0.tgz` in the older section above is the previous tarball, which
+this file replaces.
