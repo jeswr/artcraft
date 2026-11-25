@@ -14,6 +14,7 @@ import {
 } from "@storyteller/ui-action-reminder-modal";
 import { toast } from "@storyteller/ui-toaster";
 import { clickOnEnterOrSpace } from "@storyteller/common";
+import { PodItemBadge } from "@storyteller/pod-mirror-ui";
 
 type ModalMode = "select" | "view";
 
@@ -450,6 +451,14 @@ export const GalleryDraggableItem: React.FC<GalleryDraggableItemProps> = ({
           <UploadIcon className="text-[10px]" />
         </div>
       )}
+      {/* Pod state — bottom-right, beside the upload badge. Renders nothing without a connected pod. */}
+      <PodItemBadge
+        token={item.id}
+        className={twMerge(
+          "absolute bottom-2 z-[1]",
+          item.isUpload ? "right-9" : "right-2",
+        )}
+      />
       {/* Conditionally wrap with Tooltip — hidden when selecting or in bulk mode */}
       {showTooltip ? (
         <Tooltip

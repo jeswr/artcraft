@@ -45,6 +45,7 @@ import {
   clickOnEnterOrSpace,
 } from "@storyteller/common";
 import { TagsSection } from "./tags/TagsSection";
+import { PodItemStatusRow } from "@storyteller/pod-mirror-ui";
 
 interface LightboxModalProps {
   isOpen: boolean;
@@ -1042,6 +1043,8 @@ export function LightboxModal({
                   createdAt={createdAt}
                 />
               )}
+
+              <PodItemStatusRow token={selectedMediaToken} />
 
               <TagsSection mediaToken={mediaId} creator={creator} />
 

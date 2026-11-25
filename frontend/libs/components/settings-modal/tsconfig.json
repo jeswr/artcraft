@@ -3,6 +3,9 @@
   "include": [],
   "references": [
     {
+      "path": "../../pod-mirror-ui"
+    },
+    {
       "path": "../keybinds"
     },
     {

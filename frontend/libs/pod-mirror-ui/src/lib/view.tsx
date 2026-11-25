@@ -1,0 +1,46 @@
+import type { ItemState, MirrorSummary } from '@storyteller/pod-mirror';
+import { createContext, type ReactNode, useContext, useSyncExternalStore } from 'react';
+
+/** What the gallery and settings need from a mirror. `PodMirror` satisfies it. */
+export interface PodMirrorView {
+  stateOf(token: string): ItemState | undefined;
+  summary(): MirrorSummary;
+  subscribe(listener: () => void): () => void;
+  retry(token: string): Promise<void>;
+  /** Purges this account's journal after the person confirms. */
+  forgetAccount(): Promise<void>;
+}
+
+const PodMirrorViewContext = createContext<PodMirrorView | null>(null);
+
+/** Makes a mirror's item states available below it. Without one, nothing pod-related renders. */
+export function PodMirrorViewProvider({ view, children }: { view: PodMirrorView | null; children: ReactNode }) {
+  return <PodMirrorViewContext.Provider value={view}>{children}</PodMirrorViewContext.Provider>;
+}
+
+export function usePodMirrorView(): PodMirrorView | null {
+  return useContext(PodMirrorViewContext);
+}
+
+const none = () => () => undefined;
+const nothing = () => undefined;
+
+/** The state of one hosted item, or undefined when no pod is connected or it is not journalled. */
+export function usePodItemState(token: string | undefined): ItemState | undefined {
+  const view = usePodMirrorView();
+  return useSyncExternalStore(
+    view ? view.subscribe : none,
+    () => (view && token ? view.stateOf(token) : undefined),
+    nothing,
+  );
+}
+
+/** Counts and pause reason, or null when no pod is connected. */
+export function usePodMirrorSummary(): MirrorSummary | null {
+  const view = usePodMirrorView();
+  return useSyncExternalStore(
+    view ? view.subscribe : none,
+    () => (view ? view.summary() : null),
+    () => null,
+  );
+}

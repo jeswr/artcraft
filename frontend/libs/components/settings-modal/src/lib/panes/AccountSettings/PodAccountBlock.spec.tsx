@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import {
@@ -10,6 +10,8 @@ import {
   type PodSessionState,
 } from "@storyteller/pod-session";
 import { afterEach, expect, it, vi } from "vitest";
+import type { MirrorSummary } from "@storyteller/pod-mirror";
+import { type PodMirrorView, PodMirrorViewProvider } from "@storyteller/pod-mirror-ui";
 import { PodAccountBlock } from "./PodAccountBlock";
 
 const WEBID = "https://pod.example/alice/profile/card#me";
@@ -69,14 +71,21 @@ it("connects from the keyboard with the typed address", async () => {
   expect(session.connect).toHaveBeenCalledWith("https://login.example");
 });
 
-it("tells the truth about this build: sign-in only, copying comes later, a restart loses unsaved work", () => {
+it("tells the truth about this build: new work is copied to the pod, servers still see it, deletes pair, a restart loses unsaved work", () => {
   renderBlock({ kind: "disconnected" });
   const text = document.body.textContent ?? "";
-  expect(text).toMatch(/does not copy any of your work to your pod/);
-  expect(text).toMatch(/arrives in a later step/);
+  expect(text).toMatch(/saves a copy of your new generations, uploads and edits to your pod/);
   expect(text).toMatch(/ArtCraft's servers still receive what you generate and upload/);
+  expect(text).toMatch(/Deleting an item deletes both copies/);
+  expect(text).toMatch(/Audio is not copied yet/);
   expect(text).toMatch(/Anything unsaved in this window is lost/);
-  expect(text).not.toMatch(/saves a copy/i);
+  expect(text).not.toMatch(/does not copy any of your work/);
+});
+
+it("shows no copy status or forget button without a mirror, even when connected", () => {
+  renderBlock({ kind: "connected", webId: WEBID });
+  expect(screen.queryByTestId("pod-mirror-status")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Forget this account" })).toBeNull();
 });
 
 it("announces an invalid address in text and ties it to the field", () => {
@@ -203,4 +212,49 @@ it("offers only finishing the disconnect in a finishing window", async () => {
   expect(document.body.textContent).not.toMatch(/does not copy any of your work/);
   await user.click(screen.getByRole("button", { name: "Finish disconnecting" }));
   expect(session.leave).toHaveBeenCalledTimes(1);
+});
+
+function renderWithMirror(summary: MirrorSummary, forgetAccount = vi.fn(async () => undefined)) {
+  const view: PodMirrorView = {
+    stateOf: () => undefined,
+    summary: () => summary,
+    subscribe: () => () => undefined,
+    retry: async () => undefined,
+    forgetAccount,
+  };
+  const fake = fakeSession({ kind: "connected", webId: WEBID });
+  render(
+    <PodSessionProvider session={fake.session} startNow={false}>
+      <PodMirrorViewProvider view={view}>
+        <PodAccountBlock />
+      </PodMirrorViewProvider>
+    </PodSessionProvider>,
+  );
+  return forgetAccount;
+}
+
+const SUMMARY: MirrorSummary = { version: 1, running: true, paused: null, counts: { saved: 4, pending: 2, failed: 1, skipped: 3, removing: 0 } };
+
+it("shows how the copy is going, in words", () => {
+  renderWithMirror(SUMMARY);
+  expect(screen.getByTestId("pod-mirror-status").textContent).toMatch(/Saved to pod: 4\. Saving: 2\. Not saved: 1\. Not copied: 3\./);
+  expect(screen.queryByTestId("pod-mirror-paused")).toBeNull();
+});
+
+it("says why copying is paused when the pod library is readable by others", () => {
+  renderWithMirror({ ...SUMMARY, paused: "exposed" });
+  expect(screen.getByTestId("pod-mirror-paused").textContent).toMatch(/can be read by others/);
+});
+
+it("forgets the account only after a confirmation, and cancel does nothing", async () => {
+  const user = userEvent.setup();
+  const forget = renderWithMirror(SUMMARY);
+  await user.click(screen.getByRole("button", { name: "Forget this account" }));
+  expect(forget).not.toHaveBeenCalled();
+  expect(document.body.textContent).toMatch(/Nothing on your pod is deleted/);
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(forget).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Forget this account" }));
+  await user.click(within(screen.getByRole("group", { name: "Confirm forgetting this account" })).getByRole("button", { name: "Forget this account" }));
+  expect(forget).toHaveBeenCalledTimes(1);
 });

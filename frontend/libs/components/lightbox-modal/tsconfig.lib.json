@@ -44,6 +44,9 @@
   ],
   "references": [
     {
+      "path": "../../pod-mirror-ui/tsconfig.lib.json"
+    },
+    {
       "path": "../../common/tsconfig.lib.json"
     },
     {

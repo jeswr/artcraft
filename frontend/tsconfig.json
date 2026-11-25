@@ -139,6 +139,9 @@
       "path": "./libs/pod-mirror"
     },
     {
+      "path": "./libs/pod-mirror-ui"
+    },
+    {
       "path": "./libs/components/provider-setup-modal"
     },
     {

@@ -8,15 +8,16 @@ import {
   usePodSessionOrNull,
   usePodSessionState,
 } from "@storyteller/pod-session";
+import { describePause, usePodMirrorSummary, usePodMirrorView } from "@storyteller/pod-mirror-ui";
 import { Button } from "@storyteller/ui-button";
 import { Input } from "@storyteller/ui-input";
 
 /**
- * What connecting does in this build, and nothing more. Copying work to the pod is not built
- * yet, so nothing here promises it.
+ * What connecting does in this build. Connecting copies new work to the pod; it does not move
+ * anything: ArtCraft's hosted library stays the working library.
  */
 const DISCLOSURE =
-  "Connecting signs you in to your Solid pod provider, so ArtCraft can reach your pod. In this version ArtCraft does not copy any of your work to your pod; that arrives in a later step. ArtCraft's servers still receive what you generate and upload.";
+  "Connecting signs you in to your Solid pod provider and saves a copy of your new generations, uploads and edits to your pod, with the prompt and settings ArtCraft has for each. ArtCraft's servers still receive what you generate and upload. Deleting an item deletes both copies. Audio is not copied yet.";
 const RESTART =
   "ArtCraft asks you to confirm the address in a separate dialog, then restarts this window in a restricted pod mode: usage analytics are off and the window can only reach your provider and ArtCraft's own services. Anything unsaved in this window is lost when it restarts.";
 
@@ -53,6 +54,7 @@ const PodAccountBlockInner = ({ session }: { session: PodSession }) => {
       <div role="status" aria-live="polite" className="text-sm text-base-fg/80">
         <StatusText state={state} podWindow={session.inPodMode()} finishing={finishing} />
       </div>
+      {state.kind === "connected" && <PodMirrorStatus />}
       <PodControls session={session} state={state} />
       {!finishing && (
         <>
@@ -259,5 +261,62 @@ const LeaveButton = ({ session, label }: { session: PodSession; label?: string }
     <Button variant="destructive" disabled={busy} onClick={() => void leave()}>
       {label ?? (session.inPodMode() ? "Leave pod mode" : "Disconnect")}
     </Button>
+  );
+};
+
+/**
+ * How the copy to the pod is going: counts, why it is paused, and "Forget this account", which
+ * deletes ArtCraft's local record of what was copied (never anything on the pod). Renders
+ * nothing until the mirror exists.
+ */
+const PodMirrorStatus = () => {
+  const view = usePodMirrorView();
+  const summary = usePodMirrorSummary();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (!view || !summary) return null;
+  const { saved, pending, failed, skipped, removing } = summary.counts;
+  const forget = async () => {
+    setBusy(true);
+    try {
+      await view.forgetAccount();
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-2" data-testid="pod-mirror-status">
+      <div role="status" aria-live="polite" className="flex flex-col gap-1 text-sm text-base-fg/80">
+        <span>
+          Saved to pod: {saved}. Saving: {pending + removing}. Not saved: {failed}. Not copied: {skipped}.
+        </span>
+        {summary.paused && summary.paused !== "stopped" && (
+          <span data-testid="pod-mirror-paused">{describePause(summary.paused)}</span>
+        )}
+      </div>
+      {confirming ? (
+        <div className="flex flex-col gap-2" role="group" aria-label="Confirm forgetting this account">
+          <p className="text-xs text-base-fg/70">
+            This deletes the record ArtCraft keeps on this computer of which items were copied to your pod.
+            Nothing on your pod is deleted, and items may be copied again.
+          </p>
+          <div className="flex gap-2">
+            <Button variant="destructive" disabled={busy} onClick={() => void forget()}>
+              Forget this account
+            </Button>
+            <Button variant="secondary" disabled={busy} onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <Button variant="secondary" onClick={() => setConfirming(true)}>
+            Forget this account
+          </Button>
+        </div>
+      )}
+    </div>
   );
 };
