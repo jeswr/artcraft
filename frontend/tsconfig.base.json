@@ -36,6 +36,9 @@
       "@storyteller/pod-mirror": [
         "libs/pod-mirror/src/index.ts"
       ],
+      "@storyteller/pod-gallery": [
+        "libs/pod-gallery/src/index.ts"
+      ],
       "@storyteller/pod-mirror-ui": [
         "libs/pod-mirror-ui/src/index.ts"
       ],
