@@ -12,8 +12,18 @@ use tokio::sync::Mutex;
 /// An answer returned sooner than this after the dialog opened cannot be a considered one (a
 /// key press that was meant for something else), so it counts as a refusal.
 pub const MIN_DIALOG_DISPLAY_MS: u64 = 800;
-/// After a refusal the next request is turned away for this long.
+/// After a refusal the next request is turned away for this long. A refused storage origin
+/// doubles it each time (`refusal_backoff_ms`).
 pub const COOLDOWN_MS: u64 = 5_000;
+/// The longest a back-off grows to.
+pub const MAX_COOLDOWN_MS: u64 = 5 * 60 * 1_000;
+
+/// How long to turn requests away after the `refusals`-th declined storage origin of a session:
+/// 5 s, 10 s, 20 s, ... up to five minutes.
+pub fn refusal_backoff_ms(refusals: usize) -> u64 {
+  let doublings = refusals.saturating_sub(1).min(16) as u32;
+  COOLDOWN_MS.saturating_mul(1u64 << doublings).min(MAX_COOLDOWN_MS)
+}
 
 pub struct Prompt {
   pub title: &'static str,
@@ -57,6 +67,16 @@ pub trait Store: Send + Sync {
 pub enum Reply {
   Applied,
   Declined,
+  /// The person pressed Allow, but sooner than a considered answer can come. Nothing changed and
+  /// the origin is not remembered as refused: the page may ask again after the cool-down.
+  TooFast,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confirmation {
+  Accepted,
+  Declined,
+  TooFast,
 }
 
 /// Closed set of failures; each is a fixed word, never an origin.
@@ -73,6 +93,12 @@ pub enum CommandError {
   PersistFailed,
   WindowFailed,
   NotFresh,
+  /// The person already declined this origin in this pod-mode session.
+  RefusedOrigin,
+  /// This pod-mode session has shown its lifetime allowance of storage-origin dialogs.
+  TooManyPrompts,
+  /// Credentials may still be stored: finish disconnecting before connecting again.
+  CredentialsPending,
 }
 
 impl CommandError {
@@ -89,6 +115,9 @@ impl CommandError {
       CommandError::PersistFailed => "persist_failed",
       CommandError::WindowFailed => "window_failed",
       CommandError::NotFresh => "not_fresh",
+      CommandError::RefusedOrigin => "refused_origin",
+      CommandError::TooManyPrompts => "too_many_prompts",
+      CommandError::CredentialsPending => "credentials_pending",
     }
   }
 }
@@ -100,6 +129,8 @@ impl From<TransitionError> for CommandError {
       TransitionError::NotInPodMode => CommandError::NotInPodMode,
       TransitionError::InPodMode => CommandError::InPodMode,
       TransitionError::TooManyStorageOrigins => CommandError::TooManyOrigins,
+      TransitionError::RefusedOrigin => CommandError::RefusedOrigin,
+      TransitionError::TooManyPrompts => CommandError::TooManyPrompts,
     }
   }
 }
@@ -137,6 +168,14 @@ impl<D: Dialog, W: Windows, C: Clock, S: Store> Controller<D, W, C, S> {
     self.only_main(caller)?;
     let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
     let before = self.store.record();
+    // One issuer at a time, and never over credentials that were not confirmed wiped: swapping
+    // the issuer from inside pod mode, or connecting from a finishing window, needs a leave first.
+    if before.enabled {
+      return Err(CommandError::InPodMode);
+    }
+    if before.credentials_may_exist {
+      return Err(CommandError::CredentialsPending);
+    }
     let next = transition::enter(issuer, self.loopback)?;
     let origin = next.issuer.clone().unwrap_or_default();
     let prompt = Prompt {
@@ -159,34 +198,52 @@ later, and ArtCraft's own services. Only continue if you started this and trust 
 
   /// Admit one more storage origin: same pattern, so the origin is only ever added after a
   /// native dialog that names it. An origin already admitted, or the issuer's own, needs no
-  /// dialog. The page asks for an origin because the sign-in's profile points at it, so the
-  /// dialog says where the address came from instead of presenting it as the person's own.
+  /// dialog. The limits live here, not in the page, because a compromised page can call this
+  /// command directly: an origin the person declined is never shown again in this pod-mode
+  /// session, a session shows a fixed number of dialogs in all (counted before each opens and
+  /// persisted), and each refusal doubles the wait before the next dialog. The dialog says only
+  /// what the app knows: that something asked, and that the window reloads.
   pub async fn add_storage_origin(&self, caller: &str, origin: &str) -> Result<Reply, CommandError> {
     self.only_main(caller)?;
     let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
     let before = self.store.record();
-    let next = transition::add_storage_origin(&before, origin, self.loopback)?;
-    if next == before {
+    let wanted = transition::add_storage_origin(&before, origin, self.loopback)?;
+    if wanted == before {
       return Ok(Reply::Applied);
     }
-    let shown = next.storage_origins.last().cloned().unwrap_or_default();
+    let shown = wanted.storage_origins.last().cloned().unwrap_or_default();
+    transition::may_prompt(&before, &shown)?;
+    self.check_cooldown()?;
+    let counted = transition::prompt_shown(&before);
+    self.persist(&before, &counted)?;
     let prompt = Prompt {
-      title: "Allow a Solid storage server",
+      title: "Connect to another server?",
       message: format!(
-        "Your Solid profile points to a storage server that is not the sign-in server. Allow this \
-window to contact it?\n\n{shown}\n\n\
-Your pod requests, including your sign-in proof for that server, will be sent there. The address \
-comes from your profile, not from ArtCraft. Only continue if you recognise it and trust it."
+        "ArtCraft is asking to connect to:\n\n{shown}\n\n\
+Only allow this if it is where your Solid pod or profile lives. ArtCraft cannot check why it \
+is being asked. If you allow it, this window will reload."
       ),
       accept: "Allow",
     };
-    if !self.confirmed(&prompt).await? {
-      return Ok(Reply::Declined);
+    match self.ask(&prompt).await {
+      Confirmation::Accepted => {
+        let next = transition::add_storage_origin(&counted, &shown, self.loopback)?;
+        self.persist(&counted, &next)?;
+        self.store.set_fresh(None);
+        self.rebuilt().await?;
+        Ok(Reply::Applied)
+      }
+      Confirmation::Declined => {
+        let next = transition::refused(&counted, &shown);
+        self.persist(&counted, &next)?;
+        self.cool_down(refusal_backoff_ms(next.refused_origins.len()));
+        Ok(Reply::Declined)
+      }
+      Confirmation::TooFast => {
+        self.cool_down(COOLDOWN_MS);
+        Ok(Reply::TooFast)
+      }
     }
-    self.persist(&before, &next)?;
-    self.store.set_fresh(None);
-    self.rebuilt().await?;
-    Ok(Reply::Applied)
   }
 
   /// Leave pod mode. The window asks after its own wipe reported success, but the app cannot
@@ -212,15 +269,24 @@ comes from your profile, not from ArtCraft. Only continue if you recognise it an
     let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
     let before = self.store.record();
     let next = transition::credentials_cleared(&before)?;
+    if next == before {
+      // Nothing to clear: an ordinary window's scripts must not be able to destroy it in a loop.
+      return Ok(Reply::Applied);
+    }
     self.persist(&before, &next)?;
     self.rebuilt().await?;
     Ok(Reply::Applied)
   }
 
-  /// Rebuild in the mode the window is already in, to close its storage connections.
+  /// Rebuild in the mode the window is already in, to close its storage connections. Only a
+  /// restricted window (pod mode, or credentials not yet confirmed wiped) may ask: in an
+  /// ordinary window, where third-party scripts run, nothing needs it.
   pub async fn reload(&self, caller: &str) -> Result<Reply, CommandError> {
     self.only_main(caller)?;
     let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
+    if !self.store.record().restricted() {
+      return Err(CommandError::NotInPodMode);
+    }
     self.store.set_fresh(None);
     self.rebuilt().await?;
     Ok(Reply::Applied)
@@ -241,21 +307,41 @@ comes from your profile, not from ArtCraft. Only continue if you recognise it an
     if caller == self.main_label { Ok(()) } else { Err(CommandError::Forbidden) }
   }
 
-  /// Shows the dialog. Only an accepted answer that took a human's time counts; the refusal
-  /// starts a cool-down. Cool-down is checked before the dialog opens.
+  /// The dialog of `enter`: only an accepted answer that took a human's time counts; anything
+  /// else, too fast included, starts a cool-down. Cool-down is checked before the dialog opens.
   async fn confirmed(&self, prompt: &Prompt) -> Result<bool, CommandError> {
-    use std::sync::atomic::Ordering::SeqCst;
-    let opened = self.clock.now_ms();
-    if opened < self.cooldown_until_ms.load(SeqCst) {
-      return Err(CommandError::CoolingDown);
-    }
-    let answer = self.dialog.confirm(prompt).await;
-    let shown_for = self.clock.now_ms().saturating_sub(opened);
-    if answer == Answer::Accepted && shown_for >= MIN_DIALOG_DISPLAY_MS {
+    self.check_cooldown()?;
+    if self.ask(prompt).await == Confirmation::Accepted {
       return Ok(true);
     }
-    self.cooldown_until_ms.store(self.clock.now_ms() + COOLDOWN_MS, SeqCst);
+    self.cool_down(COOLDOWN_MS);
     Ok(false)
+  }
+
+  /// Shows a dialog. An Allow that came back sooner than `MIN_DIALOG_DISPLAY_MS` is `TooFast`,
+  /// not a refusal: the person is not recorded as having said no.
+  async fn ask(&self, prompt: &Prompt) -> Confirmation {
+    let opened = self.clock.now_ms();
+    let answer = self.dialog.confirm(prompt).await;
+    let shown_for = self.clock.now_ms().saturating_sub(opened);
+    match answer {
+      Answer::Accepted if shown_for >= MIN_DIALOG_DISPLAY_MS => Confirmation::Accepted,
+      Answer::Accepted => Confirmation::TooFast,
+      Answer::Declined => Confirmation::Declined,
+    }
+  }
+
+  fn check_cooldown(&self) -> Result<(), CommandError> {
+    use std::sync::atomic::Ordering::SeqCst;
+    if self.clock.now_ms() < self.cooldown_until_ms.load(SeqCst) {
+      return Err(CommandError::CoolingDown);
+    }
+    Ok(())
+  }
+
+  fn cool_down(&self, ms: u64) {
+    use std::sync::atomic::Ordering::SeqCst;
+    self.cooldown_until_ms.store(self.clock.now_ms().saturating_add(ms), SeqCst);
   }
 
   /// Persists `next` unless the record changed while the dialog was open.
@@ -412,12 +498,13 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn a_refusal_cools_the_other_confirmations_down_too() {
+  async fn a_refused_storage_origin_cools_the_next_dialog_down() {
     let (w, c) = world();
     in_pod_mode(&w);
     *w.answer.lock().unwrap() = Some((Answer::Declined, 5_000));
     assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Declined));
-    assert_eq!(c.enter(MAIN, "https://other.example").await, Err(CommandError::CoolingDown));
+    assert_eq!(c.add_storage_origin(MAIN, "https://other.example").await, Err(CommandError::CoolingDown));
+    assert_eq!(w.prompts.lock().unwrap().len(), 1);
   }
 
   #[tokio::test]
@@ -483,17 +570,113 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn the_number_of_storage_origins_is_capped_and_the_dialog_is_not_shown_past_the_cap() {
-    use crate::record::MAX_STORAGE_ORIGINS;
+  async fn a_session_shows_a_fixed_number_of_storage_dialogs_in_all_and_then_none() {
+    use crate::record::MAX_STORAGE_PROMPTS;
     let (w, c) = world();
     in_pod_mode(&w);
-    for i in 0..MAX_STORAGE_ORIGINS {
+    for i in 0..MAX_STORAGE_PROMPTS {
       assert_eq!(c.add_storage_origin(MAIN, &format!("https://pod{i}.example")).await, Ok(Reply::Applied));
     }
-    let prompts = w.prompts.lock().unwrap().len();
-    assert_eq!(c.add_storage_origin(MAIN, "https://one-more.example").await, Err(CommandError::TooManyOrigins));
-    assert_eq!(w.prompts.lock().unwrap().len(), prompts);
-    assert_eq!(w.record.lock().unwrap().storage_origins.len(), MAX_STORAGE_ORIGINS);
+    let shown = w.prompts.lock().unwrap().len();
+    assert_eq!(shown, MAX_STORAGE_PROMPTS as usize);
+    assert_eq!(c.add_storage_origin(MAIN, "https://one-more.example").await, Err(CommandError::TooManyPrompts));
+    assert_eq!(w.prompts.lock().unwrap().len(), shown, "no dialog past the allowance");
+    // An origin that is already admitted still answers, without a dialog.
+    assert_eq!(c.add_storage_origin(MAIN, "https://pod0.example").await, Ok(Reply::Applied));
+  }
+
+  #[tokio::test]
+  async fn the_dialog_is_counted_and_saved_before_it_opens_so_quitting_with_it_open_gains_nothing() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    *w.during.lock().unwrap() = Some(Box::new(|w| {
+      assert_eq!(w.record.lock().unwrap().storage_prompts, 1);
+      assert_eq!(w.persisted.lock().unwrap().last().unwrap().storage_prompts, 1);
+    }));
+    assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
+  }
+
+  #[tokio::test]
+  async fn a_declined_origin_is_remembered_and_never_asked_about_again_this_session() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    *w.answer.lock().unwrap() = Some((Answer::Declined, 3_000));
+    assert_eq!(c.add_storage_origin(MAIN, "https://evil.example").await, Ok(Reply::Declined));
+    assert_eq!(w.record.lock().unwrap().refused_origins, ["https://evil.example"]);
+    // Even a fresh controller reading the persisted record (a relaunch) refuses without a dialog.
+    let saved = w.record.lock().unwrap().clone();
+    let (w2, c2) = world();
+    *w2.record.lock().unwrap() = saved;
+    assert_eq!(c2.add_storage_origin(MAIN, "https://evil.example").await, Err(CommandError::RefusedOrigin));
+    assert!(w2.prompts.lock().unwrap().is_empty());
+    // Another origin is still allowed to ask.
+    *w2.answer.lock().unwrap() = Some((Answer::Accepted, 2_000));
+    assert_eq!(c2.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
+  }
+
+  #[tokio::test]
+  async fn each_refusal_doubles_the_wait_before_the_next_dialog() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    *w.answer.lock().unwrap() = Some((Answer::Declined, 1_000));
+    assert_eq!(c.add_storage_origin(MAIN, "https://a.example").await, Ok(Reply::Declined));
+    w.now.fetch_add(COOLDOWN_MS - 1, SeqCst);
+    assert_eq!(c.add_storage_origin(MAIN, "https://b.example").await, Err(CommandError::CoolingDown));
+    w.now.fetch_add(2, SeqCst);
+    assert_eq!(c.add_storage_origin(MAIN, "https://b.example").await, Ok(Reply::Declined));
+    // The second wait is twice as long.
+    w.now.fetch_add(COOLDOWN_MS + 1, SeqCst);
+    assert_eq!(c.add_storage_origin(MAIN, "https://c.example").await, Err(CommandError::CoolingDown));
+    w.now.fetch_add(COOLDOWN_MS, SeqCst);
+    assert_eq!(c.add_storage_origin(MAIN, "https://c.example").await, Ok(Reply::Declined));
+  }
+
+  #[test]
+  fn the_back_off_doubles_and_is_capped() {
+    assert_eq!(refusal_backoff_ms(0), COOLDOWN_MS);
+    assert_eq!(refusal_backoff_ms(1), COOLDOWN_MS);
+    assert_eq!(refusal_backoff_ms(2), 2 * COOLDOWN_MS);
+    assert_eq!(refusal_backoff_ms(3), 4 * COOLDOWN_MS);
+    assert_eq!(refusal_backoff_ms(1_000), MAX_COOLDOWN_MS);
+  }
+
+  #[tokio::test]
+  async fn an_allow_that_comes_too_fast_is_reported_as_such_and_is_not_a_refusal() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    *w.answer.lock().unwrap() = Some((Answer::Accepted, MIN_DIALOG_DISPLAY_MS - 1));
+    assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::TooFast));
+    let record = w.record.lock().unwrap().clone();
+    assert!(record.refused_origins.is_empty() && record.storage_origins.is_empty());
+    assert_eq!(w.rebuilds.load(SeqCst), 0);
+    // After the cool-down a considered Allow for the same origin works.
+    w.now.fetch_add(COOLDOWN_MS + 1, SeqCst);
+    *w.answer.lock().unwrap() = Some((Answer::Accepted, 2_000));
+    assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
+  }
+
+  #[tokio::test]
+  async fn the_dialog_names_only_what_the_app_knows_and_says_the_window_reloads() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
+    let text = w.prompts.lock().unwrap()[0].clone();
+    assert!(text.contains("https://pod.example") && text.contains("reload"));
+    assert!(!text.contains("profile points") && !text.contains("comes from your profile"));
+  }
+
+  #[tokio::test]
+  async fn an_allowed_origin_is_in_the_policy_and_the_script_of_the_rebuilt_window() {
+    use crate::{csp::build_pod_mode_csp, host_script::host_init_script};
+    let (w, c) = world();
+    in_pod_mode(&w);
+    assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
+    assert_eq!(w.rebuilds.load(SeqCst), 1);
+    // What the rebuilt window is built from is the persisted record.
+    let record = w.persisted.lock().unwrap().last().cloned().unwrap();
+    let csp = build_pod_mode_csp(record.issuer.as_deref(), &record.storage_origins, HttpRefused).unwrap();
+    assert!(csp.contains("https://pod.example"));
+    assert!(host_init_script(&record, true, "x.y", None).contains(r#""storageOrigins":["https://pod.example"]"#));
   }
 
   #[tokio::test]
@@ -609,7 +792,7 @@ mod tests {
     *w.during.lock().unwrap() = Some(Box::new(|w| *w.record.lock().unwrap() = PodModeRecord::default()));
     assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Err(CommandError::Changed));
     assert_eq!(*w.record.lock().unwrap(), PodModeRecord::default());
-    assert!(w.persisted.lock().unwrap().is_empty());
+    assert_eq!(w.persisted.lock().unwrap().len(), 1, "only the dialog count was saved before the dialog");
     assert_eq!(w.rebuilds.load(SeqCst), 0);
   }
 
@@ -641,6 +824,48 @@ mod tests {
     assert_eq!(w.rebuilds.load(SeqCst), 1);
   }
 
+  #[tokio::test]
+  async fn connecting_needs_an_ordinary_clean_window() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    assert_eq!(c.enter(MAIN, "https://other.example").await, Err(CommandError::InPodMode));
+    assert!(w.prompts.lock().unwrap().is_empty());
+    // A finishing window (credentials may exist, pod mode off) must finish first.
+    *w.record.lock().unwrap() = PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() };
+    assert_eq!(c.enter(MAIN, ISSUER).await, Err(CommandError::CredentialsPending));
+    assert!(w.prompts.lock().unwrap().is_empty());
+    assert_eq!(c.credentials_cleared(MAIN).await, Ok(Reply::Applied));
+    assert_eq!(c.enter(MAIN, ISSUER).await, Ok(Reply::Applied));
+  }
+
+  #[tokio::test]
+  async fn leaving_and_connecting_again_starts_a_new_dialog_budget() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    *w.answer.lock().unwrap() = Some((Answer::Declined, 1_000));
+    assert_eq!(c.add_storage_origin(MAIN, "https://a.example").await, Ok(Reply::Declined));
+    *w.answer.lock().unwrap() = None;
+    assert_eq!(c.leave(MAIN).await, Ok(Reply::Applied));
+    assert_eq!(c.credentials_cleared(MAIN).await, Ok(Reply::Applied));
+    w.now.fetch_add(MAX_COOLDOWN_MS, SeqCst);
+    assert_eq!(c.enter(MAIN, ISSUER).await, Ok(Reply::Applied));
+    let record = w.record.lock().unwrap().clone();
+    assert_eq!((record.storage_prompts, record.refused_origins.len()), (0, 0));
+  }
+
+  #[tokio::test]
+  async fn a_no_op_wipe_confirmation_or_a_reload_in_an_ordinary_window_does_not_rebuild_it() {
+    let (w, c) = world();
+    assert_eq!(c.credentials_cleared(MAIN).await, Ok(Reply::Applied));
+    assert_eq!(c.reload(MAIN).await, Err(CommandError::NotInPodMode));
+    assert_eq!(w.rebuilds.load(SeqCst), 0);
+    assert!(w.persisted.lock().unwrap().is_empty());
+    // A restricted window may still reload (to close its storage connections).
+    *w.record.lock().unwrap() = PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() };
+    assert_eq!(c.reload(MAIN).await, Ok(Reply::Applied));
+    assert_eq!(w.rebuilds.load(SeqCst), 1);
+  }
+
   #[test]
   fn every_error_has_its_own_fixed_word() {
     let all = [
@@ -655,6 +880,9 @@ mod tests {
       CommandError::PersistFailed,
       CommandError::WindowFailed,
       CommandError::NotFresh,
+      CommandError::RefusedOrigin,
+      CommandError::TooManyPrompts,
+      CommandError::CredentialsPending,
     ];
     let words: std::collections::HashSet<_> = all.iter().map(CommandError::as_str).collect();
     assert_eq!(words.len(), all.len());

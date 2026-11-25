@@ -12,12 +12,15 @@ use tauri::{State, WebviewWindow};
 pub enum Outcome {
   Applied,
   Declined,
+  /// Allow was pressed too fast to be a considered answer; nothing changed.
+  TooFast,
 }
 
 fn outcome(result: Result<Reply, CommandError>) -> Result<Outcome, String> {
   match result {
     Ok(Reply::Applied) => Ok(Outcome::Applied),
     Ok(Reply::Declined) => Ok(Outcome::Declined),
+    Ok(Reply::TooFast) => Ok(Outcome::TooFast),
     Err(e) => Err(e.as_str().to_string()),
   }
 }

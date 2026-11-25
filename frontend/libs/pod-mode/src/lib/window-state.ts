@@ -45,12 +45,15 @@ export type PodModeDeps = {
 
 export type EnterResult = 'requested' | 'declined';
 
+/** `too-fast`: Allow was pressed sooner than a considered answer; nothing changed, ask again later. */
+export type AddOriginResult = EnterResult | 'too-fast';
+
 /** The shell's commands. None of them carries a credential. */
 export type PodModeRequests = {
   /** Asks to enter pod mode for `issuer`. The shell shows a native confirmation. */
   requestEnter(origins: { issuer: string }): Promise<EnterResult>;
   /** Asks to admit one more storage origin. The shell shows a native confirmation. */
-  requestAddStorageOrigin(origin: string): Promise<EnterResult>;
+  requestAddStorageOrigin(origin: string): Promise<AddOriginResult>;
   /** Leaves pod mode. The caller has already wiped the credentials. */
   requestLeave(): Promise<void>;
   /** Rebuilds the window, staying in the current mode. */

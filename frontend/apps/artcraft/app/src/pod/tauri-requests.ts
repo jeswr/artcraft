@@ -15,9 +15,18 @@ export function createTauriPodModeRequests(call: Invoke = invoke): PodModeReques
     if (answer === "declined") return "declined" as const;
     throw new Error("unexpected answer from the app");
   };
+  // Only the add-storage-origin dialog can answer "too fast": Allow pressed sooner than a
+  // considered answer. Nothing changed; the page may ask again after the app's wait.
+  const addOutcome = async (origin: string) => {
+    const answer = await call("pod_mode_add_storage_origin_command", { origin });
+    if (answer === "too_fast") return "too-fast" as const;
+    if (answer === "applied") return "requested" as const;
+    if (answer === "declined") return "declined" as const;
+    throw new Error("unexpected answer from the app");
+  };
   return {
     requestEnter: ({ issuer }) => outcome("pod_mode_enter_command", { issuer }),
-    requestAddStorageOrigin: (origin) => outcome("pod_mode_add_storage_origin_command", { origin }),
+    requestAddStorageOrigin: addOutcome,
     requestLeave: async () => void (await outcome("pod_mode_leave_command")),
     requestReload: async () => void (await outcome("pod_mode_reload_command")),
     requestCredentialsCleared: async () => void (await outcome("pod_mode_credentials_cleared_command")),

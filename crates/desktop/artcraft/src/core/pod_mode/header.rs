@@ -54,6 +54,7 @@ mod tests {
       issuer: Some("https://login.example".into()),
       storage_origins: vec![],
       credentials_may_exist: true,
+      ..PodModeRecord::default()
     }
   }
 

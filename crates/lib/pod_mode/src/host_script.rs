@@ -65,6 +65,7 @@ mod tests {
       issuer: Some("https://login.example".into()),
       storage_origins: vec!["https://pod.example".into()],
       credentials_may_exist: true,
+      ..PodModeRecord::default()
     }
   }
 
@@ -99,6 +100,7 @@ mod tests {
       issuer: Some("https://x.example".into()),
       storage_origins: vec!["https://y.example".into()],
       credentials_may_exist: false,
+      ..PodModeRecord::default()
     };
     let script = host_init_script(&stale, true, ID, None);
     assert!(!script.contains("x.example") && !script.contains("y.example"));
@@ -146,6 +148,7 @@ mod tests {
       issuer: Some("https://a.example</script><script>alert(1)//\u{2028}".into()),
       storage_origins: vec![],
       credentials_may_exist: true,
+      ..PodModeRecord::default()
     };
     let script = host_init_script(&hostile, false, ID, None);
     assert!(!script.contains('<'));

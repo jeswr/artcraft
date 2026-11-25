@@ -1,5 +1,6 @@
 import { type PodOrigins, parseOrigin, validatePodOrigins } from './origins.js';
 import {
+  type AddOriginResult,
   type EnterResult,
   FLAG_ON,
   latchedHostPodMode,
@@ -81,7 +82,7 @@ export async function enterPodMode(origins: PodOrigins, deps: PodModeDeps = {}):
 }
 
 /** Ask to admit one more storage origin, after a native confirmation. Requires a shell. */
-export async function addStorageOrigin(origin: string, deps: PodModeDeps = {}): Promise<EnterResult> {
+export async function addStorageOrigin(origin: string, deps: PodModeDeps = {}): Promise<AddOriginResult> {
   const valid = parseOrigin(origin);
   if (valid === null) throw new Error('addStorageOrigin: not an origin');
   if (!deps.requests) throw new Error('addStorageOrigin: needs the desktop shell');

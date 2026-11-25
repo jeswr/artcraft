@@ -9,6 +9,11 @@ pub const RECORD_FILE_NAME: &str = "pod_mode.json";
 /// The most storage origins one pod-mode record may hold.
 pub const MAX_STORAGE_ORIGINS: usize = 8;
 
+/// The most storage-origin dialogs one pod-mode session may ever show, however they were
+/// answered. It is a lifetime cap for the record (entering pod mode starts a new one), so a
+/// page that calls the command directly cannot keep asking.
+pub const MAX_STORAGE_PROMPTS: u32 = 6;
+
 /// The persisted pod-mode state. Written only by the app after a native confirmation; the
 /// page never writes it. It holds origins, never credentials.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +26,15 @@ pub struct PodModeRecord {
   /// ordinary window loads no analytics: pod credentials may still be in web storage.
   #[serde(default)]
   pub credentials_may_exist: bool,
+  /// How many storage-origin dialogs this pod-mode session has shown (counted before the dialog
+  /// opens, so quitting with it open does not give the page a fresh one). At most
+  /// `MAX_STORAGE_PROMPTS`.
+  #[serde(default)]
+  pub storage_prompts: u32,
+  /// Storage origins the person declined in this pod-mode session. They are never asked about
+  /// again until pod mode is left and entered anew. At most `MAX_STORAGE_PROMPTS` entries.
+  #[serde(default)]
+  pub refused_origins: Vec<String>,
 }
 
 impl PodModeRecord {
@@ -51,6 +65,8 @@ impl Loaded {
         issuer: None,
         storage_origins: Vec::new(),
         credentials_may_exist: true,
+        storage_prompts: 0,
+        refused_origins: Vec::new(),
       },
     }
   }
@@ -113,7 +129,10 @@ pub fn save(dir: &Path, record: &PodModeRecord) -> io::Result<()> {
 
 pub fn is_valid(record: &PodModeRecord, loopback: Loopback) -> bool {
   if !record.enabled {
-    return record.issuer.is_none() && record.storage_origins.is_empty();
+    return record.issuer.is_none()
+      && record.storage_origins.is_empty()
+      && record.storage_prompts == 0
+      && record.refused_origins.is_empty();
   }
   if !record.credentials_may_exist {
     return false; // pod mode always implies the flag
@@ -122,7 +141,11 @@ pub fn is_valid(record: &PodModeRecord, loopback: Loopback) -> bool {
   let storage_ok = record.storage_origins.len() <= MAX_STORAGE_ORIGINS
     && record.storage_origins.iter().all(|s| parse_origin(s, loopback).is_some())
     && !has_duplicates(&record.storage_origins);
-  issuer_ok && storage_ok
+  let memory_ok = record.storage_prompts <= MAX_STORAGE_PROMPTS
+    && record.refused_origins.len() <= MAX_STORAGE_PROMPTS as usize
+    && record.refused_origins.iter().all(|s| parse_origin(s, loopback).is_some())
+    && !has_duplicates(&record.refused_origins);
+  issuer_ok && storage_ok && memory_ok
 }
 
 fn has_duplicates(values: &[String]) -> bool {
@@ -269,7 +292,7 @@ mod tests {
   #[test]
   fn too_many_storage_origins_are_corrupt() {
     let many: Vec<String> = (0..=MAX_STORAGE_ORIGINS).map(|i| format!("https://pod{i}.example")).collect();
-    let record = PodModeRecord { enabled: true, issuer: Some(ISSUER.to_string()), storage_origins: many, credentials_may_exist: true };
+    let record = PodModeRecord { enabled: true, issuer: Some(ISSUER.to_string()), storage_origins: many, credentials_may_exist: true, ..PodModeRecord::default() };
     assert!(!is_valid(&record, HttpRefused));
   }
 
@@ -279,6 +302,7 @@ mod tests {
       issuer: Some(issuer.to_string()),
       storage_origins: storage.iter().map(|s| s.to_string()).collect(),
       credentials_may_exist: true,
+      ..PodModeRecord::default()
     }
   }
 }

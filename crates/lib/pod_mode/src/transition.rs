@@ -1,5 +1,5 @@
 use crate::origin::{Loopback, parse_origin};
-use crate::record::{MAX_STORAGE_ORIGINS, PodModeRecord};
+use crate::record::{MAX_STORAGE_ORIGINS, MAX_STORAGE_PROMPTS, PodModeRecord};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransitionError {
@@ -7,6 +7,10 @@ pub enum TransitionError {
   NotInPodMode,
   InPodMode,
   TooManyStorageOrigins,
+  /// The person already declined this origin in this pod-mode session.
+  RefusedOrigin,
+  /// This pod-mode session has shown its lifetime allowance of storage-origin dialogs.
+  TooManyPrompts,
 }
 
 /// Enter pod mode for `issuer`, replacing any earlier issuer and storage origins. The caller
@@ -18,6 +22,8 @@ pub fn enter(issuer: &str, loopback: Loopback) -> Result<PodModeRecord, Transiti
     issuer: Some(issuer),
     storage_origins: Vec::new(),
     credentials_may_exist: true,
+    storage_prompts: 0,
+    refused_origins: Vec::new(),
   })
 }
 
@@ -55,7 +61,35 @@ pub fn leave(record: &PodModeRecord) -> Result<PodModeRecord, TransitionError> {
   if !record.enabled {
     return Err(TransitionError::NotInPodMode);
   }
-  Ok(PodModeRecord { enabled: false, issuer: None, storage_origins: Vec::new(), credentials_may_exist: true })
+  Ok(PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() })
+}
+
+/// Whether a dialog may be shown for `origin` now: not one the person already declined, and the
+/// session's lifetime allowance of dialogs is not used up. Checked before anything is shown, so a
+/// page that calls the command directly gets the same limits as the page's own gate.
+pub fn may_prompt(record: &PodModeRecord, origin: &str) -> Result<(), TransitionError> {
+  if record.refused_origins.iter().any(|o| o == origin) {
+    return Err(TransitionError::RefusedOrigin);
+  }
+  if record.storage_prompts >= MAX_STORAGE_PROMPTS {
+    return Err(TransitionError::TooManyPrompts);
+  }
+  Ok(())
+}
+
+/// Counts one dialog about to be shown. Persisted before the dialog opens.
+pub fn prompt_shown(record: &PodModeRecord) -> PodModeRecord {
+  PodModeRecord { storage_prompts: record.storage_prompts.saturating_add(1), ..record.clone() }
+}
+
+/// Remembers that the person declined `origin`; it is not asked about again in this session.
+/// The list holds at most `MAX_STORAGE_PROMPTS` entries, which the prompt allowance never exceeds.
+pub fn refused(record: &PodModeRecord, origin: &str) -> PodModeRecord {
+  let mut next = record.clone();
+  if !next.refused_origins.iter().any(|o| o == origin) && next.refused_origins.len() < MAX_STORAGE_PROMPTS as usize {
+    next.refused_origins.push(origin.to_string());
+  }
+  next
 }
 
 /// A successful wipe in a window that is not in pod mode clears the flag. Pod mode itself is
@@ -150,10 +184,43 @@ mod tests {
     let left = leave(&pod).unwrap();
     assert_eq!(
       left,
-      PodModeRecord { enabled: false, issuer: None, storage_origins: Vec::new(), credentials_may_exist: true },
+      PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() },
     );
     assert!(left.restricted());
     assert!(crate::record::is_valid(&left, HttpRefused), "the record must survive a restart");
+  }
+
+  #[test]
+  fn leaving_forgets_the_prompt_budget_and_the_refusals() {
+    let mut pod = enter("https://login.example", HttpRefused).unwrap();
+    pod = refused(&prompt_shown(&pod), "https://nope.example");
+    assert_eq!((pod.storage_prompts, pod.refused_origins.len()), (1, 1));
+    let left = leave(&pod).unwrap();
+    assert_eq!((left.storage_prompts, left.refused_origins.len()), (0, 0));
+    assert!(crate::record::is_valid(&left, HttpRefused));
+  }
+
+  #[test]
+  fn a_refused_origin_and_a_used_up_allowance_stop_the_next_dialog() {
+    let mut pod = enter("https://login.example", HttpRefused).unwrap();
+    assert_eq!(may_prompt(&pod, "https://a.example"), Ok(()));
+    pod = refused(&pod, "https://a.example");
+    assert_eq!(may_prompt(&pod, "https://a.example"), Err(TransitionError::RefusedOrigin));
+    assert_eq!(may_prompt(&pod, "https://b.example"), Ok(()));
+    for _ in 0..MAX_STORAGE_PROMPTS {
+      pod = prompt_shown(&pod);
+    }
+    assert_eq!(may_prompt(&pod, "https://b.example"), Err(TransitionError::TooManyPrompts));
+  }
+
+  #[test]
+  fn the_refused_list_never_outgrows_what_a_record_may_hold() {
+    let mut pod = enter("https://login.example", HttpRefused).unwrap();
+    for i in 0..(MAX_STORAGE_PROMPTS * 2) {
+      pod = refused(&pod, &format!("https://n{i}.example"));
+    }
+    assert_eq!(pod.refused_origins.len(), MAX_STORAGE_PROMPTS as usize);
+    assert!(crate::record::is_valid(&pod, HttpRefused));
   }
 
   #[test]
