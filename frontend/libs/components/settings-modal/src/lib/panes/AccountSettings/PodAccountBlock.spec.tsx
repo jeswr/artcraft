@@ -16,17 +16,19 @@ const WEBID = "https://pod.example/alice/profile/card#me";
 
 afterEach(cleanup);
 
-function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; config?: ConfigCheck } = {}) {
+function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; config?: ConfigCheck; finishing?: boolean } = {}) {
   let state = initial;
-  const listeners = new Set<() => void>();
+  const listeners = new Set<(s: PodSessionState) => void>();
   const session = {
     getState: () => state,
-    subscribe: (l: () => void) => {
+    subscribe: (l: (s: PodSessionState) => void) => {
       listeners.add(l);
-      return () => listeners.delete(l);
+      return () => void listeners.delete(l);
     },
     start: vi.fn(async () => state),
     connect: vi.fn(async () => undefined),
+    beginSignIn: vi.fn(async () => undefined),
+    finishing: () => options.finishing ?? false,
     cancel: vi.fn(),
     leave: vi.fn(async () => undefined),
     getFetch: () => null,
@@ -37,12 +39,12 @@ function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; c
     session,
     set(next: PodSessionState) {
       state = next;
-      act(() => listeners.forEach((l) => l()));
+      act(() => listeners.forEach((l) => l(state)));
     },
   };
 }
 
-function renderBlock(initial: PodSessionState, options: { podWindow?: boolean; config?: ConfigCheck } = {}) {
+function renderBlock(initial: PodSessionState, options: { podWindow?: boolean; config?: ConfigCheck; finishing?: boolean } = {}) {
   const fake = fakeSession(initial, options);
   render(
     <PodSessionProvider session={fake.session} startNow={false}>
@@ -174,4 +176,31 @@ it("says the person declined", () => {
 it("starts the session once when mounted", () => {
   const { session } = renderBlock({ kind: "disconnected" });
   expect(session.start).toHaveBeenCalledTimes(1);
+});
+
+it("waits for a click after a confirmed connect, with no autofocus", async () => {
+  const user = userEvent.setup();
+  const { session } = renderBlock({ kind: "ready-to-sign-in", issuer: "https://login.example" }, { podWindow: true });
+  const button = screen.getByRole("button", { name: "Continue sign-in" });
+  expect(document.activeElement).not.toBe(button);
+  expect(document.body.textContent).toMatch(/Nothing has started yet/);
+  expect(session.beginSignIn).not.toHaveBeenCalled();
+  await user.click(button);
+  expect(session.beginSignIn).toHaveBeenCalledTimes(1);
+});
+
+it("shows the connected WebID prominently with a leave hint", () => {
+  renderBlock({ kind: "connected", webId: WEBID }, { podWindow: true });
+  expect(screen.getByTestId("pod-webid").textContent).toBe(WEBID);
+  expect(document.body.textContent).toMatch(/do not recognise this WebID/);
+});
+
+it("offers only finishing the disconnect in a finishing window", async () => {
+  const user = userEvent.setup();
+  const { session } = renderBlock({ kind: "error", error: "wipe-failed" }, { finishing: true });
+  expect(screen.queryByRole("textbox")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
+  expect(document.body.textContent).not.toMatch(/does not copy any of your work/);
+  await user.click(screen.getByRole("button", { name: "Finish disconnecting" }));
+  expect(session.leave).toHaveBeenCalledTimes(1);
 });

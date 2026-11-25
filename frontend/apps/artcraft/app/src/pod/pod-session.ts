@@ -30,7 +30,7 @@ export function buildPodSession(config: PodSessionConfig, hasShell: boolean): Po
   return createPodSession({
     config,
     createAuth: () => createDefaultAuth(config, tauriDesktopHost),
-    wipeStores: () => deletePodAuthDatabases(config),
+    wipeStores: () => deletePodAuthDatabases(),
     podMode: realPodModePort(hasShell ? createTauriPodModeRequests() : undefined),
   });
 }
@@ -39,6 +39,12 @@ export const podSession = buildPodSession(readConfig(readAppIdentifier()), readH
 
 /**
  * True in a pod window, which restores or continues a sign-in as soon as it loads, and in any
- * window where a connect or disconnect step is waiting to be settled, so its answer is shown.
+ * window where a connect or disconnect step is waiting to be settled, so its answer is shown, and in a window that
+ * may still hold credentials, which finishes disconnecting.
  */
-export const startPodSessionNow = (): boolean => isPodMode() || hasPendingStep();
+export const startPodSessionNow = (): boolean => {
+  if (isPodMode() || hasPendingStep()) return true;
+  const host = readHostPodMode();
+  // A window that may still hold credentials finishes disconnecting even with no marker.
+  return host !== null && !host.enabled && host.credentialsMayExist;
+};

@@ -20,5 +20,11 @@ export function createTauriPodModeRequests(call: Invoke = invoke): PodModeReques
     requestAddStorageOrigin: (origin) => outcome("pod_mode_add_storage_origin_command", { origin }),
     requestLeave: async () => void (await outcome("pod_mode_leave_command")),
     requestReload: async () => void (await outcome("pod_mode_reload_command")),
+    requestCredentialsCleared: async () => void (await outcome("pod_mode_credentials_cleared_command")),
+    requestConsumeFresh: async () => {
+      const issuer = await call("pod_mode_consume_fresh_command");
+      if (typeof issuer !== "string" || issuer === "") throw new Error("unexpected answer from the app");
+      return issuer;
+    },
   };
 }

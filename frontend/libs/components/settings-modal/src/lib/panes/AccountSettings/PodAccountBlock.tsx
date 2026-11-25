@@ -34,6 +34,8 @@ export const PodAccountBlock = () => {
 
 const PodAccountBlockInner = ({ session }: { session: PodSession }) => {
   const state = usePodSessionState(session);
+  // A window that may still hold sign-in data from an earlier session only finishes that.
+  const finishing = session.finishing() && !session.inPodMode() && state.kind !== "leaving";
 
   useEffect(() => {
     void session.start();
@@ -49,23 +51,51 @@ const PodAccountBlockInner = ({ session }: { session: PodSession }) => {
       </h3>
       {/* A change that happens away from focus is announced here. */}
       <div role="status" aria-live="polite" className="text-sm text-base-fg/80">
-        <StatusText state={state} podWindow={session.inPodMode()} />
+        <StatusText state={state} podWindow={session.inPodMode()} finishing={finishing} />
       </div>
       <PodControls session={session} state={state} />
-      <p className="text-xs text-base-fg/70">{DISCLOSURE}</p>
-      <p className="text-xs text-base-fg/70">{RESTART}</p>
+      {!finishing && (
+        <>
+          <p className="text-xs text-base-fg/70">{DISCLOSURE}</p>
+          <p className="text-xs text-base-fg/70">{RESTART}</p>
+        </>
+      )}
     </section>
   );
 };
 
-const StatusText = ({ state, podWindow }: { state: PodSessionState; podWindow: boolean }) => {
+const StatusText = ({
+  state,
+  podWindow,
+  finishing,
+}: {
+  state: PodSessionState;
+  podWindow: boolean;
+  finishing: boolean;
+}) => {
+  if (finishing) {
+    return <>Disconnecting did not finish. Sign-in data may still be stored on this computer.</>;
+  }
   switch (state.kind) {
     case "unsupported":
       return <>Solid pod sign-in is not available: {UNSUPPORTED_TEXT[state.reason]}.</>;
     case "connected":
       return (
+        <div className="flex flex-col gap-1">
+          <span>Connected as</span>
+          <span className="break-all text-base font-semibold" data-testid="pod-webid">
+            {state.webId}
+          </span>
+          <span className="text-xs text-base-fg/70">
+            If you do not recognise this WebID, choose Leave pod mode now.
+          </span>
+        </div>
+      );
+    case "ready-to-sign-in":
+      return (
         <>
-          Connected as <span className="break-all font-medium">{state.webId}</span>
+          You confirmed <span className="break-all font-medium">{state.issuer}</span>. Nothing has
+          started yet; continue when you are ready.
         </>
       );
     case "connecting":
@@ -105,7 +135,25 @@ const StatusText = ({ state, podWindow }: { state: PodSessionState; podWindow: b
 const PodControls = ({ session, state }: { session: PodSession; state: PodSessionState }) => {
   const podWindow = session.inPodMode();
   const error = state.kind === "error" ? state.error : undefined;
+  if (session.finishing() && !podWindow && state.kind !== "leaving") {
+    return (
+      <div className="flex flex-col gap-2">
+        {error && <ErrorText error={error} />}
+        <div>
+          <LeaveButton session={session} label="Finish disconnecting" />
+        </div>
+      </div>
+    );
+  }
   switch (state.kind) {
+    case "ready-to-sign-in":
+      return (
+        <div className="flex gap-2">
+          {/* No autofocus: a stray Enter must not start the sign-in. */}
+          <Button onClick={() => void session.beginSignIn()}>Continue sign-in</Button>
+          <LeaveButton session={session} />
+        </div>
+      );
     case "connecting":
     case "leaving":
       return null;
@@ -190,7 +238,7 @@ const ConnectForm = ({ session, error }: { session: PodSession; error?: PodSessi
  * Leaves pod mode from any state. The window wipes its stored sign-in data first, then the
  * app is asked to leave; the button is disabled while that runs.
  */
-const LeaveButton = ({ session }: { session: PodSession }) => {
+const LeaveButton = ({ session, label }: { session: PodSession; label?: string }) => {
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(
@@ -209,7 +257,7 @@ const LeaveButton = ({ session }: { session: PodSession }) => {
   };
   return (
     <Button variant="destructive" disabled={busy} onClick={() => void leave()}>
-      {session.inPodMode() ? "Leave pod mode" : "Disconnect"}
+      {label ?? (session.inPodMode() ? "Leave pod mode" : "Disconnect")}
     </Button>
   );
 };
