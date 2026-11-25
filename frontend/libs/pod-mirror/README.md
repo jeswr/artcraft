@@ -39,19 +39,33 @@ A delete the store recorded and did not finish (its durable delete journal) is g
 the store outwards (`@jeswr/pod-media-store` at `690ecee7c`). The store withdraws the pending delete as
 a put adopts the copy, takes a lock per copy for put, remove, update, resume and withdraw, and re-reads
 its journal before each destructive request. On top of that the mirror gives `resumePending` a
-`shouldResume` veto, asked just before each destructive request: it answers `"withdraw"` when a
-journal record of any hosted account or WebID pairs with the copy, `false` (the delete stays journalled)
-when the journal cannot say, and `true` otherwise. It answers from the journal and this app's records,
-never from the store, because a store call on that copy fails `conflict` / `reentrant` while the
-question is open. This closes what was a residual window: an interrupted delete, the same bytes saved
-again as a fresh copy while the store's journal was unreachable (so the pending delete could not be
-withdrawn; an adopting put fails closed instead), then a restart. A copy whose
-description an earlier delete had already taken, but that a record pairs with, is copied again from
-the hosted item if it still exists (the store's `withdrawPending` answering `incomplete`, or a
-resumed entry past its description). `failed` / `journal` from an adopting put and `conflict` /
-`reentrant` are transient: the item stays pending and is tried again. Nothing is deleted while the
-journal cannot be read or written. Two stores with separate journals, or two devices, remain
-unprotected (see below). The description of a kept copy stays the first writer's (its prompt and provenance), including after
+`shouldResume` veto, asked just before each destructive request. It answers `true` only for a copy
+nothing pairs with. It answers `"withdraw"` when a journal record of any hosted account or WebID pairs
+with the copy, and `false` (the delete stays journalled and is asked again at a later start) when the
+journal cannot say, cannot be written or has closed, or when a put has returned for the copy and not yet
+recorded it. It answers from the journal and this app's records, never from the store, because a store
+call on that copy fails `conflict` / `reentrant` while the question is open. Pod addresses are compared
+in the store's canonical form (`new URL(url).href`) everywhere (the journal rewrites them on write,
+on lookup, and once for an older database), so a differently spelt address (upper-case host,
+explicit default port, raw non-ASCII) still counts as the same copy.
+
+A copy whose description an earlier delete had already taken, but that a record pairs with, is
+copied again from the hosted item if it still exists: the veto keeps such an entry (`false`) until the
+records that pair with the copy have been queued, and the put that copies it withdraws the entry. If
+the repair cannot run (hosted lookup unavailable, stopped), the entry stays and the next `prepare`
+(start, reconnect, or a back-off retry) resumes again. `incomplete` from `withdrawPending` is handled
+the same way. `failed` / `journal` from an adopting put and `conflict` / `reentrant` are transient: the
+item stays pending and is tried again. Nothing is deleted while the journal cannot be read or written.
+
+Known limits of this layer: (1) a resumed delete runs under the store's lock, which is per store
+instance, not under the cross-window Web Lock; between two windows the protection is the store's
+re-read of the shared journal before each request, which leaves the time of one request. (2) A repair
+queues only this hosted account's records. If the record that keeps a copy belongs to another hosted
+account or WebID, the entry stays journalled and that account's own verification pass repairs its
+record. (3) Two stores with separate journals, or two devices, are unprotected (see below). (4) A pod
+that lists addresses in a non-canonical form cannot be mirrored at all: the description builder
+(`@jeswr/solid-creative-assets` `documentUrl`) refuses them, so the put fails and is retried.
+The description of a kept copy stays the first writer's (its prompt and provenance), including after
 that hosted item is deleted.
 
 Limits that cannot be fixed from here: the guarantee is per running app (one browser profile on one

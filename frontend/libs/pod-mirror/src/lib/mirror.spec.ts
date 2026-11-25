@@ -2578,8 +2578,10 @@ describe('bytes in flight', () => {
 describe('the veto for the store\'s pending deletes', () => {
   const URL_A = 'https://pod.example/alice/creative-assets/2026/06/aaa';
   const pending = (descriptionUrl: string, phase: 'intent' | 'deleted' = 'intent') => ({ descriptionUrl, shardUrl: 'https://pod.example/alice/creative-assets/2026/06/', phase });
+  const saved = (journal: MirrorJournal, n: number, url: string) =>
+    journal.create({ ...JOURNAL_ACCOUNT, token: token(n), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: url, sha256: 'x', thumbnail: 'none' });
 
-  it('proceeds for a copy nothing pairs with, and withdraws one a record of any account pairs with', async () => {
+  it('proceeds for a copy nothing pairs with, and withdraws one a record of any account pairs with, never calling the store', async () => {
     const journal = createMemoryMirrorJournal();
     await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
     await journal.create({ webId: JOURNAL_ACCOUNT.webId, username: 'other_account', token: 'm_x', state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: URL_A });
@@ -2588,9 +2590,25 @@ describe('the veto for the store\'s pending deletes', () => {
     await t.mirror.start();
     await settle(t.mirror);
     expect(t.store.vetoes).toEqual(['withdraw', true]);
+    expect(t.store.reentered).toEqual([]);
   });
 
-  it('says no when the journal cannot answer, and never calls the store for the copy while asked', async () => {
+  it('sees a record of this account on its own, whatever the journal says', async () => {
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
+    await saved(journal, 1, URL_A);
+    journal.isPairedElsewhere = async () => false;
+    const t = setup([hostedFile(1)], {}, journal);
+    t.store.pendingDeletes.push(pending(URL_A));
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.store.vetoes).toEqual(['withdraw']);
+    // An entry that has not passed its description needs no new copy.
+    expect(t.store.puts).toHaveLength(0);
+    expect(t.store.reentered).toEqual([]);
+  });
+
+  it('says no when the journal cannot answer', async () => {
     const journal = createMemoryMirrorJournal();
     await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
     journal.isPairedElsewhere = async () => {
@@ -2598,29 +2616,89 @@ describe('the veto for the store\'s pending deletes', () => {
     };
     const t = setup([], {}, journal);
     t.store.pendingDeletes.push(pending(URL_A));
-    const calls: string[] = [];
-    for (const name of ['get', 'remove', 'put', 'withdrawPending', 'attachThumbnail'] as const) {
-      const original = t.store[name] as (...args: unknown[]) => unknown;
-      (t.store as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => (calls.push(name), original(...args));
-    }
     await t.mirror.start();
     await settle(t.mirror);
     expect(t.store.vetoes).toEqual([false]);
-    expect(calls).toEqual([]);
+    expect(t.store.reentered).toEqual([]);
   });
 
-  it('copies again a record whose copy was already past its description', async () => {
+  it('says no while the journal cannot be written, even for a copy nothing pairs with', async () => {
+    const journal = createMemoryMirrorJournal();
+    const update = journal.update.bind(journal);
+    let failing = false;
+    journal.update = async (...args) => {
+      if (failing) throw new Error('quota');
+      return update(...args);
+    };
+    const t = setup([hostedFile(1)], {}, journal);
+    await t.mirror.start();
+    await settle(t.mirror);
+    failing = true;
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary().journalUnavailable).toBe(true);
+    t.store.pendingDeletes.push(pending('https://pod.example/alice/creative-assets/2026/06/zzz'));
+    t.session.set(false);
+    t.session.set(true);
+    await settle(t.mirror);
+    expect(t.store.vetoes).toEqual([false]);
+  });
+
+  it('is not left stuck as store-unavailable by a session change that lands while the store is being prepared', async () => {
+    const t = setup([hostedFile(1)]);
+    let release: () => void = () => undefined;
+    t.store.resumeGate = new Promise((resolve) => (release = resolve));
+    const started = t.mirror.start();
+    await vi.advanceTimersByTimeAsync(10);
+    t.session.set(false);
+    t.session.set(true);
+    release();
+    t.store.resumeGate = null;
+    await started;
+    await settle(t.mirror);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle(t.mirror);
+    expect(t.mirror.summary().paused).toBeNull();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved' });
+  });
+
+  it('copies again a record whose copy was already past its description, keeping the entry until it is queued', async () => {
     const journal = createMemoryMirrorJournal();
     await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
-    await journal.create({ ...JOURNAL_ACCOUNT, token: token(1), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: URL_A, sha256: 'x', thumbnail: 'none' });
+    await saved(journal, 1, URL_A);
     const t = setup([hostedFile(1)], {}, journal);
     t.store.pendingDeletes.push(pending(URL_A, 'deleted'));
     t.store.missing.add(URL_A);
     await t.mirror.start();
     await settle(t.mirror);
-    expect(t.store.vetoes).toEqual(['withdraw']);
+    expect(t.store.vetoes).toEqual([false]);
     expect(t.store.puts).toHaveLength(1);
     expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved' });
+    expect(t.store.reentered).toEqual([]);
+  });
+
+  it('retries the repair on a later prepare when the hosted lookup cannot run, instead of waiting for the verification pass', async () => {
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
+    await saved(journal, 1, URL_A);
+    const t = setup([hostedFile(1)], {}, journal);
+    t.store.pendingDeletes.push(pending(URL_A, 'deleted'));
+    t.store.missing.add(URL_A);
+    const real = t.hosted.getMediaFile.bind(t.hosted);
+    let down = true;
+    t.hosted.getMediaFile = async (...args) => (down ? { ok: false, kind: 'unavailable' } : real(...args));
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.store.puts).toHaveLength(0);
     expect(t.store.resumed).toBe(1);
+    down = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    // The entry was kept, the store asked again, and this time the record was queued and copied.
+    expect(t.store.resumed).toBeGreaterThan(1);
+    expect(t.store.puts).toHaveLength(1);
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved' });
   });
 });

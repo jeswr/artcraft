@@ -138,7 +138,27 @@ export class JournalError extends Error {
 }
 
 export const DB_NAME = 'artcraft-pod-mirror';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
+
+/**
+ * A pod address in the one form the store keys its own journal and locks by (`new URL(url).href`).
+ * A server may list an address with an upper-case host, an explicit default port or raw non-ASCII
+ * characters; every pairing, lookup and veto compares this form, so such a copy is still found.
+ */
+export function canonicalUrl(url: string): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url;
+  }
+}
+
+function canonFields<T extends { descriptionUrl?: string; lastDescriptionUrl?: string }>(value: T): T {
+  const next = { ...value };
+  if (typeof next.descriptionUrl === 'string') next.descriptionUrl = canonicalUrl(next.descriptionUrl);
+  if (typeof next.lastDescriptionUrl === 'string') next.lastDescriptionUrl = canonicalUrl(next.lastDescriptionUrl);
+  return next;
+}
 const BY_DESCRIPTION = 'descriptionUrl';
 /** States that no longer hold a pod copy up: the hosted item is gone and the copy is going. */
 const LEAVING: ReadonlySet<string> = new Set(['removing', 'remove-failed']);
@@ -186,6 +206,18 @@ export function upgradeJournal(db: IDBDatabase, oldVersion: number, tx?: IDBTran
     // descriptionUrl are simply not in the index.
     const items = tx.objectStore(ITEMS);
     if (!items.indexNames.contains(BY_DESCRIPTION)) items.createIndex(BY_DESCRIPTION, 'descriptionUrl');
+  }
+  if (oldVersion < 4 && oldVersion >= 1 && tx) {
+    // Addresses were stored as the pod listed them; the store compares them in canonical form.
+    const request = tx.objectStore(ITEMS).openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      const row = cursor.value as JournalRecord;
+      const next = canonFields(row);
+      if (next.descriptionUrl !== row.descriptionUrl || next.lastDescriptionUrl !== row.lastDescriptionUrl) cursor.update(next);
+      cursor.continue();
+    };
   }
 }
 
@@ -273,16 +305,17 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       const store = tx.objectStore(ITEMS);
       const existing = (await request(store.get(itemKey(record, record.token)))) as JournalRecord | undefined;
       if (existing) return { record: existing, created: false };
-      store.put({ ...record });
+      const clean = canonFields(record);
+      store.put({ ...clean });
       await done(tx);
-      return { record, created: true };
+      return { record: clean, created: true };
     },
     async update(account, token, patch, now) {
       const tx = db.transaction(ITEMS, 'readwrite');
       const store = tx.objectStore(ITEMS);
       const existing = (await request(store.get(itemKey(account, token)))) as JournalRecord | undefined;
       if (!existing) return undefined;
-      const next: JournalRecord = { ...existing, ...patch, updatedAt: now };
+      const next: JournalRecord = { ...existing, ...canonFields(patch), updatedAt: now };
       // `undefined` in a patch clears the field.
       for (const [key, value] of Object.entries(patch)) if (value === undefined) delete (next as unknown as Record<string, unknown>)[key];
       store.put(next);
@@ -303,7 +336,7 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       const items = tx.objectStore(ITEMS);
       // A database upgraded without the index (it should not be) is scanned instead.
       const rows = (await request(
-        items.indexNames.contains(BY_DESCRIPTION) ? items.index(BY_DESCRIPTION).getAll(KR.only(descriptionUrl)) : items.getAll(),
+        items.indexNames.contains(BY_DESCRIPTION) ? items.index(BY_DESCRIPTION).getAll(KR.only(canonicalUrl(descriptionUrl))) : items.getAll(),
       )) as JournalRecord[];
       return rows.some((row) => pairsWith(row, descriptionUrl, except));
     },
@@ -351,7 +384,7 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
 }
 
 function pairsWith(row: JournalRecord, descriptionUrl: string, except: (MirrorAccount & { token: string }) | undefined): boolean {
-  if (row.descriptionUrl !== descriptionUrl || LEAVING.has(row.state)) return false;
+  if (row.descriptionUrl === undefined || canonicalUrl(row.descriptionUrl) !== canonicalUrl(descriptionUrl) || LEAVING.has(row.state)) return false;
   return !except || !(row.webId === except.webId && row.username === except.username && row.token === except.token);
 }
 
@@ -385,13 +418,14 @@ export function createMemoryMirrorJournal(): MirrorJournal {
     async create(record) {
       const existing = items.get(key(record, record.token));
       if (existing) return { record: { ...existing }, created: false };
-      items.set(key(record, record.token), { ...record });
-      return { record, created: true };
+      const clean = canonFields(record);
+      items.set(key(record, record.token), { ...clean });
+      return { record: clean, created: true };
     },
     async update(a, t, patch, now) {
       const existing = items.get(key(a, t));
       if (!existing) return undefined;
-      const next: JournalRecord = { ...existing, ...patch, updatedAt: now };
+      const next: JournalRecord = { ...existing, ...canonFields(patch), updatedAt: now };
       for (const [k, v] of Object.entries(patch)) if (v === undefined) delete (next as unknown as Record<string, unknown>)[k];
       items.set(key(a, t), next);
       return { ...next };

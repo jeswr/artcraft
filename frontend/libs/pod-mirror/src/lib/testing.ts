@@ -165,6 +165,11 @@ export interface FakeStore extends PodStorePort {
   /** What the store's `resumePending` asks the veto about, in order (the vetoes' answers are kept). */
   pendingDeletes: PendingDelete[];
   vetoes: (boolean | 'withdraw')[];
+  /** Store calls made while a veto was open, as the real store answers them: `conflict` / `reentrant`. */
+  reentered: string[];
+  vetoOpen: boolean;
+  /** Holds `resumePending` until it resolves. */
+  resumeGate: Promise<void> | null;
   /** Description URLs whose copy the pod no longer has (404/410), or how a lookup fails otherwise. */
   missing: Set<string>;
   getFailure: MediaStoreError | null;
@@ -202,6 +207,9 @@ export function fakeStore(): FakeStore {
     withdrawResult: 'withdrawn',
     pendingDeletes: [],
     vetoes: [],
+    reentered: [],
+    vetoOpen: false,
+    resumeGate: null,
     missing: new Set(),
     getFailure: null,
     gets: [],
@@ -271,9 +279,16 @@ export function fakeStore(): FakeStore {
     exposureTarget: () => store.target,
     async resumePending(options) {
       store.resumed++;
+      if (store.resumeGate) await store.resumeGate;
       const entries: ResumeEntryResult[] = [];
       for (const entry of store.pendingDeletes) {
-        const answer = (await options?.shouldResume?.(entry)) ?? true;
+        store.vetoOpen = true;
+        let answer: boolean | 'withdraw';
+        try {
+          answer = (await options?.shouldResume?.(entry)) ?? true;
+        } finally {
+          store.vetoOpen = false;
+        }
         store.vetoes.push(answer);
         entries.push({ descriptionUrl: entry.descriptionUrl, outcome: answer === true ? 'completed' : 'skipped', ...(answer === true ? {} : { reason: answer === 'withdraw' ? 'withdrawn' : 'vetoed' }) } as ResumeEntryResult);
         if (answer === true) store.removed.push(entry.descriptionUrl), store.missing.add(entry.descriptionUrl);
@@ -288,6 +303,14 @@ export function fakeStore(): FakeStore {
       return { ok: true, value: { url, created: false, exposure: store.exposure, probed: url ?? 'https://pod.example/alice/' } };
     },
   };
+  for (const name of ['put', 'attachThumbnail', 'remove', 'withdrawPending', 'get'] as const) {
+    const real = store[name] as (...args: unknown[]) => Promise<unknown>;
+    (store as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+      if (!store.vetoOpen) return real.apply(store, args);
+      store.reentered.push(name);
+      return Promise.resolve({ ok: false, error: { kind: 'conflict', reason: 'reentrant' } });
+    };
+  }
   return store;
 }
 

@@ -14,7 +14,7 @@ import {
 } from '@jeswr/pod-media-store';
 import { thumbnailMutation } from './assets-store.js';
 import { BytesError, blobHead, ByteBudget, type FetchPublicBytes } from './bytes.js';
-import type { Baseline, ImportRun, ItemMark, JournalRecord, MirrorJournal, RecordPatch } from './journal.js';
+import { type Baseline, canonicalUrl, type ImportRun, type ItemMark, type JournalRecord, type MirrorJournal, type RecordPatch } from './journal.js';
 import { type AssetInput, type AssetKind, classify, type Expected, parseDate, referenceTokens, thumbnailUrl, toAssetInput } from './mapping.js';
 import type {
   FailureReason,
@@ -236,7 +236,8 @@ function webLocks(): LockManagerLike | undefined {
   }
 }
 
-async function withCopyLock<T>(url: string, work: () => Promise<T>): Promise<T> {
+async function withCopyLock<T>(address: string, work: () => Promise<T>): Promise<T> {
+  const url = canonicalUrl(address);
   const previous = copyLocks.get(url) ?? Promise.resolve();
   const run = previous.then(() => {
     const locks = webLocks();
@@ -255,7 +256,8 @@ async function withCopyLock<T>(url: string, work: () => Promise<T>): Promise<T> 
 const removedAt = new Map<string, number>();
 let removalClock = 0;
 const MAX_REMEMBERED_REMOVALS = 2048;
-function noteRemoved(url: string): void {
+function noteRemoved(address: string): void {
+  const url = canonicalUrl(address);
   removedAt.delete(url);
   removedAt.set(url, ++removalClock);
   if (removedAt.size > MAX_REMEMBERED_REMOVALS) removedAt.delete(removedAt.keys().next().value as string);
@@ -320,6 +322,8 @@ export class PodMirror {
   private target: string | null = null;
   private storeAttempts = 0;
   private resumed = false;
+  /** Pod copies a put has returned for and that are not recorded yet: a pending delete of one is not carried out. */
+  private readonly unrecorded = new Map<string, number>();
   private preparing: Promise<void> | null = null;
   private reconciling: Promise<ReconcileResult> | null = null;
   private verifying: Promise<VerifyResult> | null = null;
@@ -1395,8 +1399,9 @@ export class PodMirror {
         // Under the copy's lock, so a delete deciding about the same pod copy sees this record or
         // runs wholly before it; one that took the copy while this put was writing it means
         // the put is repeated (it recreates the copy) rather than leaving a dead link.
-        const url = put.value.descriptionUrl;
+        const url = canonicalUrl(put.value.descriptionUrl);
         let settled: boolean;
+        this.unrecorded.set(url, (this.unrecorded.get(url) ?? 0) + 1);
         try {
           settled = await withCopyLock(url, async () => {
             if ((removedAt.get(url) ?? 0) > clock) return false;
@@ -1413,6 +1418,10 @@ export class PodMirror {
           if (!(error instanceof JournalWriteError)) throw error;
           // Not recorded, so not `saved`: the item stays pending and is copied (adopted) again.
           return this.failTask(token, 'copy', 'unexpected', signal, 'transient');
+        } finally {
+          const left = (this.unrecorded.get(url) ?? 1) - 1;
+          if (left > 0) this.unrecorded.set(url, left);
+          else this.unrecorded.delete(url);
         }
         if (settled) return;
         if (repeat + 1 >= MAX_PUT_REPEATS) return this.failTask(token, 'copy', 'store', signal, 'transient');
@@ -1549,12 +1558,12 @@ export class PodMirror {
 
   /** The records of this account, other than `except`, that are saved on the copy. */
   private pairedTokens(url: string, except: string): string[] {
-    return [...(this.pairings.get(url) ?? [])].filter((other) => other !== except && this.records.get(other)?.state === 'saved');
+    return [...(this.pairings.get(canonicalUrl(url)) ?? [])].filter((other) => other !== except && this.records.get(other)?.state === 'saved');
   }
 
   /** Another record of this account, other than `except`, pairs with the copy and is not itself leaving. */
   private pairedHere(url: string, except: string): boolean {
-    for (const other of this.pairings.get(url) ?? []) {
+    for (const other of this.pairings.get(canonicalUrl(url)) ?? []) {
       const state = this.records.get(other)?.state;
       if (other !== except && state !== undefined && state !== 'removing' && state !== 'remove-failed') return true;
     }
@@ -1574,16 +1583,18 @@ export class PodMirror {
 
   private index(record: JournalRecord): void {
     if (!record.descriptionUrl) return;
-    const tokens = this.pairings.get(record.descriptionUrl) ?? new Set<string>();
+    const key = canonicalUrl(record.descriptionUrl);
+    const tokens = this.pairings.get(key) ?? new Set<string>();
     tokens.add(record.token);
-    this.pairings.set(record.descriptionUrl, tokens);
+    this.pairings.set(key, tokens);
   }
 
   private unindex(record: JournalRecord): void {
     if (!record.descriptionUrl) return;
-    const tokens = this.pairings.get(record.descriptionUrl);
+    const key = canonicalUrl(record.descriptionUrl);
+    const tokens = this.pairings.get(key);
     tokens?.delete(record.token);
-    if (tokens?.size === 0) this.pairings.delete(record.descriptionUrl);
+    if (tokens?.size === 0) this.pairings.delete(key);
   }
 
   // ---- failures ------------------------------------------------------------------------
@@ -1714,10 +1725,14 @@ export class PodMirror {
   // ---- store and session -----------------------------------------------------------------
 
   private prepare(): Promise<void> {
+    const startedAt = this.generation;
     this.preparing ??= this.prepareOnce().finally(() => {
       this.preparing = null;
       this.changed();
       this.pump();
+      // The session or network changed while this ran, and its own `prepare()` joined this one: no
+      // run is left for that change, so one starts now.
+      if (this.running && this.generation !== startedAt && !this.store && this.o.session.isConnected() && (this.o.network?.isOnline() ?? true)) void this.prepare();
       // The store is open: the pod pass that could not run at start (or after a reconnect) can.
       if (this.running && this.store && this.exposureOk) void this.verify(false, this.o.verifyOnStartAfterMs).catch(() => undefined);
     });
@@ -1772,16 +1787,36 @@ export class PodMirror {
     const damaged = new Set<string>();
     const shouldResume = async (entry: PendingDelete): Promise<boolean | 'withdraw'> => {
       try {
-        const paired = this.pairedHere(entry.descriptionUrl, '') || (await this.o.journal.isPairedElsewhere(entry.descriptionUrl));
+        // Records that cannot be trusted to be complete (the journal cannot be written or has closed)
+        // decide nothing: the delete stays journalled.
+        if (this.journalFailing || this.journalClosed) return false;
+        const url = canonicalUrl(entry.descriptionUrl);
+        if (this.unrecorded.has(url)) return false;
+        const paired = this.pairedHere(url, '') || (await this.o.journal.isPairedElsewhere(url));
         if (!paired) return true;
-        if (entry.phase === 'deleted') damaged.add(entry.descriptionUrl);
+        if (entry.phase === 'deleted') {
+          // The description is already gone: the entry stays until the records that pair with the
+          // copy have been queued to be copied again (the put that does it withdraws the entry).
+          damaged.add(url);
+          return false;
+        }
         return 'withdraw';
       } catch {
         return false;
       }
     };
-    await store.resumePending({ signal, shouldResume }).catch(() => undefined);
-    for (const url of damaged) for (const token of this.pairedTokens(url, '')) await this.requeueMissing(token, signal);
+    const resumed = await store.resumePending({ signal, shouldResume }).catch(() => undefined);
+    if (resumed?.ok) for (const done of resumed.value.entries) if (done.outcome === 'completed') noteRemoved(done.descriptionUrl);
+    let incomplete = !resumed?.ok;
+    for (const url of damaged) {
+      for (const token of this.pairedTokens(url, '')) if (!(await this.requeueMissing(token, signal))) incomplete = true;
+    }
+    // The resume or a repair could not finish (offline, hosted lookup unavailable, stopped): the
+    // entries are still journalled, so a later prepare asks again.
+    if (incomplete && !signal.aborted) {
+      this.resumed = false;
+      this.retryPrepareLater('failed');
+    }
   }
 
   /** Bumped whenever the session or network changes what an in-flight store open would mean. */
@@ -1848,7 +1883,11 @@ export class PodMirror {
    * throws, so an item is never `saved` in memory only, where another account's delete cannot
    * see it.
    */
-  private async patch(token: string, patch: RecordPatch, strict = false): Promise<void> {
+  private async patch(token: string, raw: RecordPatch, strict = false): Promise<void> {
+    // Addresses are kept in the store's canonical form, here and in the journal.
+    const patch: RecordPatch = { ...raw };
+    if (typeof patch.descriptionUrl === 'string') patch.descriptionUrl = canonicalUrl(patch.descriptionUrl);
+    if (typeof patch.lastDescriptionUrl === 'string') patch.lastDescriptionUrl = canonicalUrl(patch.lastDescriptionUrl);
     const now = this.o.now();
     const current = this.records.get(token);
     if (!current) return;

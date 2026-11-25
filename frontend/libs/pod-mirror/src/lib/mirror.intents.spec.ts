@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { asPodStorePort, openCreativeAssetStore } from './assets-store.js';
 import { createMemoryMirrorJournal } from './journal.js';
 import { PodMirror } from './mirror.js';
-import { ACCOUNT, fakeBytes, fakeEvents, fakeHosted, fakeNetwork, fakeSession, hostedFile, png } from './testing.js';
+import { ACCOUNT, JOURNAL_ACCOUNT, fakeBytes, fakeEvents, fakeHosted, fakeNetwork, fakeSession, hostedFile, png } from './testing.js';
 
 /**
  * The real media store over an in-memory pod, with deletes that can be made to fail. Two hosted
@@ -239,6 +239,8 @@ describe('the veto the mirror gives the store for a pending delete', () => {
   it('keeps the delete and the copy when the journal cannot say what pairs with it (a skipped entry), and finishes it on a later start', async () => {
     const w = await world();
     const url = await interrupted(w);
+    // The removal the interrupted delete came from is forgotten, so only the resumed delete can finish it.
+    await w.journal.remove(JOURNAL_ACCOUNT, hostedFile(1).token);
     const spy = vi.spyOn(w.journal, 'isPairedElsewhere').mockRejectedValue(new Error('closed'));
     const b = w.open();
     await b.mirror.start();
@@ -268,6 +270,36 @@ describe('the veto the mirror gives the store for a pending delete', () => {
     const b = w.open();
     await b.mirror.start();
     await settle(b.mirror);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(b.mirror);
+    expect(await w.exists(url)).toBe(true);
+    expect(b.mirror.stateOf(hostedFile(1).token)).toMatchObject({ kind: 'saved', descriptionUrl: url });
+    expect(await w.deletes()).toEqual([]);
+  });
+});
+
+describe('a repair that cannot run when the pending delete is resumed', () => {
+  it('is kept durable (the entry stays journalled) and done on a later prepare, not left to the verification pass', async () => {
+    const w = await world();
+    const a = w.open();
+    await a.mirror.start();
+    await a.mirror.enqueue(hostedFile(1).token);
+    await settle(a.mirror);
+    const url = urlOf(a.mirror, 1);
+    await a.mirror.stop();
+    await w.storage.delete(url, { ifMatch: (await w.storage.read(url)).etag as string });
+    await w.journal.deletesFor(WEB_ID, ROOT).put({ descriptionUrl: url, shardUrl: url.slice(0, url.lastIndexOf('/') + 1), phase: 'deleted', binaryUrl: await w.binaryOf(url) });
+    const real = w.hosted.getMediaFile.bind(w.hosted);
+    let down = true;
+    w.hosted.getMediaFile = async (...args) => (down ? { ok: false, kind: 'unavailable' } : real(...args));
+    const b = w.open();
+    await b.mirror.start();
+    await settle(b.mirror);
+    // Nothing could be repaired yet, and nothing was forgotten.
+    expect(await w.exists(url)).toBe(false);
+    expect((await w.deletes()).map((e) => e.descriptionUrl)).toEqual([url]);
+    expect(b.mirror.stateOf(hostedFile(1).token)).toMatchObject({ kind: 'saved' });
+    down = false;
     await vi.advanceTimersByTimeAsync(60_000);
     await settle(b.mirror);
     expect(await w.exists(url)).toBe(true);
@@ -345,7 +377,7 @@ describe('a put that adopts a copy while the store cannot reach its delete journ
 });
 
 describe('a waiter that aborts while another operation holds the copy', () => {
-  it('leaves the queue without holding up or breaking the copy: the held delete finishes, and a later start copies the item whole', async () => {
+  it('leaves the queue without holding up the copy: the held delete finishes, and a later start copies the item whole (that a later arrival still queues behind the holder is the lock test of the store itself)', async () => {
     const w = await world();
     const a = w.open();
     await a.mirror.start();
@@ -376,5 +408,32 @@ describe('a waiter that aborts while another operation holds the copy', () => {
     const saved = b.mirror.stateOf(hostedFile(2).token) as { descriptionUrl: string };
     expect(await w.exists(saved.descriptionUrl)).toBe(true);
     expect(await w.exists(url)).toBe(true);
+  });
+});
+
+describe('a record whose address is spelt other than the way the store keys it', () => {
+  it('still pairs with the copy: the pending delete is withdrawn, not carried out (upper-case host, explicit default port)', async () => {
+    const w = await world();
+    const a = w.open();
+    await a.mirror.start();
+    await a.mirror.enqueue(hostedFile(1).token);
+    await settle(a.mirror);
+    const url = urlOf(a.mirror, 1);
+    w.plan.failFrom = 1;
+    w.hosted.files.delete(hostedFile(1).token);
+    a.events.emit({ type: 'deleted', token: hostedFile(1).token });
+    await settle(a.mirror);
+    await a.mirror.stop();
+    w.plan.failFrom = null;
+    expect((await w.deletes()).map((e) => e.descriptionUrl)).toEqual([url]);
+    // Another record of this pod, written with the address as a server may spell it.
+    const spelt = url.replace('https://pod.example/', 'https://POD.example:443/');
+    expect(spelt).not.toBe(url);
+    await w.journal.create({ webId: WEB_ID, username: 'bob_hosted|https://api.example', token: 'm_bob', state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: spelt });
+    const b = w.open();
+    await b.mirror.start();
+    await settle(b.mirror);
+    expect(await w.exists(url)).toBe(true);
+    expect(await w.deletes()).toEqual([]);
   });
 });

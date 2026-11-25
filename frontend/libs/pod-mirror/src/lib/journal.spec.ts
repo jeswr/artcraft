@@ -44,6 +44,17 @@ describe.each([
     expect(await journal.list(ACCOUNT)).toHaveLength(1);
   });
 
+  it('compares pod addresses in canonical form, whatever spelling a record or a lookup uses', async () => {
+    const journal = await fresh();
+    await journal.create(record(ACCOUNT, 'm_1', { state: 'saved', descriptionUrl: 'https://POD.example:443/jos\u00e9/d' }));
+    expect((await journal.get(ACCOUNT, 'm_1'))?.descriptionUrl).toBe('https://pod.example/jos%C3%A9/d');
+    expect(await journal.isPairedElsewhere('https://pod.example/jos%C3%A9/d')).toBe(true);
+    expect(await journal.isPairedElsewhere('https://Pod.example/jos\u00e9/d')).toBe(true);
+    await journal.update(ACCOUNT, 'm_1', { descriptionUrl: 'https://pod.example:443/x y' }, 2);
+    expect(await journal.isPairedElsewhere('https://pod.example/x%20y')).toBe(true);
+    expect(await journal.isPairedElsewhere('https://pod.example/jos%C3%A9/d')).toBe(false);
+  });
+
   it('says whether another record, of any hosted account or WebID, pairs with a pod copy', async () => {
     const journal = await fresh();
     const url = 'https://pod/lib/2026/06/hash';
@@ -189,6 +200,21 @@ describe('indexeddb journal durability', () => {
     open1.push(journal);
     expect((await journal.get(ACCOUNT, 'm_old'))?.descriptionUrl).toBe('https://p/d');
     expect(await journal.isPairedElsewhere('https://p/d', { ...ACCOUNT, token: 'other' })).toBe(true);
+  });
+
+  it('rewrites the addresses of an older database to the canonical form, so a canonical lookup finds them', async () => {
+    const factory = new IDBFactory();
+    const prior = await openRaw(factory, 2, (db) => upgradeJournal(db, 0));
+    await new Promise<void>((resolve) => {
+      const tx = prior.transaction('items', 'readwrite');
+      tx.objectStore('items').put(record(ACCOUNT, 'm_old', { state: 'saved', descriptionUrl: 'https://POD.example:443/jos\u00e9/d', lastDescriptionUrl: 'https://POD.example:443/jos\u00e9/e' }));
+      tx.oncomplete = () => resolve();
+    });
+    prior.close();
+    const journal = await open(factory);
+    open1.push(journal);
+    expect(await journal.get(ACCOUNT, 'm_old')).toMatchObject({ descriptionUrl: 'https://pod.example/jos%C3%A9/d', lastDescriptionUrl: 'https://pod.example/jos%C3%A9/e' });
+    expect(await journal.isPairedElsewhere('https://pod.example/jos%C3%A9/d')).toBe(true);
   });
 
   it('tells whoever holds the journal when another window upgrades the database, and every call then fails closed', async () => {
