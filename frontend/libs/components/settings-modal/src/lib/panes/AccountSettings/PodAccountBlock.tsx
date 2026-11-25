@@ -68,6 +68,97 @@ const PodAccountBlockInner = ({ session }: { session: PodSession }) => {
   );
 };
 
+const hostOf = (webId: string): string => {
+  try {
+    return new URL(webId).origin;
+  } catch {
+    return webId;
+  }
+};
+
+const allowLabel = (state: Extract<PodSessionState, { kind: "needs-approval" }>): string =>
+  state.purpose === "sign-in" ? `Allow ${state.origin} as where I sign in` : `Allow ${state.origin}`;
+
+/** What the person allowed before the window restarted, in the words of what it was for. */
+const ApprovedText = ({ state }: { state: Extract<PodSessionState, { kind: "ready-to-sign-in" }> }) => {
+  if (!state.approved) {
+    return (
+      <>
+        You confirmed <span className="break-all font-medium">{state.issuer}</span>.
+      </>
+    );
+  }
+  const origin = <span className="break-all font-medium">{state.approved}</span>;
+  switch (state.purpose) {
+    case "sign-in":
+      return <>You allowed {origin} as the place you sign in.</>;
+    case "app-identity":
+      return <>You allowed {origin}, where ArtCraft publishes its own identity document.</>;
+    case "profile":
+      return <>You allowed {origin} to be read for your profile.</>;
+    default:
+      return <>You allowed {origin}.</>;
+  }
+};
+
+const WAIT_TEXT = {
+  "too-fast": "That answer came too quickly to count as yours, so nothing changed. Press Allow again.",
+  busy: "ArtCraft is not ready to ask again yet (a dialog is open, or it is waiting after a refusal). Wait a few seconds and press Allow again.",
+} as const;
+
+const NeedsApprovalText = ({ state }: { state: Extract<PodSessionState, { kind: "needs-approval" }> }) => {
+  const origin = <span className="break-all font-medium">{state.origin}</span>;
+  let body;
+  if (state.phase === "restore") {
+    body = (
+      <>
+        Reconnecting to your pod needs to read from {origin}, which this window is not allowed to contact yet. Your
+        saved sign-in is kept. If you allow it, ArtCraft asks you to confirm in a separate dialog and reloads this
+        window.
+      </>
+    );
+  } else if (state.purpose === "sign-in") {
+    body = (
+      <>
+        {state.webId ? (
+          <>
+            Your profile at <span className="break-all font-medium">{hostOf(state.webId)}</span> names {origin} as the
+            place you sign in.
+          </>
+        ) : (
+          <>Signing in needs {origin} as the place you sign in.</>
+        )}{" "}
+        This window is not allowed to contact it yet, and nothing was sent there. If you allow it, ArtCraft asks you to
+        confirm in a separate dialog and restarts this window; your browser then opens at {origin} and asks you to sign
+        in there, perhaps with your password. Only allow it if you recognise {origin} as your Solid provider.
+      </>
+    );
+  } else if (state.purpose === "app-identity") {
+    body = (
+      <>
+        Signing in needs to contact {origin}, where ArtCraft publishes its own identity document, which your provider
+        reads to recognise ArtCraft. It is not where your pod or profile lives, and allowing it is normal when you sign
+        in. Nothing was sent there yet. If you allow it, ArtCraft asks you to confirm in a separate dialog and restarts
+        this window.
+      </>
+    );
+  } else {
+    body = (
+      <>
+        Signing in needs to read your WebID profile from {origin}, which this window is not allowed to contact yet.
+        Nothing was sent there. If you allow it, ArtCraft asks you to confirm in a separate dialog and restarts this
+        window; you then continue the sign-in. Only allow this address if it is where your profile lives.
+      </>
+    );
+  }
+  return (
+    <>
+      {body}
+      {state.wait ? <span className="mt-1 block font-medium">{WAIT_TEXT[state.wait]}</span> : null}
+    </>
+  );
+};
+
 const StatusText = ({
   state,
   podWindow,
@@ -109,24 +200,27 @@ const StatusText = ({
               You entered the WebID <span className="break-all font-medium">{state.webId}</span>.{" "}
             </>
           ) : null}
-          {state.approved ? "You allowed" : "You confirmed"}{" "}
-          <span className="break-all font-medium">{state.issuer}</span>. Nothing has started yet; continue when
-          you are ready.
+          <ApprovedText state={state} /> Nothing has started yet; continue when you are ready. Before your browser
+          opens, ArtCraft shows you the address it will sign you in at.
         </>
       );
     case "needs-approval":
-      return state.phase === "sign-in" ? (
+      return <NeedsApprovalText state={state} />;
+    case "confirm-provider":
+      return (
         <>
-          Signing in needs to read from <span className="break-all font-medium">{state.origin}</span>, which this
-          window is not allowed to contact yet. Nothing was sent there. If you allow it, ArtCraft asks you to confirm
-          in a separate dialog and restarts this window; you then continue the sign-in. Only allow this address if it
-          is where your Solid provider or profile lives.
-        </>
-      ) : (
-        <>
-          Reconnecting to your pod needs to read from <span className="break-all font-medium">{state.origin}</span>,
-          which this window is not allowed to contact yet. Your saved sign-in is kept. If you allow it, ArtCraft asks
-          you to confirm in a separate dialog.
+          {state.webId ? (
+            <>
+              Your profile is at <span className="break-all font-medium">{hostOf(state.webId)}</span>. It says you sign
+              in at <span className="break-all font-semibold" data-testid="pod-provider">{state.provider}</span>.
+            </>
+          ) : (
+            <>
+              You will sign in at <span className="break-all font-semibold" data-testid="pod-provider">{state.provider}</span>.
+            </>
+          )}{" "}
+          Your browser opens there and asks you to sign in, perhaps with your password. Nothing has opened yet. Only
+          continue if you recognise that address as your Solid provider.
         </>
       );
     case "connecting":
@@ -137,11 +231,13 @@ const StatusText = ({
         </>
       );
     case "signing-in":
-      return (
+      return state.provider ? (
         <>
           Waiting for your browser to finish signing in at{" "}
-          <span className="break-all font-medium">{state.issuer}</span>.
+          <span className="break-all font-medium">{state.provider}</span>.
         </>
+      ) : (
+        <>Preparing your sign-in. Your browser has not opened yet.</>
       );
     case "leaving":
       return <>Disconnecting and removing your sign-in data from this computer.</>;
@@ -188,7 +284,18 @@ const PodControls = ({ session, state }: { session: PodSession; state: PodSessio
     case "needs-approval":
       return (
         <div className="flex gap-2">
-          <Button onClick={() => void session.approveOrigin()}>Allow {state.origin}</Button>
+          <Button onClick={() => void session.approveOrigin()}>{allowLabel(state)}</Button>
+          <LeaveButton session={session} />
+        </div>
+      );
+    case "confirm-provider":
+      return (
+        <div className="flex gap-2">
+          {/* No autofocus: a stray Enter must not open the browser. */}
+          <Button onClick={() => session.openBrowser()}>Sign in at {state.provider}</Button>
+          <Button variant="secondary" onClick={() => session.cancel()}>
+            Cancel sign-in
+          </Button>
           <LeaveButton session={session} />
         </div>
       );
@@ -227,7 +334,7 @@ const PodControls = ({ session, state }: { session: PodSession; state: PodSessio
 };
 
 /** Errors that left the stored session alone, so the restore can simply run again. */
-const RETRYABLE: ReadonlySet<PodSessionErrorKind> = new Set(["origin-declined", "restore-failed", "approval-too-fast"]);
+const RETRYABLE: ReadonlySet<PodSessionErrorKind> = new Set(["origin-declined", "restore-failed"]);
 
 const ErrorText = ({ error }: { error: PodSessionErrorKind }) => (
   <p id="pod-error" role="alert" className="text-sm text-red-300">

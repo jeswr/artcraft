@@ -54,6 +54,15 @@ function world(cfg: PodSessionConfig = config) {
   return { op, host, callbacks, opened };
 }
 
+/** The click that starts a sign-in, then the click that opens the browser at the provider. */
+async function signInThroughTheBrowserClick(session: ReturnType<typeof createPodSession>, provider?: string): Promise<void> {
+  const started = session.beginSignIn();
+  await vi.waitFor(() => expect(session.getState().kind).toBe('confirm-provider'));
+  if (provider) expect(session.getState()).toMatchObject({ provider });
+  session.openBrowser();
+  await started;
+}
+
 describe('sign-in through pod-auth and desktop-auth', () => {
   it('connects, gives a credentialed fetch, and never logs the callback', async () => {
     const { op, host, callbacks, opened } = world();
@@ -73,7 +82,13 @@ describe('sign-in through pod-auth and desktop-auth', () => {
     });
 
     await session.start();
-    await session.beginSignIn();
+    const started = session.beginSignIn();
+    await vi.waitFor(() => expect(session.getState().kind).toBe('confirm-provider'));
+    // Nothing has opened yet: the person sees the provider the address names, then clicks.
+    expect(opened).toEqual([]);
+    expect(session.getState()).toMatchObject({ provider: new URL(op.issuer).origin });
+    session.openBrowser();
+    await started;
 
     expect(session.getState()).toEqual({ kind: 'connected', webId: op.webId });
     const podFetch = session.getFetch();
@@ -113,7 +128,7 @@ describe('sign-in through pod-auth and desktop-auth', () => {
       selfTest: async () => ({ ok: true }),
     });
     await session.start();
-    await session.beginSignIn();
+    await signInThroughTheBrowserClick(session);
     expect(session.getState()).toEqual({ kind: 'error', error: 'sign-in-failed' });
     expect(session.getFetch()).toBeNull();
     expect(op.stats.tokens).toBe(0);
@@ -121,14 +136,14 @@ describe('sign-in through pod-auth and desktop-auth', () => {
 });
 
 describe('an origin the window has not approved, through real pod-auth', () => {
-  function gated(op: ReturnType<typeof createMockOp>, host: ReturnType<typeof world>['host'], hint: { kind: 'issuer'; issuer: string } | { kind: 'webid'; webId: string }, answer: 'requested' | 'declined') {
+  function gated(op: ReturnType<typeof createMockOp>, host: ReturnType<typeof world>['host'], hint: { kind: 'issuer'; issuer: string } | { kind: 'webid'; webId: string }, answer: 'requested' | 'declined', listed: string[] = []) {
     const requested: string[] = [];
     const origin = new URL(hint.kind === 'webid' ? hint.webId : hint.issuer).origin;
     const podMode = {
       ...fakePodMode({ podWindow: true, issuer: origin, fresh: origin }),
-      // Nothing is listed: every origin pod-auth reads from needs approval first.
+      // Only what the window lists is readable; every other origin needs approval first.
       admission: {
-        known: () => [] as string[],
+        known: () => listed,
         async request(origin: string) {
           requested.push(origin);
           return answer;
@@ -156,15 +171,17 @@ describe('an origin the window has not approved, through real pod-auth', () => {
       seen.push(new Request(input, init).url);
       return inner(input, init);
     });
-    const t = gated(op, host, { kind: 'webid', webId: op.webId }, 'requested');
+    // As the real port does: the window lists the origin it was entered for (here the profile's).
+    const t = gated(op, host, { kind: 'webid', webId: op.webId }, 'requested', [new URL(op.webId).origin]);
     await t.session.start();
     expect(t.session.getState().kind).toBe('ready-to-sign-in');
     await t.session.beginSignIn();
-    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: new URL(op.webId).origin, phase: 'sign-in' });
-    // The refusal came from the gate before any request left, and the browser was never opened.
-    expect(seen).toEqual([]);
+    // The profile is readable; the first address pod-auth then needs is not listed, so the page
+    // explains before anything is sent there and before any browser opens.
+    expect(t.session.getState()).toMatchObject({ kind: 'needs-approval', phase: 'sign-in', webId: op.webId });
+    expect(seen.every((url) => new URL(url).origin === new URL(op.webId).origin)).toBe(true);
     expect(opened).toEqual([]);
-    expect(t.pending.value).toEqual({ hint: { kind: 'webid', webId: op.webId }, origin: new URL(op.webId).origin });
+    expect(t.pending.value).toMatchObject({ hint: { kind: 'webid', webId: op.webId } });
     expect(t.requested).toEqual([]);
     expect(t.session.getFetch()).toBeNull();
   });
@@ -174,11 +191,95 @@ describe('an origin the window has not approved, through real pod-auth', () => {
     const t = gated(op, host, { kind: 'issuer', issuer: op.issuer }, 'declined');
     await t.session.start();
     await t.session.beginSignIn();
-    expect(t.session.getState().kind).toBe('needs-approval');
+    expect(t.session.getState()).toMatchObject({ kind: 'needs-approval', purpose: 'app-identity' });
     await t.session.approveOrigin();
     expect(t.requested).toEqual([new URL(config.clientId).origin]);
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'origin-declined' });
     expect(t.pending.value).toBeNull();
+  });
+});
+
+describe('approve, rebuild, resume, with a profile on another origin than the provider', () => {
+  it('runs the whole flow with real pod-auth and ends connected, showing the provider apart from the profile', async () => {
+    const { op, host, opened } = world();
+    const profileOrigin = new URL(op.webId).origin; // https://id.example
+    const providerOrigin = new URL(op.issuer).origin; // https://op.example
+    const clientOrigin = new URL(config.clientId).origin;
+    const pending = memoryPending();
+    const marker = memoryMarker();
+    const listed: string[] = [];
+    const approved: { origin: string; purpose: string }[] = [];
+    let fresh: string | null = null;
+
+    /** A window the app has just built: the record's issuer, the listed origins and the grant. */
+    const window = (podWindow: boolean) => {
+      const podMode = {
+        ...fakePodMode({ podWindow, issuer: podWindow ? profileOrigin : null, fresh }),
+        admission: {
+          known: () => (podWindow ? [...listed] : []),
+          async request(origin: string, purpose: string) {
+            approved.push({ origin, purpose });
+            // The app rebuilds the window while this is open: the page that asked never sees an answer.
+            return new Promise<never>(() => undefined);
+          },
+        },
+      };
+      const session = createPodSession({
+        config,
+        createAuth: (options) => createDefaultAuth(config, host, options),
+        wipeStores: async () => 'wiped',
+        podMode,
+        marker,
+        pending,
+        selfTest: async () => ({ ok: true }),
+      });
+      return session;
+    };
+
+    // The ordinary window: the person types their WebID. The app confirms the profile's origin.
+    const ordinary = window(false);
+    await ordinary.connect(op.webId);
+    expect(pending.value).toEqual({ hint: { kind: 'webid', webId: op.webId } });
+    listed.push(profileOrigin);
+    fresh = profileOrigin;
+
+    // Rebuilt windows, one per approval, until the browser is about to open.
+    let provider: string | null = null;
+    for (let round = 0; round < 6 && provider === null; round++) {
+      const session = window(true);
+      await session.start();
+      const ready = session.getState();
+      expect(ready).toMatchObject({ kind: 'ready-to-sign-in', issuer: profileOrigin, webId: op.webId });
+      const started = session.beginSignIn();
+      await vi.waitFor(() => expect(['needs-approval', 'confirm-provider']).toContain(session.getState().kind));
+      const next = session.getState();
+      if (next.kind === 'needs-approval') {
+        await started;
+        // Explained first, nothing was sent to that address and no browser opened.
+        expect(opened).toEqual([]);
+        const before = approved.length;
+        void session.approveOrigin();
+        await vi.waitFor(() => expect(approved).toHaveLength(before + 1));
+        const last = approved[approved.length - 1]!;
+        listed.push(last.origin);
+        fresh = last.origin;
+        continue;
+      }
+      expect(next).toEqual({ kind: 'confirm-provider', provider: providerOrigin, webId: op.webId });
+      expect(opened).toEqual([]);
+      provider = providerOrigin;
+      session.openBrowser();
+      await started;
+      expect(session.getState()).toEqual({ kind: 'connected', webId: op.webId });
+      listed.push(new URL(op.root).origin); // the pod's storage, approved the same way as the others
+      expect(await (await session.getFetch()!(`${op.root}private`)).text()).toBe('protected Solid');
+    }
+    expect(provider).toBe(providerOrigin);
+    // The provider was approved as the place to sign in; the identity document's host as ArtCraft's own.
+    expect(approved).toEqual(expect.arrayContaining([{ origin: providerOrigin, purpose: 'sign-in' }, { origin: clientOrigin, purpose: 'app-identity' }]));
+    expect(approved.every((a) => a.origin !== profileOrigin)).toBe(true);
+    expect(opened).toHaveLength(1);
+    expect(pending.value).toBeNull();
   });
 });
 
@@ -199,7 +300,7 @@ describe('the wipe against the databases pod-auth really creates', () => {
       selfTest: async () => ({ ok: true }),
     });
     await session.start();
-    await session.beginSignIn();
+    await signInThroughTheBrowserClick(session);
     expect(session.getState().kind).toBe('connected');
 
     // Not hand-built names: these exist because pod-auth created them.

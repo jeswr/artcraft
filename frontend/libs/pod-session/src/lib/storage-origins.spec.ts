@@ -396,3 +396,24 @@ describe('recognising the gate through pod-auth’s wrapping', () => {
     expect(new StorageOriginRefused('needs-approval', POD).message).not.toMatch(/https?:|example/);
   });
 });
+
+describe('the purpose and the build’s loopback flag', () => {
+  it('sends the purpose the caller names, `storage` by default', async () => {
+    const seen: [string, string][] = [];
+    const port: OriginAdmission = {
+      known: () => [ISSUER],
+      request: async (origin, purpose) => (seen.push([origin, purpose]), 'requested'),
+    };
+    const gate = createOriginGate(port);
+    await gate.allow(POD);
+    await gate.allow('https://id.example', undefined, { purpose: 'sign-in' });
+    expect(seen).toEqual([[POD, 'storage'], ['https://id.example', 'sign-in']]);
+  });
+
+  it('refuses localhost as invalid unless the build allows it, like the app does', async () => {
+    const a = admission('requested', [ISSUER]);
+    await expect(createOriginGate(a.port).allow('http://localhost:3000')).rejects.toMatchObject({ reason: 'invalid' });
+    await expect(createOriginGate(a.port, true).allow('http://localhost:3000')).resolves.toBeUndefined();
+    expect(a.requested).toEqual(['http://localhost:3000']);
+  });
+});

@@ -1,4 +1,4 @@
-import { parseOrigin } from './origins.js';
+import { buildAllowsLoopback, parseOrigin } from './origins.js';
 
 /**
  * Hosts the static CSP in crates/desktop/artcraft/tauri*.conf.json admits in connect-src,
@@ -63,13 +63,13 @@ export function buildPodModeCsp(
   });
   const extra: string[] = [];
   if (origins.issuer !== undefined) {
-    const i = parseOrigin(origins.issuer);
+    const i = parseOrigin(origins.issuer, buildAllowsLoopback());
     if (i === null) throw new Error('buildPodModeCsp: invalid issuer origin');
     extra.push(i);
   }
   const storage = origins.storage === undefined ? [] : typeof origins.storage === 'string' ? [origins.storage] : origins.storage;
   for (const origin of storage) {
-    const s = parseOrigin(origin);
+    const s = parseOrigin(origin, buildAllowsLoopback());
     if (s === null) throw new Error('buildPodModeCsp: invalid storage origin');
     extra.push(s);
   }

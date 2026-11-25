@@ -43,17 +43,25 @@ export type PodModeDeps = {
   dev?: boolean;
 };
 
-export type EnterResult = 'requested' | 'declined';
-
 /** `too-fast`: Allow was pressed sooner than a considered answer; nothing changed, ask again later. */
-export type AddOriginResult = EnterResult | 'too-fast';
+export type EnterResult = 'requested' | 'declined' | 'too-fast';
+
+export type AddOriginResult = EnterResult;
+
+/**
+ * Why the page says it wants an origin added. A closed set the app cannot check: it only changes
+ * what the app's dialog says. `sign-in`: the place the person will be asked to sign in, which
+ * their profile named. `profile`: where their WebID profile is read from. `storage`: where their
+ * pod's files are. `app-identity`: ArtCraft's own published identity document.
+ */
+export type OriginPurpose = 'profile' | 'storage' | 'sign-in' | 'app-identity';
 
 /** The shell's commands. None of them carries a credential. */
 export type PodModeRequests = {
   /** Asks to enter pod mode for `issuer`. The shell shows a native confirmation. */
   requestEnter(origins: { issuer: string }): Promise<EnterResult>;
   /** Asks to admit one more storage origin. The shell shows a native confirmation. */
-  requestAddStorageOrigin(origin: string): Promise<AddOriginResult>;
+  requestAddStorageOrigin(origin: string, purpose: OriginPurpose): Promise<AddOriginResult>;
   /** Leaves pod mode. The caller has already wiped the credentials. */
   requestLeave(): Promise<void>;
   /** Rebuilds the window, staying in the current mode. */

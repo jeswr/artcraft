@@ -1,4 +1,4 @@
-import { parseOrigin } from '@storyteller/pod-mode';
+import { type OriginPurpose, parseOrigin } from '@storyteller/pod-mode';
 import { parseSignInInput } from './issuer.js';
 
 /** What the person typed, as pod-auth's login hint. Public addresses only. */
@@ -9,7 +9,9 @@ export type SignInHint = { kind: 'issuer'; issuer: string } | { kind: 'webid'; w
  * person typed and, while waiting, the origin that was approved. Never a token, code, verifier
  * or callback URL. Cleared on success, decline, cancel and leave.
  */
-export type PendingSignIn = { hint: SignInHint; origin?: string };
+export type PendingSignIn = { hint: SignInHint; origin?: string; purpose?: OriginPurpose };
+
+const PURPOSES: readonly OriginPurpose[] = ['profile', 'storage', 'sign-in', 'app-identity'];
 
 export interface PendingStore {
   get(): PendingSignIn | null;
@@ -19,9 +21,9 @@ export interface PendingStore {
 const PENDING_KEY = 'artcraft.podSession.pending';
 
 /** The origin the app is asked to confirm for this hint. */
-export function originOfHint(hint: SignInHint): string | null {
+export function originOfHint(hint: SignInHint, allowLoopback = false): string | null {
   try {
-    return parseOrigin(new URL(hint.kind === 'issuer' ? hint.issuer : hint.webId).origin);
+    return parseOrigin(new URL(hint.kind === 'issuer' ? hint.issuer : hint.webId).origin, allowLoopback);
   } catch {
     return null;
   }
@@ -53,7 +55,7 @@ export function localStoragePending(storage?: Pick<Storage, 'getItem' | 'setItem
 /** A value from page storage is untrusted: re-validate it the way fresh input is. */
 function validate(value: unknown, allowLoopbackHttp: boolean): PendingSignIn | null {
   if (typeof value !== 'object' || value === null) return null;
-  const { hint, origin } = value as { hint?: unknown; origin?: unknown };
+  const { hint, origin, purpose } = value as { hint?: unknown; origin?: unknown; purpose?: unknown };
   if (typeof hint !== 'object' || hint === null) return null;
   const h = hint as Record<string, unknown>;
   let checked: SignInHint | null = null;
@@ -66,6 +68,8 @@ function validate(value: unknown, allowLoopbackHttp: boolean): PendingSignIn | n
   }
   if (checked === null) return null;
   if (origin === undefined) return { hint: checked };
-  const pendingOrigin = parseOrigin(origin);
-  return pendingOrigin === null ? null : { hint: checked, origin: pendingOrigin };
+  const pendingOrigin = parseOrigin(origin, allowLoopbackHttp);
+  if (pendingOrigin === null) return null;
+  const checkedPurpose = PURPOSES.find((p) => p === purpose);
+  return { hint: checked, origin: pendingOrigin, ...(checkedPurpose ? { purpose: checkedPurpose } : {}) };
 }

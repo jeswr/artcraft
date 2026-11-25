@@ -33,6 +33,7 @@ function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; c
     finishing: () => options.finishing ?? false,
     cancel: vi.fn(),
     approveOrigin: vi.fn(async () => undefined),
+    openBrowser: vi.fn(),
     retry: vi.fn(async () => undefined),
     leave: vi.fn(async () => undefined),
     getFetch: () => null,
@@ -432,37 +433,121 @@ it("accepts a WebID as well as a provider address, and passes what was typed", a
   expect(session.connect).toHaveBeenCalledWith(WEBID);
 });
 
-it("shows the typed WebID and the allowed address before a sign-in continues", async () => {
+it("shows the typed WebID, the address the window was entered for and the allowed one apart before a sign-in continues", async () => {
   const user = userEvent.setup();
   const { session } = renderBlock(
-    { kind: "ready-to-sign-in", issuer: "https://pod.example", webId: WEBID, approved: "https://pod.example" },
+    { kind: "ready-to-sign-in", issuer: "https://pod.example", webId: WEBID, approved: "https://login-example.net", purpose: "sign-in" },
     { podWindow: true },
   );
-  expect(document.body.textContent).toMatch(/You entered the WebID https:\/\/pod.example\/alice\/profile\/card#me/);
-  expect(document.body.textContent).toMatch(/You allowed https:\/\/pod.example\./);
+  const text = document.body.textContent ?? "";
+  expect(text).toMatch(/You entered the WebID https:\/\/pod.example\/alice\/profile\/card#me/);
+  // The allowed address, never the recorded one, is what "You allowed" names.
+  expect(text).toMatch(/You allowed https:\/\/login-example.net as the place you sign in\./);
+  expect(text).not.toMatch(/You allowed https:\/\/pod.example/);
+  expect(text).toMatch(/Before your browser opens, ArtCraft shows you the address/);
   expect(session.beginSignIn).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Continue sign-in" }));
   expect(session.beginSignIn).toHaveBeenCalledTimes(1);
 });
 
-it("explains an address that needs approval before a sign-in, names it on the button, and only asks on a click", async () => {
+it.each([
+  ["app-identity", /You allowed https:\/\/artcraft.example, where ArtCraft publishes its own identity document\./],
+  ["profile", /You allowed https:\/\/artcraft.example to be read for your profile\./],
+  ["storage", /You allowed https:\/\/artcraft.example\./],
+] as const)("says what an allowed address was for (%s)", (purpose, expected) => {
+  renderBlock({ kind: "ready-to-sign-in", issuer: "https://pod.example", approved: "https://artcraft.example", purpose }, { podWindow: true });
+  expect(document.body.textContent).toMatch(expected);
+});
+
+it("shows the profile and the provider it names apart, and opens the browser only on a click that names the provider", async () => {
   const user = userEvent.setup();
-  const { session } = renderBlock({ kind: "needs-approval", origin: "https://id.example", phase: "sign-in" }, { podWindow: true });
-  expect(document.body.textContent).toMatch(/Nothing was sent there/);
-  expect(document.body.textContent).toMatch(/Only allow this address if it is where your Solid provider or profile lives/);
+  const { session } = renderBlock(
+    { kind: "confirm-provider", provider: "https://login-example.net", webId: WEBID },
+    { podWindow: true },
+  );
+  expect(document.body.textContent).toMatch(/Your profile is at https:\/\/pod.example\. It says you sign in at https:\/\/login-example.net\./);
+  expect(screen.getByTestId("pod-provider").textContent).toBe("https://login-example.net");
+  expect(document.body.textContent).toMatch(/Nothing has opened yet/);
+  expect(session.openBrowser).not.toHaveBeenCalled();
+  const button = screen.getByRole("button", { name: "Sign in at https://login-example.net" });
+  expect(document.activeElement).not.toBe(button);
+  await user.click(button);
+  expect(session.openBrowser).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("button", { name: "Cancel sign-in" }));
+  expect(session.cancel).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "Leave pod mode" })).toBeTruthy();
+});
+
+it("names the provider alone when a provider address was typed", () => {
+  renderBlock({ kind: "confirm-provider", provider: "https://login.example" }, { podWindow: true });
+  expect(document.body.textContent).toMatch(/You will sign in at https:\/\/login.example\./);
+  expect(document.body.textContent).not.toMatch(/Your profile is at/);
+});
+
+it("never says it is signing in at an address before the browser is open", () => {
+  renderBlock({ kind: "signing-in", issuer: "https://pod.example" }, { podWindow: true });
+  expect(document.body.textContent).not.toMatch(/signing in at/);
+  expect(document.body.textContent).toMatch(/Preparing your sign-in\. Your browser has not opened yet\./);
+  cleanup();
+  renderBlock({ kind: "signing-in", issuer: "https://pod.example", provider: "https://login-example.net" }, { podWindow: true });
+  expect(document.body.textContent).toMatch(/signing in at https:\/\/login-example.net\./);
+  expect(document.body.textContent).not.toMatch(/signing in at https:\/\/pod.example/);
+});
+
+it("explains a provider the profile named, says where the person will be asked to sign in, and only asks on a click", async () => {
+  const user = userEvent.setup();
+  const { session } = renderBlock(
+    { kind: "needs-approval", origin: "https://login-example.net", phase: "sign-in", purpose: "sign-in", webId: WEBID },
+    { podWindow: true },
+  );
+  const text = document.body.textContent ?? "";
+  expect(text).toMatch(/Your profile at https:\/\/pod.example names https:\/\/login-example.net as the place you sign in\./);
+  expect(text).toMatch(/nothing was sent there/);
+  expect(text).toMatch(/asks you to sign in there, perhaps with your password/);
+  expect(text).toMatch(/recognise https:\/\/login-example.net as your Solid provider/);
   expect(session.approveOrigin).not.toHaveBeenCalled();
-  await user.click(screen.getByRole("button", { name: "Allow https://id.example" }));
+  await user.click(screen.getByRole("button", { name: "Allow https://login-example.net as where I sign in" }));
   expect(session.approveOrigin).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "Leave pod mode" })).toBeTruthy();
 });
 
-it("says the saved sign-in is kept when a reconnect needs an address", () => {
-  renderBlock({ kind: "needs-approval", origin: "https://pod.example", phase: "restore" }, { podWindow: true });
+it("says the identity document host is ArtCraft's own, so the person is not told to refuse it", () => {
+  renderBlock({ kind: "needs-approval", origin: "https://artcraft.example", phase: "sign-in", purpose: "app-identity" }, { podWindow: true });
+  const text = document.body.textContent ?? "";
+  expect(text).toMatch(/where ArtCraft publishes its own identity document/);
+  expect(text).toMatch(/allowing it is normal when you sign in/);
+  expect(text).not.toMatch(/Only allow this address/);
+  expect(screen.getByRole("button", { name: "Allow https://artcraft.example" })).toBeTruthy();
+});
+
+it("says a profile is read from an address, with a caution to allow only the profile's own address", () => {
+  renderBlock({ kind: "needs-approval", origin: "https://id.example", phase: "sign-in", purpose: "profile" }, { podWindow: true });
+  expect(document.body.textContent).toMatch(/read your WebID profile from https:\/\/id.example/);
+  expect(document.body.textContent).toMatch(/Only allow this address if it is where your profile lives/);
+});
+
+it("says the saved sign-in is kept and the window reloads when a reconnect needs an address", () => {
+  renderBlock({ kind: "needs-approval", origin: "https://pod.example", phase: "restore", purpose: "storage" }, { podWindow: true });
   expect(document.body.textContent).toMatch(/Your saved sign-in is kept/);
+  expect(document.body.textContent).toMatch(/reloads this window/);
   expect(screen.getByRole("button", { name: "Allow https://pod.example" })).toBeTruthy();
 });
 
-it.each(["origin-declined", "restore-failed", "approval-too-fast"] as const)("offers Try again next to Leave for %s in a pod window", async (error) => {
+it.each([
+  ["too-fast", /came too quickly to count as yours, so nothing changed\. Press Allow again/],
+  ["busy", /not ready to ask again yet.*Wait a few seconds and press Allow again/],
+] as const)("tells the person what to do after a %s answer, and Allow is still there", async (wait, expected) => {
+  const user = userEvent.setup();
+  const { session } = renderBlock(
+    { kind: "needs-approval", origin: "https://login-example.net", phase: "sign-in", purpose: "sign-in", webId: WEBID, wait },
+    { podWindow: true },
+  );
+  expect(document.body.textContent).toMatch(expected);
+  await user.click(screen.getByRole("button", { name: "Allow https://login-example.net as where I sign in" }));
+  expect(session.approveOrigin).toHaveBeenCalledTimes(1);
+});
+
+it.each(["origin-declined", "restore-failed"] as const)("offers Try again next to Leave for %s in a pod window", async (error) => {
   const user = userEvent.setup();
   const { session } = renderBlock({ kind: "error", error }, { podWindow: true });
   expect(screen.getByRole("alert").textContent).toBe(ERROR_TEXT[error]);
@@ -471,7 +556,7 @@ it.each(["origin-declined", "restore-failed", "approval-too-fast"] as const)("of
   expect(screen.getByRole("button", { name: "Leave pod mode" })).toBeTruthy();
 });
 
-it.each(["origin-limit", "invalid-response", "sign-in-failed"] as const)("offers only Leave for %s in a pod window", (error) => {
+it.each(["origin-limit", "invalid-response", "sign-in-failed", "approval-too-fast"] as const)("offers only Leave for %s in a pod window", (error) => {
   renderBlock({ kind: "error", error }, { podWindow: true });
   expect(screen.getByRole("alert").textContent).toBe(ERROR_TEXT[error]);
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();

@@ -60,7 +60,7 @@ export type FakePodMode = PodModePort & {
   /** The issuer of a connect approved in a dialog in this process. */
   fresh: string | null;
   /** What the shell's native dialog answers. */
-  answer: 'requested' | 'declined' | 'throws';
+  answer: 'requested' | 'declined' | 'too-fast' | 'throws';
   /** Make the shell's leave request fail. */
   leaveFails: boolean;
   consumeFails: boolean;
@@ -70,6 +70,7 @@ export type FakePodMode = PodModePort & {
   listed: string[];
   addAnswer: AddOriginResult | Error;
   requested: string[];
+  purposes: string[];
 };
 
 export function fakePodMode(
@@ -89,14 +90,16 @@ export function fakePodMode(
     listed: [],
     addAnswer: 'requested',
     requested: [],
+    purposes: [],
     ...initial,
     // Present only when a test asks for an origin gate: a plain window has none.
     ...(initial.listed || initial.addAnswer
       ? {
           admission: {
             known: () => mode.listed,
-            async request(origin: string) {
+            async request(origin: string, purpose: string) {
               mode.requested.push(origin);
+              mode.purposes.push(purpose);
               mode.log.push('add-origin');
               if (mode.addAnswer instanceof Error) throw mode.addAnswer;
               return mode.addAnswer;

@@ -1,7 +1,7 @@
 import { createDesktopCodeDriver, type DesktopHost } from '@jeswr/desktop-auth';
 import { createPodAuth } from '@jeswr/pod-auth';
 import type { PodSessionConfig } from './config.js';
-import type { PodAuthPort } from './pod-session.js';
+import type { AuthOptions, PodAuthPort } from './pod-session.js';
 
 /**
  * pod-auth for a desktop shell: the system browser opens the provider's page and the callback
@@ -15,8 +15,19 @@ import type { PodAuthPort } from './pod-session.js';
 export function createDefaultAuth(
   config: PodSessionConfig,
   host: DesktopHost,
-  options: { fetch?: typeof fetch } = {},
+  options: AuthOptions = {},
 ): PodAuthPort {
+  // The system browser opens only after the session has shown the person where it is going and
+  // they have clicked: the provider is whatever the profile names, so nothing earlier knows it.
+  const confirmed: DesktopHost = options.confirmOpen
+    ? {
+        ...host,
+        openUrl: async (url: string) => {
+          await options.confirmOpen?.(url);
+          return host.openUrl(url);
+        },
+      }
+    : host;
   return createPodAuth({
     ...(options.fetch ? { fetch: options.fetch } : {}),
     clientId: config.clientId,
@@ -24,7 +35,7 @@ export function createDefaultAuth(
     nativeRedirect: true,
     ui: {
       getWebId: () => Promise.reject(new Error('Signing in with a WebID is not offered')),
-      getCode: createDesktopCodeDriver({ host, redirectUri: config.redirectUri }),
+      getCode: createDesktopCodeDriver({ host: confirmed, redirectUri: config.redirectUri }),
     },
   });
 }

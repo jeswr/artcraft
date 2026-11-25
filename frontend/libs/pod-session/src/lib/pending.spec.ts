@@ -79,3 +79,31 @@ describe('localStoragePending', () => {
     expect(store.get()).toBeNull();
   });
 });
+
+describe('the purpose of an approval', () => {
+  const base = '{"hint":{"kind":"webid","webId":"https://pod.example/alice#me"},"origin":"https://id.example"';
+  it('keeps one of the four words and drops anything else', () => {
+    expect(localStoragePending(storage(`${base},"purpose":"sign-in"}`)).get()).toEqual({
+      hint: { kind: 'webid', webId: 'https://pod.example/alice#me' },
+      origin: 'https://id.example',
+      purpose: 'sign-in',
+    });
+    for (const purpose of ['"nope"', '7', 'null']) {
+      expect(localStoragePending(storage(`${base},"purpose":${purpose}}`)).get()).toEqual({
+        hint: { kind: 'webid', webId: 'https://pod.example/alice#me' },
+        origin: 'https://id.example',
+      });
+    }
+  });
+
+  it('refuses an origin the build would not allow, such as localhost in a release build', () => {
+    const raw = '{"hint":{"kind":"issuer","issuer":"https://login.example"},"origin":"https://localhost"}';
+    expect(localStoragePending(storage(raw)).get()).toBeNull();
+    expect(localStoragePending(storage(raw), true).get()).not.toBeNull();
+  });
+
+  it('reads the origin of a hint with the build’s loopback flag', () => {
+    expect(originOfHint({ kind: 'issuer', issuer: 'http://localhost:3000' })).toBeNull();
+    expect(originOfHint({ kind: 'issuer', issuer: 'http://localhost:3000' }, true)).toBe('http://localhost:3000');
+  });
+});

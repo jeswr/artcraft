@@ -122,7 +122,7 @@ function requests(over: Partial<PodModeRequests> = {}): PodModeRequests & { call
   return {
     calls,
     requestEnter: async (o) => (calls.push(`enter ${o.issuer}`), 'requested'),
-    requestAddStorageOrigin: async (o) => (calls.push(`add ${o}`), 'requested'),
+    requestAddStorageOrigin: async (o, purpose) => (calls.push(`add ${o} ${purpose}`), 'requested'),
     requestLeave: async () => void calls.push('leave'),
     requestReload: async () => void calls.push('reload'),
     requestCredentialsCleared: async () => void calls.push('cleared'),
@@ -149,10 +149,10 @@ describe('with the desktop shell', () => {
 
   it('adds a storage origin only through the shell, and only a valid one', async () => {
     const r = requests();
-    await addStorageOrigin('https://pod.example', { requests: r });
-    expect(r.calls).toEqual(['add https://pod.example']);
-    await expect(addStorageOrigin('https://pod.example/x', { requests: r })).rejects.toThrow();
-    await expect(addStorageOrigin('https://pod.example', {})).rejects.toThrow();
+    await addStorageOrigin('https://pod.example', 'sign-in', { requests: r });
+    expect(r.calls).toEqual(['add https://pod.example sign-in']);
+    await expect(addStorageOrigin('https://pod.example/x', 'storage', { requests: r })).rejects.toThrow();
+    await expect(addStorageOrigin('https://pod.example', 'storage', {})).rejects.toThrow();
   });
 
   it('wipes first, then asks the shell to leave and never touches storage', async () => {

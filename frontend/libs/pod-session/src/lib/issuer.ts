@@ -22,7 +22,7 @@ export function parseIssuerInput(input: unknown, allowLoopbackHttp = false): str
   if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') return null;
   if (url.pathname !== '/' || /[?#]/.test(text)) return null;
   if (text.replace(/\/$/, '').toLowerCase() !== url.origin) return null;
-  return parseOrigin(url.origin);
+  return parseOrigin(url.origin, allowLoopbackHttp);
 }
 
 /** What the person typed: a provider address, or the WebID that names their profile. */
@@ -52,6 +52,6 @@ export function parseSignInInput(input: unknown, allowLoopbackHttp = false): Sig
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
   if (url.username !== '' || url.password !== '' || url.search !== '' || /[?\s]/.test(text)) return null;
   if (url.pathname === '/' && url.hash === '') return null;
-  const origin = parseOrigin(url.origin);
+  const origin = parseOrigin(url.origin, allowLoopbackHttp);
   return origin === null ? null : { kind: 'webid', webId: url.href, origin };
 }

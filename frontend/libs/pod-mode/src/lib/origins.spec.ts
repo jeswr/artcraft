@@ -1,16 +1,41 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseOrigin, validatePodOrigins } from './origins.js';
+import { buildAllowsLoopback, parseOrigin, validatePodOrigins } from './origins.js';
 
 describe('parseOrigin', () => {
+  it.each(['https://id.example', 'https://id.example:8443'])('accepts %s', (o) => expect(parseOrigin(o)).toBe(o));
+
+  it.each(['http://localhost', 'http://localhost:3000', 'http://127.0.0.1:3000', 'https://localhost'])(
+    'accepts %s only where the build allows loopback, and by default does not',
+    (o) => {
+      expect(parseOrigin(o, true)).toBe(o);
+      expect(parseOrigin(o)).toBeNull();
+      expect(parseOrigin(o, false)).toBeNull();
+    },
+  );
+
   it.each([
-    'https://id.example',
-    'https://id.example:8443',
-    'http://localhost',
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-  ])('accepts %s', (o) => expect(parseOrigin(o)).toBe(o));
+    'https://foo.localhost',
+    'https://foo.local',
+    'https://router.lan',
+    'https://a.internal',
+    'https://x.home.arpa',
+    'https://a.onion',
+    'https://a.test',
+    'https://a.invalid',
+    'https://id.example:0',
+  ])('refuses %s even where loopback is allowed', (o) => {
+    expect(parseOrigin(o, true)).toBeNull();
+    expect(parseOrigin(o, false)).toBeNull();
+  });
+
+  it('knows whether the build allows loopback from the same two variables as the config', () => {
+    expect(buildAllowsLoopback({ VITE_SOLID_ALLOW_LOOPBACK: 'true', DEV: true })).toBe(true);
+    expect(buildAllowsLoopback({ VITE_SOLID_ALLOW_LOOPBACK: 'true', DEV: false })).toBe(false);
+    expect(buildAllowsLoopback({ DEV: true })).toBe(false);
+    expect(buildAllowsLoopback({})).toBe(false);
+  });
 
   it.each([
     '',

@@ -1,4 +1,4 @@
-import { type AddOriginResult, parseOrigin } from '@storyteller/pod-mode';
+import { type AddOriginResult, type OriginPurpose, parseOrigin } from '@storyteller/pod-mode';
 
 /**
  * The window's connect policy only lists the sign-in server and the storage origins the person
@@ -18,7 +18,7 @@ export type OriginAdmission = {
   /** Origins this window's policy already allows: the sign-in server and every approved storage origin. */
   known(): readonly string[];
   /** Asks the app to admit one more (validation and native dialog happen there). */
-  request(origin: string): Promise<AddOriginResult>;
+  request(origin: string, purpose: OriginPurpose): Promise<AddOriginResult>;
 };
 
 /**
@@ -70,9 +70,15 @@ export type AllowOptions = {
    * `needs-approval`, so the caller can explain before asking.
    */
   prompt?: boolean;
+  /** What the app's dialog says the address is for. Default `storage`: the pod's files. */
+  purpose?: OriginPurpose;
 };
 
-export function createOriginGate(admission: OriginAdmission): OriginGate {
+/**
+ * `allowLoopback` is the build's own flag (`config.allowLoopbackHttp`); a release build refuses
+ * `localhost` here exactly as the app does.
+ */
+export function createOriginGate(admission: OriginAdmission, allowLoopback = false): OriginGate {
   const admitted = new Set<string>();
   const declined = new Set<string>();
   const invalid = new Set<string>();
@@ -81,10 +87,10 @@ export function createOriginGate(admission: OriginAdmission): OriginGate {
   // The app shows one dialog at a time; asking in turn avoids `busy` between two of our own.
   let queue: Promise<unknown> = Promise.resolve();
 
-  const ask = async (origin: string): Promise<void> => {
+  const ask = async (origin: string, purpose: OriginPurpose): Promise<void> => {
     let answer: AddOriginResult;
     try {
-      answer = await admission.request(origin);
+      answer = await admission.request(origin, purpose);
     } catch (error) {
       throw refusalFor(error, origin);
     }
@@ -119,7 +125,7 @@ export function createOriginGate(admission: OriginAdmission): OriginGate {
 
   return {
     allow(value, signal, options) {
-      const origin = parseOrigin(value);
+      const origin = parseOrigin(value, allowLoopback);
       if (origin === null) return Promise.reject(new StorageOriginRefused('invalid'));
       if (admitted.has(origin) || admission.known().includes(origin)) return Promise.resolve();
       if (declined.has(origin)) return Promise.reject(new StorageOriginRefused('declined', origin));
@@ -128,7 +134,7 @@ export function createOriginGate(admission: OriginAdmission): OriginGate {
       if (options?.prompt === false) return Promise.reject(new StorageOriginRefused('needs-approval', origin));
       let request = pending.get(origin);
       if (!request) {
-        const turn = queue.then(() => ask(origin));
+        const turn = queue.then(() => ask(origin, options?.purpose ?? 'storage'));
         queue = turn.catch(() => undefined);
         request = turn.finally(() => pending.delete(origin));
         pending.set(origin, request);

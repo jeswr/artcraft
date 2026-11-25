@@ -9,24 +9,18 @@ type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unkno
  * before it changes the mode, and answers `declined` when they say no.
  */
 export function createTauriPodModeRequests(call: Invoke = invoke): PodModeRequests {
-  const outcome = async (command: string, args?: Record<string, unknown>) => {
+  // Only the two dialogs that ask for a consent can answer "too fast": Allow pressed sooner than a
+  // considered answer. Nothing changed; the page may ask again after the app's wait.
+  const outcome = async (command: string, args?: Record<string, unknown>, asks = false) => {
     const answer = await call(command, args);
     if (answer === "applied") return "requested" as const;
     if (answer === "declined") return "declined" as const;
-    throw new Error("unexpected answer from the app");
-  };
-  // Only the add-storage-origin dialog can answer "too fast": Allow pressed sooner than a
-  // considered answer. Nothing changed; the page may ask again after the app's wait.
-  const addOutcome = async (origin: string) => {
-    const answer = await call("pod_mode_add_storage_origin_command", { origin });
-    if (answer === "too_fast") return "too-fast" as const;
-    if (answer === "applied") return "requested" as const;
-    if (answer === "declined") return "declined" as const;
+    if (asks && answer === "too_fast") return "too-fast" as const;
     throw new Error("unexpected answer from the app");
   };
   return {
-    requestEnter: ({ issuer }) => outcome("pod_mode_enter_command", { issuer }),
-    requestAddStorageOrigin: addOutcome,
+    requestEnter: ({ issuer }) => outcome("pod_mode_enter_command", { issuer }, true),
+    requestAddStorageOrigin: (origin, purpose) => outcome("pod_mode_add_storage_origin_command", { origin, purpose }, true),
     requestLeave: async () => void (await outcome("pod_mode_leave_command")),
     requestReload: async () => void (await outcome("pod_mode_reload_command")),
     requestCredentialsCleared: async () => void (await outcome("pod_mode_credentials_cleared_command")),

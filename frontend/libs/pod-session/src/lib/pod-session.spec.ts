@@ -25,7 +25,7 @@ function setup(options: {
   flagged?: boolean;
   fresh?: string | null;
   consumeFails?: boolean;
-  answer?: 'requested' | 'declined' | 'throws';
+  answer?: 'requested' | 'declined' | 'too-fast' | 'throws';
   leaveFails?: boolean;
   auth?: ReturnType<typeof fakeAuth>;
   config?: PodSessionConfig;
@@ -828,12 +828,12 @@ describe('a WebID or a provider address', () => {
     await started;
   });
 
-  it('passes no fetch where there is no gate', async () => {
+  it('passes no fetch where there is no gate (only the hold on the browser)', async () => {
     const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
     await t.session.start();
     const started = t.session.beginSignIn();
     await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
-    expect(t.createAuth.mock.calls[0]?.[0]).toBeUndefined();
+    expect(t.createAuth.mock.calls[0]?.[0]?.fetch).toBeUndefined();
     t.auth.finish(WEBID);
     await started;
   });
@@ -875,8 +875,10 @@ describe('an origin that needs approval', () => {
 
   it('explains first during a sign-in, scrubs, and keeps only the hint and the origin', async () => {
     const t = await waiting();
-    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: 'https://id.example', phase: 'sign-in' });
-    expect(t.pending.value).toEqual({ hint: { kind: 'webid', webId: PROFILE }, origin: 'https://id.example' });
+    // The profile is on pod.example; the address pod-auth needs next is a different one, so the
+    // dialog is for a sign-in provider the profile named.
+    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: 'https://id.example', phase: 'sign-in', purpose: 'sign-in', webId: PROFILE });
+    expect(t.pending.value).toEqual({ hint: { kind: 'webid', webId: PROFILE }, origin: 'https://id.example', purpose: 'sign-in' });
     expect(t.podMode.requested).toEqual([]);
     expect(t.auth.calls).toContain('logout');
     expect(t.session.getFetch()).toBeNull();
@@ -886,42 +888,103 @@ describe('an origin that needs approval', () => {
     const t = await waiting();
     await t.session.approveOrigin();
     expect(t.podMode.requested).toEqual(['https://id.example']);
+    expect(t.podMode.purposes).toEqual(['sign-in']);
     // The app rebuilds the window; a surviving one stays in a closed failure rather than guessing.
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'request-failed' });
   });
 
-  it('the rebuilt window offers to continue, with the approved origin, and signs in again', async () => {
+  it('the rebuilt window shows the recorded origin and the allowed one apart, and signs in with what was typed', async () => {
     const t = setup({
       podWindow: true,
-      issuer: 'https://id.example',
-      fresh: 'https://id.example',
-      pending: { hint: { kind: 'webid', webId: 'https://id.example/alice#me' }, origin: 'https://id.example' },
+      issuer: OTHER, // the profile's own origin: what pod mode was entered for
+      fresh: 'https://id.example', // the provider the profile named, which the person then allowed
+      listed: [OTHER, 'https://id.example'],
+      pending: { hint: { kind: 'webid', webId: PROFILE }, origin: 'https://id.example', purpose: 'sign-in' },
     });
     await t.session.start();
-    expect(t.session.getState()).toEqual({ kind: 'ready-to-sign-in', issuer: 'https://id.example', webId: 'https://id.example/alice#me', approved: 'https://id.example' });
+    expect(t.session.getState()).toEqual({ kind: 'ready-to-sign-in', issuer: OTHER, webId: PROFILE, approved: 'https://id.example', purpose: 'sign-in' });
     const started = t.session.beginSignIn();
     await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
-    expect(t.auth.loginHints).toEqual([{ webId: 'https://id.example/alice#me' }]);
-    t.auth.finish('https://id.example/alice#me');
+    expect(t.auth.loginHints).toEqual([{ webId: PROFILE }]);
+    expect(t.session.getState()).toEqual({ kind: 'signing-in', issuer: OTHER });
+    t.auth.finish(PROFILE);
     await started;
     expect(t.session.getState().kind).toBe('connected');
   });
 
-  it.each([
-    ['declined', 'origin-declined'],
-    ['too-fast', 'approval-too-fast'],
-  ] as const)('a %s answer ends in %s', async (answer, error) => {
-    const t = await waiting({ addAnswer: answer });
+  it('a grant for an origin the window does not list, or that is not the pending one, starts nothing', async () => {
+    const unlisted = setup({
+      podWindow: true,
+      issuer: OTHER,
+      fresh: 'https://id.example',
+      listed: [OTHER],
+      pending: { hint: { kind: 'webid', webId: PROFILE }, origin: 'https://id.example', purpose: 'sign-in' },
+      auth: fakeAuth({ restored: WEBID }),
+    });
+    await unlisted.session.start();
+    expect(unlisted.session.getState().kind).toBe('connected');
+    expect(unlisted.pending.value).toBeNull();
+    const wrong = setup({
+      podWindow: true,
+      issuer: OTHER,
+      fresh: OTHER,
+      listed: [OTHER, 'https://id.example'],
+      pending: { hint: { kind: 'webid', webId: PROFILE }, origin: 'https://id.example', purpose: 'sign-in' },
+      auth: fakeAuth({ restored: WEBID }),
+    });
+    await wrong.session.start();
+    expect(wrong.session.getState().kind).toBe('connected');
+  });
+
+  it('signs in with the hint it showed, not what page storage says at the click', async () => {
+    const t = setup({ podWindow: true, issuer: OTHER, fresh: OTHER, listed: [OTHER], pending: { hint: { kind: 'webid', webId: PROFILE } } });
+    await t.session.start();
+    t.pending.value = { hint: { kind: 'issuer', issuer: 'https://login-example.net' } };
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    expect(t.auth.loginHints).toEqual([{ webId: PROFILE }]);
+    t.auth.finish(PROFILE);
+    await started;
+  });
+
+  it('a declined answer ends in origin-declined and forgets what was typed', async () => {
+    const t = await waiting({ addAnswer: 'declined' });
     await t.session.approveOrigin();
-    expect(t.session.getState()).toEqual({ kind: 'error', error });
-    expect(t.pending.value).toEqual(answer === 'declined' ? null : expect.anything());
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'origin-declined' });
+    expect(t.pending.value).toBeNull();
+  });
+
+  it.each([
+    ['too-fast', 'too-fast'],
+    ['busy', 'busy'],
+    ['cooling_down', 'busy'],
+  ] as const)('%s changes nothing: Allow is offered again with the same address and the hint is kept', async (word, wait) => {
+    const t = await waiting({ addAnswer: word === 'too-fast' ? 'too-fast' : new Error(word) });
+    const before = t.pending.value;
+    await t.session.approveOrigin();
+    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: 'https://id.example', phase: 'sign-in', purpose: 'sign-in', webId: PROFILE, wait });
+    expect(t.pending.value).toEqual(before);
+    // The next press goes through once the app is ready.
+    t.podMode.addAnswer = 'requested';
+    await t.session.approveOrigin();
+    expect(t.podMode.requested).toEqual(['https://id.example', 'https://id.example']);
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'request-failed' }); // the surviving window; a rebuilt one resumes
+  });
+
+  it('a restore that needs an origin can also be retried after a too-fast answer', async () => {
+    const auth = fakeAuth({ restoreError: refusal('needs-approval', OTHER) });
+    const t = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], addAnswer: 'too-fast', auth });
+    await t.session.start();
+    await t.session.approveOrigin();
+    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: OTHER, phase: 'restore', purpose: 'storage', wait: 'too-fast' });
+    expect(t.wipeStores).not.toHaveBeenCalled();
   });
 
   it.each([
     ['refused_origin', 'origin-declined'],
     ['too_many_prompts', 'origin-limit'],
     ['too_many_origins', 'origin-limit'],
-    ['busy', 'request-failed'],
+    ['unexpected_word', 'request-failed'],
   ] as const)('an app error %s ends in %s', async (word, error) => {
     const t = await waiting({ addAnswer: new Error(word) });
     await t.session.approveOrigin();
@@ -940,7 +1003,7 @@ describe('an origin that needs approval', () => {
   it('a restore that needs an origin keeps the stored session: no wipe, no logout, no revocation', async () => {
     const t = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], auth: fakeAuth({ restoreError: refusal('needs-approval', OTHER) }) });
     await t.session.start();
-    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: OTHER, phase: 'restore' });
+    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: OTHER, phase: 'restore', purpose: 'storage' });
     expect(t.wipeStores).not.toHaveBeenCalled();
     expect(t.auth.calls).not.toContain('logout');
     expect(t.pending.value).toBeNull();
@@ -1016,5 +1079,91 @@ describe('a response pod-auth cannot accept', () => {
     await t.session.start();
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'invalid-response' });
     expect(t.wipeStores).not.toHaveBeenCalled();
+  });
+});
+
+describe('the purpose the page names', () => {
+  async function refused(origin: string, hint: PendingSignIn['hint'], recorded = OTHER) {
+    const t = setup({ podWindow: true, issuer: recorded, fresh: recorded, listed: [recorded], pending: { hint } });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.fail(refusal('needs-approval', origin));
+    await started;
+    return t.session.getState();
+  }
+
+  it('is app-identity for the host of the Client Identifier Document, whatever was typed', async () => {
+    const host = new URL(CONFIG.clientId).origin;
+    expect(await refused(host, { kind: 'webid', webId: PROFILE })).toMatchObject({ purpose: 'app-identity' });
+    expect(await refused(host, { kind: 'issuer', issuer: ISSUER }, ISSUER)).toMatchObject({ purpose: 'app-identity' });
+  });
+
+  it('is sign-in for another address while a WebID is signed in with, profile for another address while a provider is', async () => {
+    expect(await refused('https://id.example', { kind: 'webid', webId: PROFILE })).toMatchObject({ purpose: 'sign-in' });
+    expect(await refused(OTHER, { kind: 'issuer', issuer: ISSUER }, ISSUER)).toMatchObject({ purpose: 'profile' });
+  });
+});
+
+describe('the click that opens the browser', () => {
+  async function atTheBrowser(url: string) {
+    const t = setup({ podWindow: true, issuer: OTHER, fresh: OTHER, listed: [OTHER], pending: { hint: { kind: 'webid', webId: PROFILE } } });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    const options = t.createAuth.mock.calls[0]![0]!;
+    let opened = false;
+    const gate = options.confirmOpen!(url).then(() => void (opened = true));
+    return { t, started, gate, opened: () => opened };
+  }
+
+  it('shows the provider the address is at, apart from the profile, and opens nothing until the click', async () => {
+    const { t, started, gate, opened } = await atTheBrowser('https://login-example.net/authorize?client_id=x&state=secret');
+    expect(t.session.getState()).toEqual({ kind: 'confirm-provider', provider: 'https://login-example.net', webId: PROFILE });
+    expect(JSON.stringify(t.session.getState())).not.toContain('secret');
+    await Promise.resolve();
+    expect(opened()).toBe(false);
+    t.session.openBrowser();
+    await gate;
+    expect(opened()).toBe(true);
+    expect(t.session.getState()).toEqual({ kind: 'signing-in', issuer: OTHER, provider: 'https://login-example.net' });
+    t.auth.finish(PROFILE);
+    await started;
+    expect(t.session.getState().kind).toBe('connected');
+  });
+
+  it('cancel before the click stops the sign-in without opening anything', async () => {
+    const { t, started, gate, opened } = await atTheBrowser('https://login.example/authorize');
+    t.session.cancel();
+    await expect(gate).rejects.toBeDefined();
+    t.auth.fail(new Error('aborted'));
+    await started;
+    expect(opened()).toBe(false);
+    expect(t.session.getState()).toEqual({ kind: 'disconnected' });
+    expect(t.pending.value).toBeNull();
+  });
+
+  it.each(['not a url', 'http://login.example/authorize', 'https://foo.local/x', 'https://login.example:0/x'])('refuses to open %j: no origin the app would allow', async (url) => {
+    const { t, started, gate } = await atTheBrowser(url);
+    await expect(gate).rejects.toBeDefined();
+    expect(t.session.getState().kind).not.toBe('confirm-provider');
+    t.auth.fail(new Error('refused'));
+    await started;
+  });
+
+  it('openBrowser does nothing outside confirm-provider', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    t.session.openBrowser();
+    expect(t.session.getState().kind).toBe('ready-to-sign-in');
+  });
+});
+
+describe('a typed address the app answers too fast', () => {
+  it('is a too-fast error, not a decline, and forgets what was typed', async () => {
+    const t = setup({ answer: 'too-fast' });
+    await t.session.connect(PROFILE);
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'approval-too-fast' });
+    expect(t.pending.value).toBeNull();
   });
 });

@@ -1,7 +1,8 @@
-import { type PodOrigins, parseOrigin, validatePodOrigins } from './origins.js';
+import { buildAllowsLoopback, type PodOrigins, parseOrigin, validatePodOrigins } from './origins.js';
 import {
   type AddOriginResult,
   type EnterResult,
+  type OriginPurpose,
   FLAG_ON,
   latchedHostPodMode,
   POD_MODE_FLAG_KEY,
@@ -30,10 +31,10 @@ export function readPodModeOrigins(deps: PodModeDeps = {}): PodModeOrigins | nul
   const host = latchedHostPodMode(deps);
   if (host !== null) {
     if (!host.enabled) return null;
-    const storageOrigins = host.storageOrigins.map((o) => parseOrigin(o));
+    const storageOrigins = host.storageOrigins.map((o) => parseOrigin(o, buildAllowsLoopback()));
     if (storageOrigins.some((o) => o === null)) return null;
     if (host.issuer === undefined) return { storageOrigins: storageOrigins as string[] };
-    const issuer = parseOrigin(host.issuer);
+    const issuer = parseOrigin(host.issuer, buildAllowsLoopback());
     return issuer === null ? null : { issuer, storageOrigins: storageOrigins as string[] };
   }
   const hint = readPodOrigins(deps);
@@ -82,11 +83,11 @@ export async function enterPodMode(origins: PodOrigins, deps: PodModeDeps = {}):
 }
 
 /** Ask to admit one more storage origin, after a native confirmation. Requires a shell. */
-export async function addStorageOrigin(origin: string, deps: PodModeDeps = {}): Promise<AddOriginResult> {
-  const valid = parseOrigin(origin);
+export async function addStorageOrigin(origin: string, purpose: OriginPurpose, deps: PodModeDeps = {}): Promise<AddOriginResult> {
+  const valid = parseOrigin(origin, buildAllowsLoopback());
   if (valid === null) throw new Error('addStorageOrigin: not an origin');
   if (!deps.requests) throw new Error('addStorageOrigin: needs the desktop shell');
-  return deps.requests.requestAddStorageOrigin(valid);
+  return deps.requests.requestAddStorageOrigin(valid, purpose);
 }
 
 /**
