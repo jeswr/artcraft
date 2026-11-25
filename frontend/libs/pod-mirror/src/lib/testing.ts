@@ -228,7 +228,8 @@ export function fakeStore(): FakeStore {
         sha256: 'ab'.repeat(32),
         existed: store.existed,
       };
-      store.missing.delete(outcome.descriptionUrl);
+      // A put that reports it adopted a copy written earlier writes nothing: it cannot bring back a deleted one.
+      if (!store.existed) store.missing.delete(outcome.descriptionUrl);
       return { ok: true, value: outcome };
     },
     async attachThumbnail(url, input) {

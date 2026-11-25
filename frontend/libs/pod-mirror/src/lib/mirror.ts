@@ -207,13 +207,32 @@ const CATCH_UP_PASSES = 3;
 /**
  * Pod copies are named by content hash, so one copy (one description URL) can be reached from
  * several journal records, and a delete and a copy of the same bytes can race. Everything that
- * decides about, removes, or records a copy at one URL runs one at a time per URL. The lock is
- * shared by every mirror in this process; other windows and devices cannot be seen from here.
+ * decides about, removes, or records a copy at one URL runs one at a time per URL: in this process
+ * through a queue, and, where the Web Locks API exists (`navigator.locks`), across every window of
+ * the app on this origin through a lock named by the URL. Without it, only this window is covered;
+ * other devices are never covered (see the README).
  */
 const copyLocks = new Map<string, Promise<void>>();
+const COPY_LOCK_PREFIX = 'artcraft-pod-copy:';
+
+interface LockManagerLike {
+  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
+}
+function webLocks(): LockManagerLike | undefined {
+  try {
+    const locks = (globalThis as { navigator?: { locks?: LockManagerLike } }).navigator?.locks;
+    return typeof locks?.request === 'function' ? locks : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function withCopyLock<T>(url: string, work: () => Promise<T>): Promise<T> {
   const previous = copyLocks.get(url) ?? Promise.resolve();
-  const run = previous.then(work);
+  const run = previous.then(() => {
+    const locks = webLocks();
+    return locks ? locks.request(COPY_LOCK_PREFIX + url, work) : work();
+  });
   const tail = run.then(() => undefined, () => undefined);
   copyLocks.set(url, tail);
   try {
@@ -1364,6 +1383,12 @@ export class PodMirror {
         try {
           settled = await withCopyLock(url, async () => {
             if ((removedAt.get(url) ?? 0) > clock) return false;
+            // A put that adopted a copy that was already there is the one a delete in another window
+            // can overtake (this window's clock does not see it): ask the pod before calling it saved.
+            if (put.value.existed) {
+              const there = await store.get(url, signal);
+              if (!there.ok) return false;
+            }
             await this.recordSaved(token, put.value, { kind, template, thumb }, store, signal);
             return true;
           });
