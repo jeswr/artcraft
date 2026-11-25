@@ -152,4 +152,11 @@ finds or creates the library and reports its exposure before the first `put`, an
 resurrects a concurrently deleted description). SHA-256 now
 `dddf848335bf654db3e5b57b7aa74f5d6cd01ac330213f8ae0c92ba766761b61`.
 
+`jeswr-pod-auth-0.1.0.tgz` was packed again from solid-sdk `feat/pod-auth-identity-hook` at `b58caad`
+(draft PR #677; adds `PodAuthOptions.fetch`, `InjectedFetchError` and `InvalidInjectedResponseError`: pod-auth's own
+body-less GET and HEAD reads go through an injected fetch). Its `package.json` is the old one apart from
+dependency key order, and it works with the vendored reactive-authentication 0.1.5. SHA-256 now
+`b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e`; the pod-auth hash in the list above
+(`349742b5...`) is the older one. Every other tarball is unchanged.
+
 These packages are experimental and security critical; they are unreleased and unaudited.
