@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PodSessionConfig } from './config.js';
 import { createPodSession, realPodModePort } from './pod-session.js';
-import { createOriginGate, gateFetch, MAX_ORIGIN_REQUESTS_PER_WINDOW, type OriginAdmission, StorageOriginRefused } from './storage-origins.js';
+import type { AddOriginResult } from '@storyteller/pod-mode';
+import { createOriginGate, gateFetch, type OriginAdmission, StorageOriginRefused } from './storage-origins.js';
 import { fakeAuth, fakePodMode, memoryMarker } from './testing.js';
 
 const ISSUER = 'https://login.example';
@@ -13,7 +14,7 @@ const CONFIG: PodSessionConfig = {
   allowLoopbackHttp: false,
 };
 
-function admission(answer: 'requested' | 'declined' | 'throws' = 'requested', known: string[] = [ISSUER]) {
+function admission(answer: AddOriginResult | 'throws' = 'requested', known: string[] = [ISSUER]) {
   const requested: string[] = [];
   const port: OriginAdmission = {
     known: () => known,
@@ -26,6 +27,16 @@ function admission(answer: 'requested' | 'declined' | 'throws' = 'requested', kn
   return { port, requested, known };
 }
 
+/** What the app's `invoke` rejects with: a fixed word. */
+function appError(word: string): OriginAdmission {
+  return {
+    known: () => [ISSUER],
+    request: async () => {
+      throw word;
+    },
+  };
+}
+
 describe('the origin gate', () => {
   it('lets the sign-in server and already approved origins through without asking', async () => {
     const a = admission('requested', [ISSUER, POD]);
@@ -35,60 +46,145 @@ describe('the origin gate', () => {
     expect(a.requested).toEqual([]);
   });
 
-  it('asks once for a new origin and remembers the approval', async () => {
-    const a = admission();
-    const gate = createOriginGate(a.port);
-    await gate.allow(POD);
-    await gate.allow(POD);
-    expect(a.requested).toEqual([POD]);
+  it('follows the real flow: the app approves and rebuilds the window, and the rebuilt window finds the origin listed', async () => {
+    // In the app an approval rebuilds the window, so the asking page is destroyed and its
+    // request never settles; the new window is built from the persisted record.
+    const first = admission('requested', [ISSUER]);
+    first.port.request = (origin) => {
+      first.requested.push(origin);
+      return new Promise(() => undefined);
+    };
+    const oldWindow = createOriginGate(first.port);
+    let settled = false;
+    void oldWindow.allow(POD).then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await Promise.resolve();
+    expect(first.requested).toEqual([POD]);
+    expect(settled).toBe(false);
+
+    const rebuilt = admission('requested', [ISSUER, POD]);
+    await createOriginGate(rebuilt.port).allow(POD);
+    expect(rebuilt.requested).toEqual([]);
   });
 
-  it('shares one request between concurrent callers', async () => {
-    const a = admission();
-    const gate = createOriginGate(a.port);
-    await Promise.all([gate.allow(POD), gate.allow(POD), gate.allow(POD)]);
-    expect(a.requested).toEqual([POD]);
+  it('shares one request between concurrent callers for one origin and asks for different origins in turn', async () => {
+    let open = 0;
+    let most = 0;
+    const requested: string[] = [];
+    const port: OriginAdmission = {
+      known: () => [ISSUER],
+      async request(origin) {
+        requested.push(origin);
+        most = Math.max(most, ++open);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        open--;
+        return 'requested';
+      },
+    };
+    const gate = createOriginGate(port);
+    await Promise.all([gate.allow(POD), gate.allow(POD), gate.allow('https://other.example'), gate.allow('https://third.example')]);
+    expect(requested).toEqual([POD, 'https://other.example', 'https://third.example']);
+    expect(most).toBe(1);
   });
 
-  it('only ever sends a bare origin, never a path, query or credentials', async () => {
+  it('only ever sends a bare origin, never a path, query or credentials, and says why it refused', async () => {
     const a = admission();
     const gate = createOriginGate(a.port);
-    for (const hostile of [`${POD}/a/b?token=x`, `https://u:p@evil.example`, 'https://*.example', 'http://pod.example', 'javascript:alert(1)', '', 'not a url']) {
-      await expect(gate.allow(hostile)).rejects.toBeInstanceOf(StorageOriginRefused);
+    for (const hostile of [`${POD}/a/b?token=x`, 'https://u:p@evil.example', 'https://*.example', 'http://pod.example', 'javascript:alert(1)', '', 'not a url', 'https://pod.example.']) {
+      await expect(gate.allow(hostile)).rejects.toMatchObject({ name: 'StorageOriginRefused', reason: 'invalid' });
     }
     expect(a.requested).toEqual([]);
   });
 
-  it('a refusal is remembered: no second dialog for another origin in the same window', async () => {
+  it('a decline is remembered for that origin only: another origin is still asked about', async () => {
     const a = admission('declined');
     const gate = createOriginGate(a.port);
-    await expect(gate.allow(POD)).rejects.toBeInstanceOf(StorageOriginRefused);
-    await expect(gate.allow('https://other.example')).rejects.toBeInstanceOf(StorageOriginRefused);
-    expect(a.requested).toEqual([POD]);
+    await expect(gate.allow(POD)).rejects.toMatchObject({ reason: 'declined' });
+    await expect(gate.allow(POD)).rejects.toMatchObject({ reason: 'declined' });
+    await expect(gate.allow('https://other.example')).rejects.toMatchObject({ reason: 'declined' });
+    expect(a.requested).toEqual([POD, 'https://other.example']);
   });
 
-  it('an error from the app (cap, cool-down, invalid) counts as a refusal and carries no detail', async () => {
-    const a = admission('throws');
-    const gate = createOriginGate(a.port);
-    const error = await gate.allow(POD).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(StorageOriginRefused);
-    expect(String((error as Error).message)).not.toContain('example');
-    await expect(gate.allow('https://other.example')).rejects.toBeInstanceOf(StorageOriginRefused);
-    expect(a.requested).toEqual([POD]);
+  it('an Allow that came too fast is not a refusal and is asked again', async () => {
+    const answers: AddOriginResult[] = ['too-fast', 'requested'];
+    const port: OriginAdmission = { known: () => [], request: async () => answers.shift() as AddOriginResult };
+    const gate = createOriginGate(port);
+    await expect(gate.allow(POD)).rejects.toMatchObject({ reason: 'too-fast' });
+    await gate.allow(POD);
   });
 
-  it('a hostile profile cannot open more than a few dialogs in one window', async () => {
+  it.each([
+    ['refused_origin', 'declined', true],
+    ['too_many_prompts', 'limit', true],
+    ['too_many_origins', 'limit', true],
+    ['invalid_origin', 'invalid', true],
+    ['busy', 'busy', false],
+    ['cooling_down', 'busy', false],
+    ['changed', 'unavailable', false],
+    ['persist_failed', 'unavailable', false],
+  ] as const)('the app answering %s is %s, remembered for later asks: %s', async (word, reason, remembered) => {
+    let calls = 0;
+    const port: OriginAdmission = {
+      known: () => [],
+      request: async () => {
+        calls++;
+        throw word;
+      },
+    };
+    const gate = createOriginGate(port);
+    await expect(gate.allow(POD)).rejects.toMatchObject({ reason });
+    await expect(gate.allow(POD)).rejects.toMatchObject({ reason });
+    expect(calls).toBe(remembered ? 1 : 2);
+  });
+
+  it('only a limit from the app stops every later unknown origin; no other app error poisons the gate', async () => {
+    const limited = createOriginGate(appError('too_many_prompts'));
+    await expect(limited.allow(POD)).rejects.toMatchObject({ reason: 'limit' });
+    await expect(limited.allow('https://other.example')).rejects.toMatchObject({ reason: 'limit' });
+
+    const answers: unknown[] = ['invalid_origin', 'busy', 'requested'];
+    const port: OriginAdmission = {
+      known: () => [],
+      request: async () => {
+        const next = answers.shift();
+        if (next === 'requested') return 'requested';
+        throw next;
+      },
+    };
+    const gate = createOriginGate(port);
+    await expect(gate.allow('https://a.example')).rejects.toMatchObject({ reason: 'invalid' });
+    await expect(gate.allow('https://b.example')).rejects.toMatchObject({ reason: 'busy' });
+    await gate.allow('https://c.example');
+  });
+
+  it('carries no origin in any refusal message', () => {
+    for (const reason of ['declined', 'limit', 'invalid', 'too-fast', 'busy', 'unavailable'] as const) {
+      expect(new StorageOriginRefused(reason).message).not.toMatch(/https?:|example/);
+    }
+  });
+
+  it('stops waiting when the caller aborts, and does not even ask when it already has', async () => {
     const a = admission();
+    a.port.request = (origin) => {
+      a.requested.push(origin);
+      return new Promise(() => undefined);
+    };
     const gate = createOriginGate(a.port);
-    for (let i = 0; i < MAX_ORIGIN_REQUESTS_PER_WINDOW; i++) await gate.allow(`https://pod${i}.example`);
-    await expect(gate.allow('https://one-more.example')).rejects.toBeInstanceOf(StorageOriginRefused);
-    expect(a.requested).toHaveLength(MAX_ORIGIN_REQUESTS_PER_WINDOW);
+    const controller = new AbortController();
+    const waiting = gate.allow(POD, controller.signal);
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+    const done = new AbortController();
+    done.abort();
+    await expect(createOriginGate(admission().port).allow(POD, done.signal)).rejects.toBeDefined();
   });
 });
 
 describe('gateFetch', () => {
   it('asks before the first request to a new origin, for strings, URLs and Requests, and never before', async () => {
-    const a = admission();
+    const a = admission('requested', [ISSUER]);
     const order: string[] = [];
     const inner = vi.fn(async () => {
       order.push('fetch');
@@ -113,6 +209,18 @@ describe('gateFetch', () => {
     const inner = vi.fn(async () => new Response('ok')) as unknown as typeof fetch;
     const fetchGated = gateFetch(inner, createOriginGate(a.port));
     await expect(fetchGated(`${POD}/alice/`)).rejects.toBeInstanceOf(StorageOriginRefused);
+    expect(inner).not.toHaveBeenCalled();
+  });
+
+  it('honours the caller’s AbortSignal while the dialog is open', async () => {
+    const a = admission();
+    a.port.request = () => new Promise(() => undefined);
+    const inner = vi.fn(async () => new Response('ok')) as unknown as typeof fetch;
+    const fetchGated = gateFetch(inner, createOriginGate(a.port));
+    const first = new AbortController();
+    const one = fetchGated(`${POD}/a`, { signal: first.signal });
+    first.abort();
+    await expect(one).rejects.toBeDefined();
     expect(inner).not.toHaveBeenCalled();
   });
 });
@@ -160,23 +268,51 @@ describe('the session fetch', () => {
 });
 
 describe('the app port', () => {
-  it('forwards only the origin to the shell’s add-storage-origin request and lists the window’s approved origins', async () => {
+  const requests = (calls: string[]) => ({
+    requestEnter: async () => 'requested' as const,
+    requestAddStorageOrigin: async (origin: string) => {
+      calls.push(origin);
+      return 'requested' as const;
+    },
+    requestLeave: async () => undefined,
+    requestReload: async () => undefined,
+    requestCredentialsCleared: async () => undefined,
+    requestConsumeFresh: async () => ISSUER,
+  });
+  const host = globalThis as Record<string, unknown>;
+
+  afterEach(() => {
+    delete host['__ARTCRAFT_POD_MODE__'];
+  });
+
+  it('forwards only the origin to the shell’s add-storage-origin request', async () => {
     const calls: string[] = [];
-    const requests = {
-      requestEnter: async () => 'requested' as const,
-      requestAddStorageOrigin: async (origin: string) => {
-        calls.push(origin);
-        return 'requested' as const;
-      },
-      requestLeave: async () => undefined,
-      requestReload: async () => undefined,
-      requestCredentialsCleared: async () => undefined,
-      requestConsumeFresh: async () => ISSUER,
-    };
-    const port = realPodModePort(requests);
-    await port.admission?.request(POD);
+    await realPodModePort(requests(calls)).admission?.request(POD);
     expect(calls).toEqual([POD]);
-    expect(port.admission?.known()).toEqual([]); // no shell record in this test window
     expect(realPodModePort().admission).toBeUndefined();
+  });
+
+  it('lists the issuer and every approved storage origin of the shell’s record, and nothing without one', () => {
+    const port = realPodModePort(requests([]));
+    expect(port.admission?.known()).toEqual([]);
+    host['__ARTCRAFT_POD_MODE__'] = {
+      enabled: true,
+      issuer: ISSUER,
+      storageOrigins: [POD, 'https://other.example'],
+      headerPolicy: true,
+      credentialsMayExist: true,
+    };
+    expect(port.admission?.known()).toEqual([ISSUER, POD, 'https://other.example']);
+    host['__ARTCRAFT_POD_MODE__'] = { enabled: false, storageOrigins: [], headerPolicy: true, credentialsMayExist: true };
+    expect(port.admission?.known()).toEqual([]);
+  });
+
+  it('so a window rebuilt after an approval asks the app nothing for that origin', async () => {
+    host['__ARTCRAFT_POD_MODE__'] = { enabled: true, issuer: ISSUER, storageOrigins: [POD], headerPolicy: true, credentialsMayExist: true };
+    const calls: string[] = [];
+    const gate = createOriginGate(realPodModePort(requests(calls)).admission as OriginAdmission);
+    await gate.allow(POD);
+    await gate.allow(ISSUER);
+    expect(calls).toEqual([]);
   });
 });

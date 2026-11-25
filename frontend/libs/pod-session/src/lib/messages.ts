@@ -24,7 +24,7 @@ export const ERROR_TEXT: Record<PodSessionErrorKind, string> = {
   'sign-in-failed': 'Sign-in did not finish. Check the address and try again.',
   'restore-failed': 'ArtCraft could not restore your previous sign-in. You can connect again or leave pod mode.',
   'wipe-failed':
-    'ArtCraft could not finish removing your sign-in data from this computer, so the window is still in pod mode. Try Leave pod mode again.',
+    'ArtCraft could not finish removing your sign-in data from this computer, so this window stays restricted. Try again; if it keeps failing, quit and reopen ArtCraft first.',
 };
 
 export type Notice = { level: 'success' | 'error'; message: string };
