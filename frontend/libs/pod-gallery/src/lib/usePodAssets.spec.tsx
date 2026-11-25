@@ -5,7 +5,7 @@ import type { PodGalleryAccess } from './context.js';
 import { PodLibraryOpenError } from './library.js';
 import { podAssetDescriptionUrl } from './ref.js';
 import { asset, fakeLibrary, fakeSource, page } from './testing.js';
-import { usePodAssets, type PodAssets } from './usePodAssets.js';
+import { RETRY_BACKOFF_MS, usePodAssets, type PodAssets } from './usePodAssets.js';
 
 afterEach(cleanup);
 
@@ -61,7 +61,7 @@ describe('listing the pod library', () => {
     act(() => view.current.loadMore());
     await waitFor(() => expect(view.current.state.status === 'ready' && view.current.state.loadMoreFailed).toBe(true));
     expect(view.current.state.status === 'ready' && view.current.state.items.length).toBe(1);
-    act(() => view.current.loadMore());
+    act(() => view.current.loadMore({ force: true }));
     await waitFor(() => expect(view.current.state.status === 'ready' && view.current.state.items.length).toBe(2));
   });
 
@@ -71,12 +71,67 @@ describe('listing the pod library', () => {
     expect(view.current.state.status === 'ready' && view.current.state.items).toEqual([]);
   });
 
-  it('skips pages with nothing showable in them', async () => {
-    const source = fakeSource([page([], 'c2', 3), page([], 'c3', 1), page([asset(1)], null)]);
+  it('lists the pod afresh on mount and on refresh, and says so to the library', async () => {
+    const library = Object.assign(fakeLibrary(fakeSource([page([asset(1)])])), { invalidateListing: vi.fn() });
+    const view = harness(accessFor(library));
+    await waitFor(() => expect(view.current.state.status).toBe('ready'));
+    expect(library.invalidateListing).toHaveBeenCalledTimes(1);
+    act(() => view.current.refresh());
+    await waitFor(() => expect(library.invalidateListing).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not retry a failed "load more" on every scroll event: it backs off, then doubles, and a click skips it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const source = fakeSource([page([asset(3)], 'c2'), { ok: false, error: 'offline' }, { ok: false, error: 'offline' }, page([asset(2)], 'c3'), page([asset(1)])]);
+      const view = harness(accessFor(fakeLibrary(source)));
+      await waitFor(() => expect(view.current.state.status).toBe('ready'));
+      const failed = () => view.current.state.status === 'ready' && view.current.state.loadMoreFailed;
+      act(() => view.current.loadMore());
+      await waitFor(() => expect(failed()).toBe(true));
+      expect(source.list).toHaveBeenCalledTimes(2);
+      // A burst of scroll events inside the back-off asks nothing.
+      for (let i = 0; i < 20; i++) act(() => view.current.loadMore());
+      expect(source.list).toHaveBeenCalledTimes(2);
+      vi.setSystemTime(Date.now() + RETRY_BACKOFF_MS + 1);
+      act(() => view.current.loadMore());
+      await waitFor(() => expect(source.list).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(failed()).toBe(true));
+      // The second failure doubles the wait.
+      vi.setSystemTime(Date.now() + RETRY_BACKOFF_MS + 1);
+      act(() => view.current.loadMore());
+      expect(source.list).toHaveBeenCalledTimes(3);
+      vi.setSystemTime(Date.now() + RETRY_BACKOFF_MS * 2);
+      act(() => view.current.loadMore());
+      await waitFor(() => expect(source.list).toHaveBeenCalledTimes(4));
+      await waitFor(() => expect(view.current.state.status === 'ready' && view.current.state.items.length).toBe(2));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a click on Retry skips the back-off', async () => {
+    const source = fakeSource([page([asset(2)], 'c2'), { ok: false, error: 'offline' }, page([asset(1)])]);
     const view = harness(accessFor(fakeLibrary(source)));
     await waitFor(() => expect(view.current.state.status).toBe('ready'));
-    expect(view.current.state.status === 'ready' && view.current.state.items.length).toBe(1);
-    expect(view.current.state.status === 'ready' && view.current.state.unreadable).toBe(4);
+    act(() => view.current.loadMore());
+    await waitFor(() => expect(view.current.state.status === 'ready' && view.current.state.loadMoreFailed).toBe(true));
+    act(() => view.current.loadMore({ force: true }));
+    await waitFor(() => expect(view.current.state.status === 'ready' && view.current.state.items.length).toBe(2));
+  });
+
+  it('asks the library for each page once: a page is one list call', async () => {
+    const source = fakeSource([page([asset(2)], 'c2'), page([asset(1)])]);
+    const view = harness(accessFor(fakeLibrary(source)));
+    await waitFor(() => expect(view.current.state.status).toBe('ready'));
+    act(() => view.current.loadMore());
+    await waitFor(() => expect(source.list).toHaveBeenCalledTimes(2));
+  });
+
+  it('reports a session that has ended as its own state', async () => {
+    const source = fakeSource([{ ok: false, error: 'sign-in' }]);
+    const view = harness(accessFor(fakeLibrary(source)));
+    await waitFor(() => expect(view.current.state).toEqual({ status: 'error', error: 'sign-in' }));
   });
 
   it('reports a failed first page as a closed error and refreshes on request', async () => {

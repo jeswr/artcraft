@@ -28,7 +28,7 @@ describe('the pod library controller', () => {
     expect(a).toBe(b);
     expect(build).toHaveBeenCalledTimes(1);
     expect(build.mock.calls[0]?.[0]).toBe(ALICE);
-    expect(world.built[0]?.loader.purge).not.toHaveBeenCalled();
+    expect(world.built[0]?.tileLoader.purge).not.toHaveBeenCalled();
   });
 
   it('purges the loader when the pod is disconnected', async () => {
@@ -36,7 +36,7 @@ describe('the pod library controller', () => {
     await controller.open();
     world.key = null;
     controller.sync();
-    expect(world.built[0]?.loader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.tileLoader.purge).toHaveBeenCalledTimes(1);
     expect(world.built[0]?.close).toHaveBeenCalledTimes(1);
     await expect(controller.open()).rejects.toMatchObject({ kind: 'not-connected' });
   });
@@ -46,7 +46,7 @@ describe('the pod library controller', () => {
     await controller.open();
     world.key = BOB;
     const next = await controller.open();
-    expect(world.built[0]?.loader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.tileLoader.purge).toHaveBeenCalledTimes(1);
     expect(next).toBe(world.built[1]);
     expect(build.mock.calls.map((call) => call[0])).toEqual([ALICE, BOB]);
   });
@@ -55,14 +55,14 @@ describe('the pod library controller', () => {
     const { controller, world } = setup();
     await controller.open();
     controller.sync();
-    expect(world.built[0]?.loader.purge).not.toHaveBeenCalled();
+    expect(world.built[0]?.tileLoader.purge).not.toHaveBeenCalled();
   });
 
   it('purges on dispose', async () => {
     const { controller, world } = setup();
     await controller.open();
     controller.dispose();
-    expect(world.built[0]?.loader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.tileLoader.purge).toHaveBeenCalledTimes(1);
   });
 
   it('aborts a build that is still running and purges what it produces late', async () => {
@@ -76,7 +76,7 @@ describe('the pod library controller', () => {
     expect((build.mock.calls[0]?.[1] as AbortSignal).aborted).toBe(true);
     open();
     expect(await settled).toBeInstanceOf(PodLibraryOpenError);
-    expect(world.built[0]?.loader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.tileLoader.purge).toHaveBeenCalledTimes(1);
   });
 
   it('does not remember a failed build, and says nothing about why', async () => {

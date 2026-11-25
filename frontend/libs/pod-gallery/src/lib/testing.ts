@@ -1,6 +1,7 @@
 import type { MediaLoader } from '@jeswr/pod-media-loader';
 import { vi } from 'vitest';
 import type { PodLibrary } from './library.js';
+import { mintPodMediaAddress } from './address.js';
 import { mintPodAssetRef } from './ref.js';
 import type { PodAsset, PodLibrarySource, PodListPage, PodSourceResult } from './types.js';
 
@@ -12,6 +13,9 @@ export function fakeLoader() {
     })),
     purge: vi.fn(),
     resume: vi.fn(),
+    subscribe: vi.fn(() => () => undefined),
+    invalidate: vi.fn(),
+    revalidate: vi.fn(),
     stats: vi.fn(() => ({ entries: 0, bytes: 0, inFlight: 0, purged: false })),
   };
   return loader as typeof loader & MediaLoader;
@@ -26,8 +30,8 @@ export function asset(n: number, over: Partial<PodAsset> = {}): PodAsset {
     prompt: null,
     createdAt: '2026-06-01T10:00:00.000Z',
     declaredType: 'image/png',
-    contentUrl: `https://pod.example/lib/2026/06/b${n}.png`,
-    thumbnailUrl: null,
+    content: mintPodMediaAddress(`https://pod.example/lib/2026/06/b${n}.png`),
+    thumbnail: null,
     ...over,
   };
 }
@@ -44,6 +48,6 @@ export function page(items: PodAsset[], next: string | null = null, unreadable =
   return { ok: true, value: { items, next, unreadable } };
 }
 
-export function fakeLibrary(source: PodLibrarySource = fakeSource([page([])])): PodLibrary & { loader: ReturnType<typeof fakeLoader>; close: ReturnType<typeof vi.fn> } {
-  return { source, loader: fakeLoader(), close: vi.fn() };
+export function fakeLibrary(source: PodLibrarySource = fakeSource([page([])])): PodLibrary & { tileLoader: ReturnType<typeof fakeLoader>; viewerLoader: ReturnType<typeof fakeLoader>; close: ReturnType<typeof vi.fn> } {
+  return { source, tileLoader: fakeLoader(), viewerLoader: fakeLoader(), close: vi.fn() };
 }

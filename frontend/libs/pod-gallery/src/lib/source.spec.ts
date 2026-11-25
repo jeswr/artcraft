@@ -1,6 +1,7 @@
 import type { MediaItem, Result } from '@jeswr/pod-media-store';
 import type { AssetDescription } from '@jeswr/solid-creative-assets';
 import { describe, expect, it, vi } from 'vitest';
+import { unwrapPodMediaAddress } from './address.js';
 import { podAssetDescriptionUrl } from './ref.js';
 import { createPodLibrarySource, MAX_NAME_LENGTH, MAX_TEXT_LENGTH, PAGE_SIZE, type ReadOnlyAssetStore } from './source.js';
 
@@ -45,9 +46,9 @@ describe('the pod library source', () => {
     const result = await createPodLibrarySource(store).list({});
     if (!result.ok) throw new Error('expected a page');
     const [first, second] = result.value.items;
-    expect(first?.contentUrl).toBe(`${LIB}2026/06/returned-by-store.png`);
-    expect(first?.thumbnailUrl).toBe(`${LIB}2026/06/b1-thumb.png`);
-    expect(second?.thumbnailUrl).toBeNull();
+    expect(unwrapPodMediaAddress(first!.content)).toBe(`${LIB}2026/06/returned-by-store.png`);
+    expect(unwrapPodMediaAddress(first!.thumbnail!)).toBe(`${LIB}2026/06/b1-thumb.png`);
+    expect(second?.thumbnail).toBeNull();
     expect(podAssetDescriptionUrl(first!.ref)).toBe(`${LIB}2026/06/d1`);
   });
 
@@ -73,6 +74,12 @@ describe('the pod library source', () => {
     expect(one?.prompt).toBe('a fox');
     expect(two?.name).toBeNull();
     expect(two?.description).toBeNull();
+  });
+
+  it('strips bidirectional controls from pod text', async () => {
+    const source = createPodLibrarySource(storeWith({ ok: true, value: { items: [item(1, { asset: { contentUrl: 'u', name: 'abc\u202Edef\u2066ghi\u200F' } } as never)], next: null, skipped } }));
+    const result = await source.list({});
+    expect(result.ok && result.value.items[0]?.name).toBe('abcdefghi');
   });
 
   it('dates an item by its creation time, then by the description document, otherwise not at all', async () => {

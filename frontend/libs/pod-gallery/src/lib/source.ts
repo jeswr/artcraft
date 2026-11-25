@@ -1,5 +1,6 @@
 import type { ListPage, MediaItem, MediaStoreErrorKind, Result } from '@jeswr/pod-media-store';
 import type { AssetDescription } from '@jeswr/solid-creative-assets';
+import { mintPodMediaAddress } from './address.js';
 import { mintPodAssetRef, podAssetDescriptionUrl } from './ref.js';
 import type { PodAsset, PodLibrarySource, PodSourceErrorKind, PodSourceResult } from './types.js';
 
@@ -22,7 +23,7 @@ export interface ReadOnlyAssetStore {
 /**
  * Turns an opened store into the gallery's source. Nothing is read from the pod here beyond what
  * the store parsed (the SDK's asset model builds the values; no RDF is touched), and no URL is
- * made up: the content and thumbnail URLs are the ones the store returns.
+ * made up: the content and thumbnail addresses are the ones the store returns.
  */
 export function createPodLibrarySource(store: ReadOnlyAssetStore): PodLibrarySource {
   return {
@@ -62,14 +63,17 @@ export function toPodAsset(item: MediaItem<AssetDescription>): PodAsset {
     prompt: clip(value.generation?.prompt, MAX_TEXT_LENGTH),
     createdAt: created && !Number.isNaN(created.getTime()) ? created.toISOString() : null,
     declaredType: clip(asset.encodingFormat, 100),
-    contentUrl: item.binaryUrl,
-    thumbnailUrl: item.thumbnailUrl ?? null,
+    content: mintPodMediaAddress(item.binaryUrl),
+    thumbnail: item.thumbnailUrl ? mintPodMediaAddress(item.thumbnailUrl) : null,
   };
 }
 
+/** Bidirectional controls can reorder the text around them; pod text is shown in reading order. */
+const BIDI_CONTROLS = /[؜‎‏‪-‮⁦-⁩]/g;
+
 function clip(text: string | undefined, max: number): string | null {
   if (typeof text !== 'string') return null;
-  const trimmed = text.trim();
+  const trimmed = text.replace(BIDI_CONTROLS, '').trim();
   return trimmed === '' ? null : trimmed.slice(0, max);
 }
 
@@ -81,4 +85,3 @@ function errorKindOf(kind: MediaStoreErrorKind): PodSourceErrorKind {
   if (kind === 'offline' || kind === 'forbidden' || kind === 'not-found') return kind;
   return 'failed';
 }
-

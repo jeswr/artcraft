@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { usePodGalleryAccess } from './context.js';
 
 export type GallerySource = 'hosted' | 'pod';
@@ -11,11 +12,24 @@ export const SOURCE_LABELS: Record<GallerySource, string> = {
  * The gallery's source switch. It renders nothing unless a pod is connected, so a window without
  * one has no trace of it.
  */
-export function PodSourceSwitch({ source, onChange }: { source: GallerySource; onChange: (next: GallerySource) => void }) {
+export function PodSourceSwitch({
+  source,
+  onChange,
+  focusOnMount = false,
+}: {
+  source: GallerySource;
+  onChange: (next: GallerySource) => void;
+  /** The switch was just re-created by choosing a source: put focus back on the chosen button. */
+  focusOnMount?: boolean;
+}) {
   const access = usePodGalleryAccess();
+  const group = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focusOnMount) group.current?.querySelector<HTMLButtonElement>('button[aria-pressed="true"]')?.focus();
+  }, [focusOnMount]);
   if (!access) return null;
   return (
-    <div role="group" aria-label="Library source" className="relative z-[51] flex items-center gap-0.5 rounded-[3px] bg-ui-controls/40 p-0.5">
+    <div ref={group} role="group" aria-label="Library source" className="relative z-[51] flex items-center gap-0.5 rounded-[3px] bg-ui-controls/40 p-0.5">
       {(['hosted', 'pod'] as const).map((value) => (
         <button
           key={value}
