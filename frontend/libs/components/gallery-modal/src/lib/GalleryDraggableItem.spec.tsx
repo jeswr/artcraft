@@ -9,7 +9,7 @@ afterEach(cleanup);
 
 const item: GalleryItem = { id: 'm_1', label: 'Fox', thumbnail: 'https://cdn.example/t.png', createdAt: '2026-06-01T00:00:00Z', mediaClass: 'image' };
 
-const SUMMARY = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false } as const;
+const SUMMARY = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false, import: { state: "idle", pausedBy: null, walked: 0, total: null, saved: 0, skipped: 0, failed: 0, pending: 0, startedAt: null, finishedAt: null } } as const;
 
 function renderTile(state: ItemState | undefined, tile: GalleryItem = item) {
   const retry = vi.fn(async () => undefined);

@@ -1,6 +1,16 @@
 import type { ItemState, MirrorSummary } from '@storyteller/pod-mirror';
 import { createContext, type ReactNode, useContext, useSyncExternalStore } from 'react';
 
+/** Controls for "copy my existing library to my pod". */
+export interface PodImportControls {
+  /** How many items the hosted library holds, when that is cheaply known. */
+  estimate(): Promise<{ total: number | null }>;
+  start(total: number | null): Promise<boolean>;
+  pause(): Promise<void>;
+  resume(): Promise<boolean>;
+  cancel(): Promise<void>;
+}
+
 /** What the gallery and settings need from a mirror. `PodMirror` satisfies it. */
 export interface PodMirrorView {
   stateOf(token: string): ItemState | undefined;
@@ -15,6 +25,8 @@ export interface PodMirrorView {
   recheckExposure(): void;
   /** The person says the container is private, for a pod that cannot say; resolves false if nothing was waiting. */
   confirmPrivate(): Promise<boolean>;
+  /** Present when the mirror can copy the existing library. */
+  import?: PodImportControls;
   /** True when copying cannot run here (the local record could not be opened). */
   unavailable?: boolean;
   /** Purges this account's journal after the person confirms. */

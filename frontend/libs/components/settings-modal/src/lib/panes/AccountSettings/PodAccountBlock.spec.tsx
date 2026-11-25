@@ -226,6 +226,13 @@ function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorVi
     confirmPrivate: vi.fn(async () => true),
     forgetAccount: vi.fn(async () => undefined),
     removeGoneFromPod: vi.fn(async () => 2),
+    import: {
+      estimate: vi.fn(async () => ({ total: 120 })),
+      start: vi.fn(async () => true),
+      pause: vi.fn(async () => undefined),
+      resume: vi.fn(async () => true),
+      cancel: vi.fn(async () => undefined),
+    },
     ...overrides,
   };
   const fake = fakeSession({ kind: "connected", webId: WEBID });
@@ -239,7 +246,7 @@ function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorVi
   return view;
 }
 
-const SUMMARY: MirrorSummary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 4, pending: 2, failed: 1, skipped: 3, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false };
+const SUMMARY: MirrorSummary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 4, pending: 2, failed: 1, skipped: 3, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false, import: { state: "idle", pausedBy: null, walked: 0, total: null, saved: 0, skipped: 0, failed: 0, pending: 0, startedAt: null, finishedAt: null } };
 const POD_LIBRARY = "https://pod.example/alice/creative-assets/";
 
 it("shows how the copy is going, in words", () => {
@@ -250,7 +257,7 @@ it("shows how the copy is going, in words", () => {
 
 it("announces what needs attention, not the counts", () => {
   renderWithMirror(SUMMARY);
-  const live = within(screen.getByTestId("pod-mirror-status")).getByRole("status");
+  const live = within(screen.getByTestId("pod-mirror-status")).getAllByRole("status")[0];
   expect(live.textContent).toMatch(/1 item was not saved or removed/);
   expect(live.textContent).not.toMatch(/Saved to pod/);
 });
@@ -305,6 +312,70 @@ it("forgets the account only after a confirmation, and cancel does nothing", asy
   await user.click(within(screen.getByRole("group", { name: "Confirm forgetting this account" })).getByRole("button", { name: "Forget this account" }));
   expect(forget).toHaveBeenCalledTimes(1);
 });
+
+const RUNNING = { ...SUMMARY.import, state: "running" as const, walked: 30, total: 120, saved: 20, pending: 8, failed: 1, skipped: 1 };
+
+it("says what copying the existing library will do before it starts, and starts only on a second click", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror(SUMMARY);
+  await user.click(screen.getByRole("button", { name: "Copy my existing library" }));
+  const disclosure = await screen.findByTestId("pod-import-disclosure");
+  expect(disclosure.textContent).toMatch(/120 items in your ArtCraft library/);
+  expect(disclosure.textContent).toMatch(/long time/);
+  expect(disclosure.textContent).toMatch(/storage on your pod/);
+  expect(disclosure.textContent).toMatch(/pause or cancel/);
+  expect(disclosure.textContent).toMatch(/every item stays in ArtCraft/);
+  expect(view.import?.start).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Start copying" }));
+  expect(view.import?.start).toHaveBeenCalledWith(120);
+});
+
+it("names the whole library when the number is not known, and Not now starts nothing", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror(SUMMARY, { import: { ...renderlessControls(), estimate: async () => ({ total: null }) } });
+  await user.click(screen.getByRole("button", { name: "Copy my existing library" }));
+  expect((await screen.findByTestId("pod-import-disclosure")).textContent).toMatch(/all items in your ArtCraft library/);
+  await user.click(screen.getByRole("button", { name: "Not now" }));
+  expect(view.import?.start).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("pod-import-disclosure")).toBeNull();
+});
+
+it("shows a determinate bar with an accessible name while copying, and pauses or cancels from separate buttons", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror({ ...SUMMARY, import: RUNNING });
+  const bar = screen.getByRole("progressbar", { name: "Items looked at in your existing library" });
+  expect(bar.getAttribute("max")).toBe("120");
+  expect(bar.getAttribute("value")).toBe("30");
+  expect(screen.getByTestId("pod-import-counts").textContent).toMatch(/Looked at 30 of 120\. Saved: 20\. Waiting: 8\. Not saved: 1\. Not copied: 1\./);
+  await user.click(screen.getByRole("button", { name: "Pause copying" }));
+  expect(view.import?.pause).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("button", { name: "Cancel copying" }));
+  expect(view.import?.cancel).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the counts out of the live region and shows no bar value when the total is unknown", () => {
+  renderWithMirror({ ...SUMMARY, import: { ...RUNNING, total: null } });
+  expect(screen.getByRole("progressbar", { name: "Items looked at in your existing library" }).hasAttribute("value")).toBe(false);
+  expect(screen.getByTestId("pod-import-state").textContent).not.toMatch(/\d/);
+});
+
+it("explains a pause for lack of pod space and offers resume", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror({ ...SUMMARY, import: { ...RUNNING, state: "paused", pausedBy: "quota" } });
+  expect(screen.getByTestId("pod-import-state").textContent).toMatch(/storage is full/);
+  await user.click(screen.getByRole("button", { name: "Resume copying" }));
+  expect(view.import?.resume).toHaveBeenCalledTimes(1);
+});
+
+it("offers to copy again after a finished or cancelled run, and renders nothing about it without a controller", () => {
+  renderWithMirror({ ...SUMMARY, import: { ...RUNNING, state: "done" } });
+  expect(screen.getByRole("button", { name: "Copy my existing library again" })).toBeTruthy();
+});
+
+function renderlessControls() {
+  return { estimate: vi.fn(), start: vi.fn(async () => true), pause: vi.fn(), resume: vi.fn(), cancel: vi.fn() };
+}
+
 it("says items gone from ArtCraft are still in the pod, and removes them only after a confirmed choice", async () => {
   const user = userEvent.setup();
   const view = renderWithMirror({ ...SUMMARY, goneFromArtcraft: 2 });
@@ -340,4 +411,14 @@ it("explains a pod root that is readable by others or cannot be checked, offers 
   expect(screen.queryByTestId("pod-mirror-unverified")).toBeNull();
   await user.click(screen.getByRole("button", { name: "Check again" }));
   expect(view.recheckExposure).toHaveBeenCalledTimes(1);
+});
+
+it("moves focus into the import confirmation and back to the status line when it closes", async () => {
+  const user = userEvent.setup();
+  renderWithMirror(SUMMARY);
+  await user.click(screen.getByRole("button", { name: "Copy my existing library" }));
+  await screen.findByTestId("pod-import-disclosure");
+  expect(document.activeElement).toBe(screen.getByRole("alertdialog"));
+  await user.click(screen.getByRole("button", { name: "Not now" }));
+  expect(document.activeElement).toBe(screen.getByTestId("pod-import-state"));
 });

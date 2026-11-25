@@ -12,6 +12,7 @@ import { describePause, usePodMirrorSummary, usePodMirrorView } from "@storytell
 import { Button } from "@storyteller/ui-button";
 import { Input } from "@storyteller/ui-input";
 import { PodGoneBlock } from "./PodGoneBlock";
+import { PodImportBlock } from "./PodImportBlock";
 
 /**
  * What connecting does in this build. Connecting copies new work to the pod; it does not move
@@ -334,6 +335,7 @@ const PodMirrorStatus = () => {
         </p>
       )}
       {summary.goneFromArtcraft > 0 && <PodGoneBlock count={summary.goneFromArtcraft} remove={() => view.removeGoneFromPod()} />}
+      {view.import && <PodImportBlock controls={view.import} status={summary.import} engineStatus={summary.paused} />}
       {confirming ? (
         <div className="flex flex-col gap-2" role="group" aria-label="Confirm forgetting this account">
           <p className="text-xs text-base-fg/70">
