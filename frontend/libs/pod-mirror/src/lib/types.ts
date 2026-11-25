@@ -166,6 +166,8 @@ export interface MirrorSummary extends MirrorStatus {
    * The pod check found more of the library missing than it believes on its own (more than
    * max(5, 10%) of the items asked): nothing was requeued. `copyAgain()` is the person's go-ahead.
    */
+  /** The local record could not be written: nothing is deleted from the pod until it can, and an item is not called saved. */
+  journalUnavailable?: boolean;
   libraryMissing?: { missing: number; checked: number } | null;
   /** Every download from ArtCraft's media host has failed since this install began, while the pod works. */
   mediaHostBlocked: boolean;

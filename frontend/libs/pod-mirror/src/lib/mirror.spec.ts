@@ -2233,6 +2233,102 @@ describe('the pod check believes a 404 only with a second opinion and under a ce
   });
 });
 
+describe('a journal that cannot be written', () => {
+  const URL_ = 'https://pod.example/alice/creative-assets/2026/06/shared';
+
+  it('does not leave an item saved in memory only: it stays not saved, says so, and is saved once the journal works', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.fixedUrl = URL_;
+    await t.mirror.start();
+    const real = t.journal.update.bind(t.journal);
+    let failing = true;
+    t.journal.update = async (account, tok, patch, now) => {
+      if (failing && patch.state === 'saved') throw new Error('QuotaExceededError');
+      return real(account, tok, patch, now);
+    };
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).not.toBe('saved');
+    expect(await t.journal.get(JOURNAL_ACCOUNT, token(1))).not.toMatchObject({ state: 'saved' });
+    failing = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved', descriptionUrl: URL_ });
+    expect(await t.journal.get(JOURNAL_ACCOUNT, token(1))).toMatchObject({ state: 'saved' });
+    expect(t.mirror.summary().journalUnavailable).toBe(false);
+  });
+
+  it('raises journalUnavailable while writes fail', async () => {
+    const t = setup([hostedFile(1)]);
+    await t.mirror.start();
+    t.journal.update = async () => {
+      throw new Error('closed');
+    };
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary().journalUnavailable).toBe(true);
+  });
+
+  it('deletes nothing from the pod while the journal cannot be written, and does once it can', async () => {
+    const t = setup([hostedFile(1)]);
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    const url = (t.mirror.stateOf(token(1)) as { descriptionUrl: string }).descriptionUrl;
+    const real = t.journal.update.bind(t.journal);
+    let failing = true;
+    t.journal.update = async (account, tok, patch, now) => {
+      if (failing) throw new Error('closed');
+      return real(account, tok, patch, now);
+    };
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([]);
+    failing = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([url]);
+  });
+
+  it('a second account whose saved write failed is not counted as pairing, but its copy is written again after another account deleted it', async () => {
+    const journal = createMemoryMirrorJournal();
+    const store = fakeStore();
+    store.fixedUrl = URL_;
+    const make = (username: string) => {
+      const hosted = fakeHosted([hostedFile(1)]);
+      hosted.user = username;
+      const events = fakeEvents();
+      const mirror = new PodMirror({ account: { webId: ACCOUNT.webId, username }, journal, hosted, openStore: openFake(store), fetchPublicBytes: fakeBytes(hosted).fetch, session: fakeSession(), network: fakeNetwork(), events, random: () => 0.5 });
+      return { mirror, events };
+    };
+    const a = make('alice_hosted');
+    const b = make('bob_hosted');
+    await a.mirror.start();
+    await a.mirror.enqueue(token(1));
+    await settle(a.mirror);
+    await b.mirror.start();
+    const real = journal.update.bind(journal);
+    let failing = true;
+    journal.update = async (account, tok, patch, now) => {
+      if (failing && account.username.startsWith('bob') && patch.state === 'saved') throw new Error('QuotaExceededError');
+      return real(account, tok, patch, now);
+    };
+    await b.mirror.enqueue(token(1));
+    await settle(b.mirror);
+    expect(b.mirror.stateOf(token(1))?.kind).not.toBe('saved');
+    a.events.emit({ type: 'deleted', token: token(1) });
+    await settle(a.mirror);
+    failing = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(b.mirror);
+    // Whatever the order, bob ends saved on a copy that is there.
+    expect(b.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved', descriptionUrl: URL_ });
+    expect((await store.get(URL_)).ok).toBe(true);
+  });
+});
+
 describe('an item the pod check queued to be copied again', () => {
   const savedItem = async () => {
     const t = setup([hostedFile(1)]);

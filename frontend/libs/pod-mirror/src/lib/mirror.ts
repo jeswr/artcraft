@@ -306,6 +306,8 @@ export class PodMirror {
   /** Downloads that have failed in a row, with none ever having worked on this install. */
   private byteFailures = 0;
   private importRun: ImportRun = { state: 'idle', walked: 0 };
+  /** The last journal write failed (and none has worked since): deletes wait, and the summary says so. */
+  private journalFailing = false;
   private libraryMissing: { at: number; checked: number; tokens: string[] } | null = null;
   private importWalker: Promise<void> | null = null;
   private importTimer: ReturnType<typeof setTimeout> | null = null;
@@ -485,6 +487,7 @@ export class PodMirror {
       counts,
       import: this.importStatus(),
       goneFromArtcraft: gone,
+      journalUnavailable: this.journalFailing,
       libraryMissing: this.libraryMissing ? { missing: this.libraryMissing.tokens.length, checked: this.libraryMissing.checked } : null,
       mediaHostBlocked: this.mediaHostBlocked(),
     };
@@ -1357,11 +1360,18 @@ export class PodMirror {
         // runs wholly before it; one that took the copy while this put was writing it means
         // the put is repeated (it recreates the copy) rather than leaving a dead link.
         const url = put.value.descriptionUrl;
-        const settled = await withCopyLock(url, async () => {
-          if ((removedAt.get(url) ?? 0) > clock) return false;
-          await this.recordSaved(token, put.value, { kind, template, thumb }, store, signal);
-          return true;
-        });
+        let settled: boolean;
+        try {
+          settled = await withCopyLock(url, async () => {
+            if ((removedAt.get(url) ?? 0) > clock) return false;
+            await this.recordSaved(token, put.value, { kind, template, thumb }, store, signal);
+            return true;
+          });
+        } catch (error) {
+          if (!(error instanceof JournalWriteError)) throw error;
+          // Not recorded, so not `saved`: the item stays pending and is copied (adopted) again.
+          return this.failTask(token, 'copy', 'unexpected', signal, 'transient');
+        }
         if (settled) return;
         if (repeat + 1 >= MAX_PUT_REPEATS) return this.failTask(token, 'copy', 'store', signal, 'transient');
       }
@@ -1391,7 +1401,9 @@ export class PodMirror {
     // A delete of this copy that was interrupted earlier is withdrawn once this record pairs with it
     // (the store's pending-delete list is also filtered by pairings: see `guardDeletes`).
     const withdraw = () => store.withdrawDelete(value.descriptionUrl).catch(() => undefined);
-    await this.patch(token, {
+    await this.patch(
+      token,
+      {
       state: 'saved',
       descriptionUrl: value.descriptionUrl,
       lastDescriptionUrl: undefined,
@@ -1404,7 +1416,9 @@ export class PodMirror {
       attempts: 0,
       repeats: undefined,
       nextAttemptAt: undefined,
-    });
+      },
+      true,
+    );
     await withdraw();
   }
 
@@ -1458,6 +1472,8 @@ export class PodMirror {
       const record = this.records.get(token);
       if (!record || record.descriptionUrl !== url || record.state !== 'removing') return;
       if (signal.aborted) return;
+      // A journal that cannot be written cannot be trusted to say what pairs with a copy.
+      if (this.journalFailing) return this.failTask(token, 'remove', 'unexpected', signal, 'transient');
       let shared: boolean;
       try {
         shared = this.pairedHere(url, token) || (await this.o.journal.isPairedElsewhere(url, { ...this.o.account, token }));
@@ -1742,7 +1758,13 @@ export class PodMirror {
 
   // ---- journal and notifications ---------------------------------------------------------------
 
-  private async patch(token: string, patch: RecordPatch): Promise<void> {
+  /**
+   * Updates memory, then the journal. A journal write that fails is not hidden: the mirror says
+   * so (`journalUnavailable`), and a `strict` patch (the one that records `saved`) is undone and
+   * throws, so an item is never `saved` in memory only, where another account's delete cannot
+   * see it.
+   */
+  private async patch(token: string, patch: RecordPatch, strict = false): Promise<void> {
     const now = this.o.now();
     const current = this.records.get(token);
     if (!current) return;
@@ -1755,7 +1777,28 @@ export class PodMirror {
     this.work.delete(token);
     this.schedule(next);
     this.changed();
-    await this.o.journal.update(this.o.account, token, patch, now).catch(() => undefined);
+    try {
+      await this.o.journal.update(this.o.account, token, patch, now);
+      if (this.journalFailing) {
+        this.journalFailing = false;
+        this.changed();
+      }
+    } catch {
+      if (!this.journalFailing) {
+        this.journalFailing = true;
+        this.changed();
+      }
+      if (strict && this.records.get(token) === next) {
+        this.unindex(next);
+        this.records.set(token, current);
+        this.index(current);
+        this.states.set(token, stateFromRecord(current));
+        this.work.delete(token);
+        this.schedule(current);
+        this.changed();
+        throw new JournalWriteError();
+      }
+    }
   }
 
   private changed(): void {
@@ -1770,6 +1813,9 @@ export class PodMirror {
     }
   }
 }
+
+/** A journal write that had to succeed did not. */
+class JournalWriteError extends Error {}
 
 function stateFromRecord(record: JournalRecord): ItemState {
   switch (record.state) {
