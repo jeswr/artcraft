@@ -26,6 +26,11 @@ export interface JournalRecord {
   /** ArtCraft no longer lists this item. The pod copy is kept until the person says otherwise. */
   goneFromArtcraft?: boolean;
   descriptionUrl?: string;
+  /**
+   * The pod copy this record pointed at before the pod check queued it to be copied again. Kept
+   * so a hosted delete that arrives before the new copy exists can still remove (or count) it.
+   */
+  lastDescriptionUrl?: string;
   /** Lowercase hex SHA-256 of the stored bytes. */
   sha256?: string;
   /** The hosted thumbnail address with `{WIDTH}` still in it, kept for the backfill. */

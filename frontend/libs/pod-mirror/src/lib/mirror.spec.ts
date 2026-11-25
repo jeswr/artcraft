@@ -2104,6 +2104,68 @@ describe('a saved item whose pod copy is gone', () => {
   });
 });
 
+describe('an item the pod check queued to be copied again', () => {
+  const savedItem = async () => {
+    const t = setup([hostedFile(1)]);
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    const url = (t.mirror.stateOf(token(1)) as { descriptionUrl: string }).descriptionUrl;
+    return { t, url };
+  };
+
+  it('is removed by a hosted delete that comes before the new copy exists, using the address it had', async () => {
+    const { t, url } = await savedItem();
+    // One false 404 queues it; the new copy cannot be written yet.
+    t.store.getFailure = { kind: 'not-found', reason: 'storage' };
+    t.store.putFailures.push({ kind: 'offline', reason: 'storage' });
+    await t.mirror.verify(true);
+    await settle(t.mirror);
+    t.store.getFailure = null;
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('pending');
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([url]);
+    expect(t.mirror.stateOf(token(1))).toBeUndefined();
+  });
+
+  it('is no longer the import run\'s: cancelling the run does not drop it, and pausing it does not hold it', async () => {
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'item', token: token(5), createdAt: new Date(hostedFile(5).created_at).getTime() });
+    const t = setup(Array.from({ length: 5 }, (_, i) => hostedFile(i + 1)), {}, journal);
+    await t.mirror.start();
+    await settle(t.mirror);
+    await t.mirror.startImport(5);
+    for (let i = 0; i < 20; i++) await settle(t.mirror);
+    expect(t.mirror.summary().import).toMatchObject({ state: 'done', saved: 5 });
+    await t.mirror.startImport(5);
+    await t.mirror.pauseImport();
+    const url = (t.mirror.stateOf(token(1)) as { descriptionUrl: string }).descriptionUrl;
+    t.store.missing.add(url);
+    t.store.fixedUrl = url;
+    await t.mirror.verify(true);
+    await settle(t.mirror);
+    // The run is paused, yet the item is copied again.
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved' });
+    await t.mirror.cancelImport();
+    await settle(t.mirror);
+    expect(await journal.get(JOURNAL_ACCOUNT, token(1))).toMatchObject({ state: 'saved' });
+  });
+
+  it('keeps a record whose copy the store cannot place (out of scope), but drops one the pod says is not there', async () => {
+    const { t, url } = await savedItem();
+    t.store.removeFailures.push({ kind: 'not-found', reason: 'out-of-scope' });
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('removing');
+    t.store.missing.add(url);
+    t.store.removeFailures.push({ kind: 'not-found', reason: 'storage' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))).toBeUndefined();
+  });
+});
+
 describe('the verification pass at start', () => {
   const URL_ = 'https://pod.example/alice/creative-assets/2026/06/gone';
   const seeded = async () => {

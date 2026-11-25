@@ -917,8 +917,10 @@ export class PodMirror {
   }
 
   private async beginRemoval(record: JournalRecord): Promise<void> {
-    if (record.descriptionUrl && (record.state === 'saved' || record.state === 'removing' || record.state === 'remove-failed' || record.state === 'pending')) {
-      await this.patch(record.token, { state: 'removing', attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
+    // A record the pod check queued to be copied again has no address of its own yet; the one it had is used.
+    const url = record.descriptionUrl ?? (record.state === 'pending' ? record.lastDescriptionUrl : undefined);
+    if (url && (record.state === 'saved' || record.state === 'removing' || record.state === 'remove-failed' || record.state === 'pending')) {
+      await this.patch(record.token, { state: 'removing', descriptionUrl: url, lastDescriptionUrl: undefined, attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
       this.pump();
       return;
     }
@@ -1054,6 +1056,10 @@ export class PodMirror {
       // The hosted item is still there: copy it again from the start.
       await this.patch(token, {
         state: 'pending',
+        // Not the import run's any more (cancelling or pausing it must not drop or hold this one),
+        // and the old address is kept for a hosted delete that comes before the new copy.
+        source: undefined,
+        lastDescriptionUrl: url,
         descriptionUrl: undefined,
         sha256: undefined,
         thumbnail: undefined,
@@ -1296,6 +1302,7 @@ export class PodMirror {
     await this.patch(token, {
       state: 'saved',
       descriptionUrl: value.descriptionUrl,
+      lastDescriptionUrl: undefined,
       sha256: value.sha256,
       thumbnail,
       thumbnailTemplate: thumbnail === 'waiting' ? template ?? undefined : undefined,
@@ -1380,7 +1387,9 @@ export class PodMirror {
         // that adopted the copy meanwhile must be repeated, not recorded on a dead link.
         noteRemoved(url);
       }
-      if (removed.ok || removed.error.kind === 'not-found') return this.dropRecord(token);
+      // Only the pod's own "not there" (reason `storage`) says the copy is gone. `out-of-scope` and
+      // `no-library` are also `not-found`, and say nothing about the copy: it is kept, and tried again.
+      if (removed.ok || (removed.error.kind === 'not-found' && removed.error.reason === 'storage')) return this.dropRecord(token);
       return this.storeFailure(token, 'remove', removed.error, signal);
     });
   }
