@@ -30,6 +30,7 @@ const SKIPS: Record<SkipReason, string> = {
   intermediate: 'it is a working file',
   'unsupported-type': 'this file type is not supported',
   'too-large': 'the file is larger than 50 MB, the most ArtCraft copies to a pod',
+  'too-large-for-pod': 'your pod refused it for its size',
   'bad-date': 'ArtCraft could not read when it was made',
   'hosted-deleted': 'it was already deleted',
 };

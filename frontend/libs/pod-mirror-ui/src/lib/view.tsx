@@ -9,6 +9,8 @@ export interface PodMirrorView {
   retry(token: string): Promise<void>;
   /** Puts every failed item back in the queue; resolves with how many. */
   retryAllFailed(): Promise<number>;
+  /** Removes the pod copies of items ArtCraft no longer lists, after the person confirmed; resolves with how many. */
+  removeGoneFromPod(): Promise<number>;
   /** Lifts an exposure pause and asks the pod again. */
   recheckExposure(): void;
   /** The person says the container is private, for a pod that cannot say; resolves false if nothing was waiting. */

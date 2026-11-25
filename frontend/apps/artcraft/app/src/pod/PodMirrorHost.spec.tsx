@@ -14,8 +14,8 @@ const world = vi.hoisted(() => {
     gate: null as Promise<void> | null,
   };
   function fakeMirror() {
-    const summary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 } };
-    return { stateOf: vi.fn(), summary: vi.fn(() => summary), subscribe: vi.fn(() => () => undefined), retry: vi.fn(), retryAllFailed: vi.fn(), recheckExposure: vi.fn(), confirmPrivate: vi.fn(), forgetAccount: vi.fn(async () => undefined) };
+    const summary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false };
+    return { stateOf: vi.fn(), summary: vi.fn(() => summary), subscribe: vi.fn(() => () => undefined), retry: vi.fn(), retryAllFailed: vi.fn(), recheckExposure: vi.fn(), confirmPrivate: vi.fn(), forgetAccount: vi.fn(async () => undefined), removeGoneFromPod: vi.fn(async () => 3) };
   }
 });
 vi.mock("~/signals", () => ({ authentication: { userInfo: world.username } }));
@@ -123,6 +123,23 @@ describe("the host that runs the mirror", () => {
     const pod = fakePodSession(connected(ALICE));
     render(<PodMirrorHost session={pod.session}><Probe /></PodMirrorHost>);
     await waitFor(() => expect(screen.getByTestId("probe").textContent).toBe("unavailable:summary"));
+  });
+
+  it("removing items that are gone from ArtCraft goes to the engine, and only when asked", async () => {
+    const pod = fakePodSession(connected(ALICE));
+    let remove: () => Promise<number> = async () => 0;
+    function Remove() {
+      const view = usePodMirrorView();
+      remove = () => view!.removeGoneFromPod();
+      return null;
+    }
+    render(<PodMirrorHost session={pod.session}><Remove /></PodMirrorHost>);
+    await waitFor(() => expect(world.started).toHaveLength(1));
+    expect(world.started[0].mirror.removeGoneFromPod).not.toHaveBeenCalled();
+    let n = 0;
+    await act(async () => { n = await remove(); });
+    expect(n).toBe(3);
+    expect(world.started[0].mirror.removeGoneFromPod).toHaveBeenCalledTimes(1);
   });
 
   it("forgetting the account clears its record and starts a fresh mirror", async () => {

@@ -53,6 +53,8 @@ export interface HostedPage {
 export interface HostedClient {
   /** The hosted username signed in right now, or null. Deletions are only verified for this account. */
   currentUsername(): string | null;
+  /** The hosted API origin in use right now. A journal is only ever used with the origin it was made for. */
+  currentHost(): string;
   getMediaFile(token: string, signal?: AbortSignal): Promise<HostedResult<HostedMediaFile>>;
   getPrompt(token: string, signal?: AbortSignal): Promise<HostedResult<HostedPrompt>>;
   /**
@@ -96,6 +98,8 @@ export type SkipReason =
   | 'intermediate'
   | 'unsupported-type'
   | 'too-large'
+  /** The pod refused this one item for its size (HTTP 413); nothing else is affected. */
+  | 'too-large-for-pod'
   | 'bad-date'
   | 'hosted-deleted';
 
@@ -136,6 +140,10 @@ export interface MirrorSummary extends MirrorStatus {
   /** Changes whenever anything visible changes. */
   version: number;
   counts: MirrorCounts;
+  /** Saved items ArtCraft no longer lists. Their pod copies stay until the person asks to remove them. */
+  goneFromArtcraft: number;
+  /** Every download from ArtCraft's media host has failed since this install began, while the pod works. */
+  mediaHostBlocked: boolean;
 }
 
 export interface ReconcileResult {
@@ -170,7 +178,7 @@ export interface NetworkPort {
 
 export interface VerifyResult {
   checked: number;
-  /** Items the hosted side definitively no longer has; their pod copies are being removed. */
-  removed: number;
+  /** Items the hosted side says it no longer has. Their pod copies are kept and only marked. */
+  flagged: number;
   stoppedBy: 'done' | 'too-soon' | 'hosted-unavailable' | 'not-running';
 }

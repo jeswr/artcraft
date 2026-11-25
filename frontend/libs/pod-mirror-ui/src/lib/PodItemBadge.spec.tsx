@@ -11,7 +11,7 @@ afterEach(cleanup);
 function fakeView(states: Record<string, ItemState>, paused: MirrorSummary['paused'] = null) {
   const listeners = new Set<() => void>();
   const retry = vi.fn(async () => undefined);
-  const summary: MirrorSummary = { version: 1, running: true, paused, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 } };
+  const summary: MirrorSummary = { version: 1, running: true, paused, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false };
   const view: PodMirrorView = {
     stateOf: (token) => states[token],
     summary: () => summary,
@@ -24,6 +24,7 @@ function fakeView(states: Record<string, ItemState>, paused: MirrorSummary['paus
     recheckExposure: () => undefined,
     confirmPrivate: async () => false,
     forgetAccount: async () => undefined,
+    removeGoneFromPod: async () => 0,
   };
   return { view, retry, set: (token: string, state: ItemState) => { states[token] = state; for (const l of listeners) l(); } };
 }

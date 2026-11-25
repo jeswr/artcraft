@@ -68,8 +68,8 @@ describe.each([
     expect(await journal.ensureBaseline(ACCOUNT, first)).toEqual(first);
     expect(await journal.ensureBaseline(ACCOUNT, { kind: 'empty' })).toEqual(first);
     expect(await journal.ensureBaseline(OTHER_USER, { kind: 'empty' })).toEqual({ kind: 'empty' });
-    await journal.updateAccountState(ACCOUNT, { mark: { token: 'm_10', createdAt: 200 }, cursor: { page: 3 }, confirmedPrivate: ['https://p/lib/'] });
-    await journal.updateAccountState(ACCOUNT, { cursor: undefined });
+    await journal.updateAccountState(ACCOUNT, { mark: { token: 'm_10', createdAt: 200 }, bytesEverOk: true, confirmedPrivate: ['https://p/lib/'] });
+    await journal.updateAccountState(ACCOUNT, { bytesEverOk: undefined });
     expect(await journal.getAccountState(ACCOUNT)).toEqual({ baseline: first, mark: { token: 'm_10', createdAt: 200 }, confirmedPrivate: ['https://p/lib/'] });
   });
 

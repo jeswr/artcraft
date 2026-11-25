@@ -140,4 +140,11 @@ built and packed as described above in its own worktree; the hashes above are th
 other tarball is unchanged. With the new pod-type-index the app's `vite build` no longer needs the
 regex rewrite plugin, which was removed.
 
+`jeswr-pod-media-store-0.1.0.tgz` was packed once more from `origin/feat/pod-media-store` at `de074a7`
+(the body is read once and the hashed bytes are the sent bytes; a failed exposure probe cannot be
+lifted by `allowUnknownExposureFor`; HTTP 413 and 507 are reported as `too-large` with reasons
+`payload-too-large` and `insufficient-storage`). Its SHA-256 is now
+`0e04678aa9bc81059adaf825b1a6892a6708405530ac81f5f2dbcd94cec5c7e4`; the hash in the list above is the
+older one. Every other tarball is unchanged.
+
 These packages are experimental and security critical; they are unreleased and unaudited.

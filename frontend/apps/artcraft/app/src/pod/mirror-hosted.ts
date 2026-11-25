@@ -1,4 +1,4 @@
-import { MediaFilesApi, type MediaFile, type Prompts, PromptsApi } from "@storyteller/api";
+import { MediaFilesApi, type MediaFile, type Prompts, PromptsApi, StorytellerApiHostStore } from "@storyteller/api";
 import type { HostedClient, HostedMediaFile, HostedPrompt, HostedResult } from "@storyteller/pod-mirror";
 
 // Compile-time check: the hosted models still fit what the mirror reads.
@@ -26,11 +26,16 @@ function toResult<T>(response: ApiResponse<T, unknown>): HostedResult<T> {
  * The mirror's hosted calls over the existing hosted clients (which keep using the hosted
  * session as before). Nothing here touches the pod.
  */
-export function createHostedClient(username: string, currentUsername: () => string | null = () => username): HostedClient {
+export function createHostedClient(
+  username: string,
+  currentUsername: () => string | null = () => username,
+  currentHost: () => string = () => StorytellerApiHostStore.getInstance().getApiSchemeAndHost(),
+): HostedClient {
   const media = new MediaFilesApi();
   const prompts = new PromptsApi();
   return {
     currentUsername,
+    currentHost,
     async getMediaFiles(tokens) {
       return toResult(await media.ListMediaFilesByTokens({ mediaTokens: [...tokens] }));
     },

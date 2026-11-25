@@ -17,6 +17,12 @@ export interface JournalRecord {
   lastError?: FailureReason | SkipReason;
   /** Earliest time (ms) the next automatic attempt may run. */
   nextAttemptAt?: number;
+  /** The hosted server's creation time of the item (ms), when it was known at admission. */
+  hostedCreatedAt?: number;
+  /** The same failure kind this many attempts in a row. */
+  repeats?: number;
+  /** ArtCraft no longer lists this item. The pod copy is kept until the person says otherwise. */
+  goneFromArtcraft?: boolean;
   descriptionUrl?: string;
   /** Lowercase hex SHA-256 of the stored bytes. */
   sha256?: string;
@@ -48,8 +54,8 @@ export interface AccountState {
   baseline?: Baseline;
   /** The newest item of the last walk that ran to its stopping point. */
   mark?: ItemMark;
-  /** Where an interrupted walk got to (a page index), so the next one can skip ahead. */
-  cursor?: { page: number };
+  /** True once any download from the hosted media host has worked on this install. */
+  bytesEverOk?: boolean;
   /** When the hosted deletions were last checked (ms, local clock, scheduling only). */
   verifiedAt?: number;
   /** Library containers the person confirmed are private, for servers that cannot say. */

@@ -9,7 +9,7 @@ afterEach(cleanup);
 
 const item: GalleryItem = { id: 'm_1', label: 'Fox', thumbnail: 'https://cdn.example/t.png', createdAt: '2026-06-01T00:00:00Z', mediaClass: 'image' };
 
-const SUMMARY = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 } } as const;
+const SUMMARY = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false } as const;
 
 function renderTile(state: ItemState | undefined, tile: GalleryItem = item) {
   const retry = vi.fn(async () => undefined);
@@ -22,6 +22,7 @@ function renderTile(state: ItemState | undefined, tile: GalleryItem = item) {
     recheckExposure: () => undefined,
     confirmPrivate: async () => false,
     forgetAccount: async () => undefined,
+    removeGoneFromPod: async () => 0,
   };
   const tree = (
     <GalleryDraggableItem item={tile} mode="view" activeFilter="all" selected={false} onClick={() => undefined} onImageError={() => undefined} />

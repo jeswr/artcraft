@@ -1,6 +1,6 @@
 import type { MediaStoreError, PutInput, PutOutcome, Result } from '@jeswr/pod-media-store';
 import { BytesError, type FetchPublicBytes } from './bytes.js';
-import type { OpenStore, PodStorePort } from './mirror.js';
+import { journalAccount, type OpenStore, type PodStorePort } from './mirror.js';
 import type {
   HostedClient,
   HostedMediaFile,
@@ -15,6 +15,8 @@ import type {
 
 export const WEB_ID = 'https://alice.example/profile/card#me';
 export const ACCOUNT = { webId: WEB_ID, username: 'alice_hosted' };
+/** The account as the journal keys it: the hosted user on the fake hosted API origin. */
+export const JOURNAL_ACCOUNT = journalAccount(ACCOUNT, 'https://api.example');
 export const HOSTED_TOKEN_PREFIX = 'm_secrettoken';
 
 export function png(seed = 0, size = 32): Uint8Array {
@@ -107,6 +109,7 @@ export interface FakeHosted extends HostedClient {
   /** The batch lookup reports `unavailable`. */
   batchDown: boolean;
   user: string | null;
+  host: string;
   /** Newest first unless a test reorders it. */
   listing: HostedMediaFile[];
 }
@@ -120,8 +123,10 @@ export function fakeHosted(files: HostedMediaFile[] = []): FakeHosted {
     listDown: false,
     batchDown: false,
     user: ACCOUNT.username,
+    host: 'https://api.example',
     listing: [...files].sort((a, b) => b.created_at.localeCompare(a.created_at)),
     currentUsername: () => hosted.user,
+    currentHost: () => hosted.host,
     async getMediaFiles(tokens) {
       hosted.calls.push(`batch:${tokens.length}`);
       if (hosted.batchDown) return { ok: false, kind: 'unavailable' };
@@ -169,6 +174,8 @@ export interface FakeStore extends PodStorePort {
   fixedUrl: string | null;
   /** What `exposureTarget()` says. */
   target: string | null;
+  /** What `libraryContainer()` says: the library, or null while it does not exist yet. Defaults to the target. */
+  library: string | null | undefined;
   gate: Promise<void> | null;
 }
 
@@ -189,6 +196,7 @@ export function fakeStore(): FakeStore {
     fixedUrl: null,
     target: 'https://pod.example/alice/creative-assets/',
     gate: null,
+    library: undefined,
     async put(input) {
       const { bytes, signal: _signal, ...rest } = input as PutInput<unknown> & { bytes: Blob | Uint8Array };
       store.puts.push(input as PutInput<unknown>);
@@ -223,6 +231,7 @@ export function fakeStore(): FakeStore {
       return { ok: true, value: undefined };
     },
     exposureTarget: () => store.target,
+    libraryContainer: () => (store.library === undefined ? store.target : store.library),
     async resumePending() {
       store.resumed++;
       return { ok: true, value: { completed: 0, failed: 0, rejected: 0 } };

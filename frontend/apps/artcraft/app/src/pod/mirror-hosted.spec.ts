@@ -5,6 +5,7 @@ const api = vi.hoisted(() => ({
   ListMediaFilesByTokens: vi.fn(),
   ListUserMediaFiles: vi.fn(),
   GetPromptsByToken: vi.fn(),
+  host: vi.fn(() => "https://api.example"),
 }));
 vi.mock("@storyteller/api", () => ({
   MediaFilesApi: class {
@@ -15,6 +16,7 @@ vi.mock("@storyteller/api", () => ({
   PromptsApi: class {
     GetPromptsByToken = api.GetPromptsByToken;
   },
+  StorytellerApiHostStore: { getInstance: () => ({ getApiSchemeAndHost: () => api.host() }) },
 }));
 
 import { createHostedClient } from "./mirror-hosted";
@@ -59,6 +61,9 @@ describe("the hosted calls the mirror makes", () => {
     expect(await client.getMediaFiles(["m_1", "m_2"])).toEqual({ ok: true, value: [{ token: "m_1" }] });
     expect(api.ListMediaFilesByTokens).toHaveBeenCalledWith({ mediaTokens: ["m_1", "m_2"] });
     expect(client.currentUsername()).toBe("someone_else");
+    expect(client.currentHost()).toBe("https://api.example");
+    api.host.mockReturnValue("http://localhost:12345");
+    expect(client.currentHost()).toBe("http://localhost:12345"); // read when asked, so a change of backend is seen
     api.ListMediaFilesByTokens.mockResolvedValue({ success: false, errorMessage: "status: 500" });
     expect(await client.getMediaFiles(["m_1"])).toMatchObject({ ok: false });
   });

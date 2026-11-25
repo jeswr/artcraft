@@ -41,6 +41,8 @@ export interface PodStorePort {
   checkExposure(signal?: AbortSignal): Promise<Result<ExposureState>>;
   /** The container the exposure check is about: the library, or the storage root before it exists. */
   exposureTarget(): string | null;
+  /** The library container once it exists; null before. Only this, or beneath it, can be confirmed private. */
+  libraryContainer(): string | null;
 }
 
 export type OpenStoreResult = { ok: true; store: PodStorePort } | { ok: false; reason: 'offline' | 'failed' };
@@ -118,6 +120,48 @@ const DEFAULTS = {
   changedDebounceMs: 1_500,
 };
 
+/** Failed downloads, with none ever working, after which the media host is called unreachable. */
+const BLOCKED_AFTER_FAILURES = 6;
+
+/** After this many failed attempts an item waits a day between tries instead of a quarter of an hour. */
+const LONG_WAIT_AFTER = 12;
+const LONG_WAIT_MS = 24 * 60 * 60_000;
+
+/** The same deterministic store failure this many times in a row ends an item until it is retried. */
+const DETERMINISTIC_REPEATS = 3;
+const DETERMINISTIC_REASONS: ReadonlySet<string> = new Set([
+  'description-too-large',
+  'invalid-input',
+  'description-invalid',
+  'description-unparseable',
+  'not-a-document',
+  'shard-title',
+  'no-validator',
+  'name-unavailable',
+]);
+
+/**
+ * What a pod's "too big" answer means, from the store's reasons under kind `too-large`:
+ * `insufficient-storage` (HTTP 507: the pod is full) and `payload-too-large` (HTTP 413: this one
+ * body is too big, whatever the space). Any other reason (`storage`, from a store that does not
+ * tell the two apart) is treated as one item refused, and two different items in a row are taken
+ * for a full pod.
+ */
+export type PodRefusal = 'no-space' | 'item' | 'unclear';
+export function podRefusal(error: MediaStoreError): PodRefusal | undefined {
+  if (error.kind !== 'too-large') return undefined;
+  switch (error.reason) {
+    case 'insufficient-storage':
+      return 'no-space';
+    case 'payload-too-large':
+      return 'item';
+    case 'storage':
+      return 'unclear';
+    default:
+      return undefined;
+  }
+}
+
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** How a failure is handled: wait and retry for ever, stop at once, or stop after this many attempts. */
@@ -128,8 +172,16 @@ export function backoffDelay(attempts: number, baseMs: number, maxMs: number, ra
   return Math.round(exponential * (0.8 + 0.4 * random()));
 }
 
+/** The journal's account for a hosted user on one API origin. */
+export function journalAccount(account: MirrorAccount, host: string): MirrorAccount {
+  return { webId: account.webId, username: host ? `${account.username}|${host}` : account.username };
+}
+
 /** Copies the hosted library to the pod, one item at a time, and remembers how each went. */
 export class PodMirror {
+  /** The hosted username as the hosted side knows it; `o.account` carries it with the API origin, for the journal. */
+  private readonly hostedUser: string;
+  private readonly hostedHost: string;
   private readonly o: Required<Omit<PodMirrorOptions, 'network' | 'events' | 'isIntermediate' | 'sniff'>> &
     Pick<PodMirrorOptions, 'network' | 'events' | 'isIntermediate'> & { sniff: Sniffer };
   private readonly records = new Map<string, JournalRecord>();
@@ -165,6 +217,10 @@ export class PodMirror {
   private changedTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setTimeout> | null = null;
   private verifyTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly refusedItems = new Set<string>();
+  private bytesEverOk = false;
+  /** Downloads that have failed in a row, with none ever having worked on this install. */
+  private byteFailures = 0;
 
   constructor(options: PodMirrorOptions) {
     this.o = {
@@ -174,6 +230,11 @@ export class PodMirror {
       ...stripUndefined(options),
       sniff: options.sniff ?? defaultSniff,
     } as PodMirror['o'];
+    // A journal is only ever used with the hosted API origin it was made for, so another
+    // backend can never match an item.
+    this.hostedUser = options.account.username;
+    this.hostedHost = options.hosted.currentHost();
+    this.o.account = journalAccount(options.account, this.hostedHost);
   }
 
   /** Loads the journal, then begins copying whatever is pending. Does not wait for the copies. */
@@ -185,6 +246,8 @@ export class PodMirror {
     const { account, journal } = this.o;
     const state = await journal.getAccountState(account);
     this.baseline = state?.baseline;
+    this.bytesEverOk = state?.bytesEverOk === true;
+    this.byteFailures = 0;
     this.confirmed.clear();
     for (const url of state?.confirmedPrivate ?? []) this.confirmed.add(url);
     this.records.clear();
@@ -257,8 +320,10 @@ export class PodMirror {
    * explicit allow option. It never covers an `exposed` answer.
    */
   async confirmPrivate(): Promise<boolean> {
-    if (this.blocked !== 'exposure-unknown' || !this.target) return false;
-    this.confirmed.add(this.target);
+    // Never the storage root: only the library container the store reports.
+    const library = this.store?.libraryContainer() ?? null;
+    if (this.blocked !== 'exposure-unknown' || library === null) return false;
+    this.confirmed.add(library);
     await this.o.journal.updateAccountState(this.o.account, { confirmedPrivate: [...this.confirmed] }).catch(() => undefined);
     this.recheck();
     return true;
@@ -279,7 +344,7 @@ export class PodMirror {
    * removed. An error, an offline moment or an item that is someone else's never removes anything.
    */
   verify(force = false, minGapMs = this.o.verifyIntervalMs): Promise<VerifyResult> {
-    if (!this.running) return Promise.resolve({ checked: 0, removed: 0, stoppedBy: 'not-running' });
+    if (!this.running) return Promise.resolve({ checked: 0, flagged: 0, stoppedBy: 'not-running' });
     this.verifying ??= this.verifyPass(force, minGapMs).finally(() => {
       this.verifying = null;
     });
@@ -299,6 +364,8 @@ export class PodMirror {
   summary(): MirrorSummary {
     if (this.cachedSummary?.version === this.version) return this.cachedSummary;
     const counts: MirrorCounts = { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 };
+    let gone = 0;
+    for (const record of this.records.values()) if (record.state === 'saved' && record.goneFromArtcraft) gone++;
     for (const state of this.states.values()) {
       if (state.kind === 'saved') counts.saved++;
       else if (state.kind === 'pending') counts.pending++;
@@ -313,6 +380,8 @@ export class PodMirror {
       paused,
       exposureTarget: paused === 'exposed' || paused === 'exposure-unknown' ? this.target : null,
       counts,
+      goneFromArtcraft: gone,
+      mediaHostBlocked: this.mediaHostBlocked(),
     };
     return this.cachedSummary;
   }
@@ -373,7 +442,11 @@ export class PodMirror {
 
   private onEvent(event: MirrorSourceEvent): void {
     if (event.type === 'added') for (const token of event.tokens) void this.admit(token, undefined).catch(() => undefined);
-    else if (event.type === 'deleted') void this.onHostedDeleted(event.token).catch(() => undefined);
+    else if (event.type === 'deleted') {
+      // Only a delete the person made in this app, for the hosted user and API origin this
+      // mirror belongs to, takes a pod copy with it.
+      if (this.sameIdentity()) void this.onHostedDeleted(event.token).catch(() => undefined);
+    }
     else {
       if (this.changedTimer) clearTimeout(this.changedTimer);
       this.changedTimer = setTimeout(() => {
@@ -412,7 +485,9 @@ export class PodMirror {
   /**
    * A walk stops only at the last completed walk's newest item, or at the connect baseline.
    * Journalled items inside that range are skipped, never an end: a typed event can journal
-   * the newest item while older ones are still unseen.
+   * the newest item while older ones are still unseen. An interrupted walk is not resumed
+   * from a page: the next one starts from the newest item again (listing is cheap, a gap is not),
+   * and the mark moves only when a walk ran all the way down.
    */
   private async walk(): Promise<ReconcileResult> {
     const result: ReconcileResult = { enqueued: 0, pages: 0, stoppedBy: 'end', orderUnverified: false };
@@ -424,16 +499,12 @@ export class PodMirror {
     const mark = state?.mark;
     const baselineItem = baseline.kind === 'item' ? baseline : undefined;
     const boundary = Math.max(mark?.createdAt ?? Number.NEGATIVE_INFINITY, baselineItem?.createdAt ?? Number.NEGATIVE_INFINITY);
-    const resumeAt = state?.cursor?.page ?? 0;
     let previous = Number.POSITIVE_INFINITY;
     let newest: ItemMark | undefined;
-    let last = -1;
 
     const finish = async (stoppedBy: ReconcileResult['stoppedBy']): Promise<ReconcileResult> => {
       const complete = stoppedBy === 'mark' || stoppedBy === 'baseline' || stoppedBy === 'end';
-      if (complete && newest) await journal.updateAccountState(account, { mark: newest, cursor: undefined }).catch(() => undefined);
-      else if (complete) await journal.updateAccountState(account, { cursor: undefined }).catch(() => undefined);
-      else if (last >= 0) await journal.updateAccountState(account, { cursor: { page: last + 1 } }).catch(() => undefined);
+      if (complete && newest) await journal.updateAccountState(account, { mark: newest }).catch(() => undefined);
       return { ...result, stoppedBy };
     };
 
@@ -452,7 +523,6 @@ export class PodMirror {
           previous = created;
         }
       }
-      let allKnown = true;
       for (const file of items) {
         if (!this.running) return finish('not-running');
         const created = parseDate(file.created_at)?.getTime();
@@ -464,25 +534,14 @@ export class PodMirror {
         if (this.records.has(file.token) || (await journal.get(account, file.token))) continue;
         if (created === undefined) {
           // A date that cannot be read must not let the item bypass the baseline, or be lost.
-          allKnown = false;
           if (await this.admit(file.token, undefined, 'bad-date')) result.enqueued++;
           continue;
         }
         if (created < boundary && !result.orderUnverified) return finish(mark && mark.createdAt >= (baselineItem?.createdAt ?? Number.NEGATIVE_INFINITY) ? 'mark' : 'baseline');
         if (created < boundary) continue;
-        allKnown = false;
         if (await this.admit(file.token, file)) result.enqueued++;
       }
-      last = page;
       if (totalPages !== null && page + 1 >= totalPages) return finish('end');
-      // An interrupted walk already went through the pages up to its cursor. When page 0 holds
-      // nothing new, jump to one page before it (items shift up by one page at most when
-      // something is deleted); anything new would have shown on page 0.
-      if (page === 0 && allKnown && resumeAt > 2 && !result.orderUnverified) {
-        const jump = resumeAt - 2;
-        last = jump;
-        page = jump;
-      }
     }
     return finish('page-cap');
   }
@@ -501,6 +560,30 @@ export class PodMirror {
     }, this.o.verifyIntervalMs);
   }
 
+  private mediaHostBlocked(): boolean {
+    return !this.bytesEverOk && this.byteFailures >= BLOCKED_AFTER_FAILURES && this.pauseReason() === null;
+  }
+
+  /** The pod is full: the item waits (it is not the item's fault) and it is tried again later. */
+  private async quotaHit(token: string, signal: AbortSignal): Promise<void> {
+    return this.failTask(token, 'copy', 'store', signal, 'transient');
+  }
+
+  /** The pod refused this one item for its size. It is final for the item and affects nothing else. */
+  private async refusedByPod(token: string): Promise<void> {
+    await this.skip(token, 'too-large-for-pod');
+  }
+
+  /** A 413 or 507 that cannot be told apart: one item is skipped, a second different one means the pod is full. */
+  private async refusedUnclear(token: string, signal: AbortSignal): Promise<void> {
+    if (this.refusedItems.size > 0 && !this.refusedItems.has(token)) {
+      this.refusedItems.clear();
+      return this.quotaHit(token, signal);
+    }
+    this.refusedItems.add(token);
+    await this.skip(token, 'too-large-for-pod');
+  }
+
   // ---- delete pairing -------------------------------------------------------------------
 
   private async onHostedDeleted(token: string): Promise<void> {
@@ -517,7 +600,7 @@ export class PodMirror {
 
   private async beginRemoval(record: JournalRecord): Promise<void> {
     if (record.descriptionUrl && (record.state === 'saved' || record.state === 'removing' || record.state === 'remove-failed' || record.state === 'pending')) {
-      await this.patch(record.token, { state: 'removing', attempts: 0, nextAttemptAt: undefined, lastError: undefined });
+      await this.patch(record.token, { state: 'removing', attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
       this.pump();
       return;
     }
@@ -525,43 +608,81 @@ export class PodMirror {
     await this.dropRecord(record.token);
   }
 
+  /** The hosted user and API origin that are signed in right now are the ones this mirror is for. */
+  private sameIdentity(): boolean {
+    return this.o.hosted.currentUsername() === this.hostedUser && this.o.hosted.currentHost() === this.hostedHost;
+  }
+
+  /**
+   * Looks for saved items the hosted side no longer lists, in chunks. It never deletes: an item
+   * whose own lookup says "not found" is only marked, and its pod copy stays until the person
+   * asks for it to go (`removeGoneFromPod`). A different hosted user or API origin, an outage
+   * or going offline stops the pass before anything is marked.
+   */
   private async verifyPass(force: boolean, minGapMs: number): Promise<VerifyResult> {
     const { journal, account, hosted } = this.o;
-    const result: VerifyResult = { checked: 0, removed: 0, stoppedBy: 'done' };
+    const result: VerifyResult = { checked: 0, flagged: 0, stoppedBy: 'done' };
     const state = await journal.getAccountState(account);
     if (!force && state?.verifiedAt !== undefined && this.o.now() - state.verifiedAt < minGapMs) return { ...result, stoppedBy: 'too-soon' };
-    // A lookup made as a different hosted user would call every item of this account "gone".
-    if (hosted.currentUsername() !== account.username) return { ...result, stoppedBy: 'hosted-unavailable' };
+    // A lookup made as a different hosted user, or on another backend, would call every item "gone".
+    if (!this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
     const signal = this.lifecycle?.signal;
     const saved = [...this.records.values()].filter((record) => record.state === 'saved').map((record) => record.token);
     for (let at = 0; at < saved.length; at += this.o.verifyChunk) {
       if (!this.canTalk()) return { ...result, stoppedBy: this.running ? 'hosted-unavailable' : 'not-running' };
       const chunk = saved.slice(at, at + this.o.verifyChunk);
       const batch = await hosted.getMediaFiles(chunk, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
-      if (!batch.ok) return { ...result, stoppedBy: 'hosted-unavailable' };
+      if (!batch.ok || !this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
       const present = new Set(batch.value.map((file) => file.token));
       result.checked += chunk.length;
-      for (const token of chunk.filter((t) => !present.has(t))) {
+      for (const token of chunk) {
+        if (present.has(token)) {
+          await this.markPresent(token);
+          continue;
+        }
         // Absent from a batch is a hint. Only the item's own lookup answering "not found" counts.
         const own = await hosted.getMediaFile(token, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
         if (!own.ok && own.kind === 'unavailable') return { ...result, stoppedBy: 'hosted-unavailable' };
-        if (own.ok) continue;
+        if (own.ok) {
+          await this.markPresent(token);
+          continue;
+        }
         if (!this.canTalk()) return { ...result, stoppedBy: this.running ? 'hosted-unavailable' : 'not-running' };
+        if (!this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
         const record = this.records.get(token);
         if (record?.state !== 'saved') continue;
-        await this.onHostedDeleted(token);
-        result.removed++;
+        if (!record.goneFromArtcraft) await this.patch(token, { goneFromArtcraft: true });
+        result.flagged++;
       }
     }
     await journal.updateAccountState(account, { verifiedAt: this.o.now() }).catch(() => undefined);
     return result;
   }
 
+  private async markPresent(token: string): Promise<void> {
+    if (this.records.get(token)?.goneFromArtcraft) await this.patch(token, { goneFromArtcraft: undefined });
+  }
+
+  /**
+   * The person's explicit choice: remove the pod copies of items ArtCraft no longer lists. The
+   * only path that deletes on the strength of a lookup, and only after a confirmation in the UI.
+   */
+  async removeGoneFromPod(): Promise<number> {
+    if (!this.running || !this.sameIdentity()) return 0;
+    let count = 0;
+    for (const record of [...this.records.values()]) {
+      if (record.state !== 'saved' || !record.goneFromArtcraft) continue;
+      await this.onHostedDeleted(record.token);
+      count++;
+    }
+    return count;
+  }
+
   // ---- scheduling ---------------------------------------------------------------------
 
   private schedule(record: JournalRecord, restart = false): void {
     this.work.delete(record.token);
-    const due = restart ? 0 : record.nextAttemptAt ?? 0;
+    const due = restart && record.attempts < 3 ? 0 : record.nextAttemptAt ?? 0;
     if (record.state === 'pending') this.work.set(record.token, { kind: 'copy', due, seq: this.seq++ });
     else if (record.state === 'removing') this.work.set(record.token, { kind: 'remove', due, seq: this.seq++ });
     else if (record.state === 'saved' && record.thumbnail === 'waiting') this.work.set(record.token, { kind: 'thumb', due: record.thumbnailNextAt ?? 0, seq: this.seq++ });
@@ -631,6 +752,12 @@ export class PodMirror {
   private async copy(token: string, signal: AbortSignal): Promise<void> {
     const store = this.store;
     if (!store) return;
+    // The attempt is counted, and the next one scheduled, before anything is downloaded, so
+    // nothing that keeps failing can fetch the same file again without waiting its turn.
+    const before = this.records.get(token);
+    if (!before) return;
+    const attempt = before.attempts + 1;
+    await this.patch(token, { attempts: attempt, nextAttemptAt: this.o.now() + this.retryDelay(attempt) });
     const hint = this.hints.get(token);
     this.hints.delete(token);
     let file = hint;
@@ -665,9 +792,13 @@ export class PodMirror {
       if (kind === 'too-large') return this.skip(token, 'too-large');
       if (kind === 'bad-url' || kind === 'gone') return this.failTask(token, 'copy', 'bytes-unavailable', signal, 'terminal');
       // A refused request cannot be told from a CORS block: after a few tries it is reported as one.
-      if (kind === 'network') return this.failTask(token, 'copy', 'cdn-blocked', signal, this.o.blockedAttempts);
+      // Never terminal for the item: whether the media host is reachable at all is judged once,
+      // across every item (`mediaHostBlocked`), not by one item's failures.
+      this.noteByteFailure(signal);
+      if (kind === 'network') return this.failTask(token, 'copy', 'cdn-blocked', signal, 'transient');
       return this.failTask(token, 'copy', 'bytes-unavailable', signal, 'transient');
     }
+    this.noteByteSuccess();
     const sniffed = this.o.sniff(await blobHead(bytes), { extension: declaredExtension(file) });
     if (!sniffed) return this.skip(token, 'unsupported-type');
     if (sniffed.contentType.startsWith('audio/')) return this.skip(token, 'audio-unsupported');
@@ -692,6 +823,7 @@ export class PodMirror {
       signal,
     });
     if (!put.ok) return this.storeFailure(token, 'copy', put.error, signal);
+    this.refusedItems.clear();
 
     let thumbnail: 'attached' | 'waiting' | 'none' = kind === 'model3d' || !thumbnailUrl(template) ? 'none' : 'waiting';
     if (put.value.thumbnailUrl !== undefined) thumbnail = 'attached';
@@ -712,6 +844,8 @@ export class PodMirror {
       thumbnailAttempts: 0,
       thumbnailNextAt: thumbnail === 'waiting' ? this.o.now() + (this.o.thumbnailDelaysMs[0] ?? 0) : undefined,
       lastError: undefined,
+      attempts: 0,
+      repeats: undefined,
       nextAttemptAt: undefined,
     });
   }
@@ -795,9 +929,9 @@ export class PodMirror {
   private async retryOne(token: string): Promise<boolean> {
     const record = this.records.get(token);
     if (!record) return false;
-    if (record.state === 'failed') await this.patch(token, { state: 'pending', attempts: 0, nextAttemptAt: undefined, lastError: undefined });
-    else if (record.state === 'skipped' && record.lastError === 'bad-date') await this.patch(token, { state: 'pending', attempts: 0, nextAttemptAt: undefined, lastError: undefined });
-    else if (record.state === 'remove-failed') await this.patch(token, { state: 'removing', attempts: 0, nextAttemptAt: undefined, lastError: undefined });
+    if (record.state === 'failed') await this.patch(token, { state: 'pending', attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
+    else if (record.state === 'skipped' && record.lastError === 'bad-date') await this.patch(token, { state: 'pending', attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
+    else if (record.state === 'remove-failed') await this.patch(token, { state: 'removing', attempts: 0, repeats: undefined, nextAttemptAt: undefined, lastError: undefined });
     else if (record.state === 'pending' || record.state === 'removing') await this.patch(token, { nextAttemptAt: undefined });
     else if (record.state === 'saved' && record.thumbnail === 'waiting') await this.patch(token, { thumbnailNextAt: undefined, thumbnailAttempts: 0 });
     else return false;
@@ -817,9 +951,17 @@ export class PodMirror {
       this.target = this.store?.exposureTarget() ?? this.target;
       this.exposureOk = false;
       this.changed();
-      return this.failTask(token, kind, 'exposed', signal, 'terminal');
+      // Not the item's fault and not counted against it: the pause holds the queue until the person acts.
+      return this.uncount(token, kind);
     }
-    if (error.kind === 'too-large' && kind === 'copy') return this.skip(token, 'too-large');
+    if (kind === 'copy') {
+      const refusal = podRefusal(error);
+      if (refusal === 'no-space') return this.quotaHit(token, signal);
+      if (refusal === 'item') return this.refusedByPod(token);
+      if (refusal === 'unclear') return this.refusedUnclear(token, signal);
+      if (error.kind === 'too-large') return this.skip(token, 'too-large');
+    }
+    // A repeated failure of the same deterministic kind is final until the person retries.
     const { reason, policy } = this.classifyStoreError(error);
     // A 401 and a 403 both read as "forbidden". While the session refreshes the first is
     // transient, so the store is opened again with the fresh fetch before giving up.
@@ -834,11 +976,11 @@ export class PodMirror {
   private classifyStoreError(error: MediaStoreError): { reason: FailureReason; policy: Policy } {
     switch (error.kind) {
       case 'conflict':
-        return { reason: 'conflict', policy: 'terminal' };
+        return { reason: 'conflict', policy: DETERMINISTIC_REPEATS };
       case 'forbidden':
         return { reason: 'forbidden', policy: this.o.blockedAttempts };
       case 'unsupported':
-        return { reason: 'unsupported', policy: 'terminal' };
+        return { reason: 'unsupported', policy: DETERMINISTIC_REPEATS };
       case 'too-large':
         return { reason: 'invalid-description', policy: 'terminal' };
       case 'offline':
@@ -846,7 +988,7 @@ export class PodMirror {
       case 'not-found':
         return { reason: 'store', policy: 'transient' };
       default:
-        if (error.reason === 'description-too-large' || error.reason === 'invalid-input') return { reason: 'invalid-description', policy: 'terminal' };
+        if (DETERMINISTIC_REASONS.has(error.reason)) return { reason: 'invalid-description', policy: DETERMINISTIC_REPEATS };
         return { reason: error.reason === 'unexpected' ? 'unexpected' : 'store', policy: 'transient' };
     }
   }
@@ -859,18 +1001,46 @@ export class PodMirror {
   private async failTask(token: string, kind: WorkKind, reason: FailureReason, signal: AbortSignal, policy: Policy): Promise<void> {
     const record = this.records.get(token);
     if (!record) return;
-    if (signal.aborted) return; // stopped, disconnected or deleted: nothing was learned
+    // Stopped, disconnected or deleted: nothing was learned, so the attempt does not count.
+    if (signal.aborted || (this.o.network && !this.o.network.isOnline()) || !this.o.session.isConnected()) return this.uncount(token, kind);
     if (kind === 'thumb') return; // a thumbnail miss never fails the saved item
-    if (this.o.network && !this.o.network.isOnline()) return; // paused, not failed
-    if (!this.o.session.isConnected()) return;
-    const attempts = record.attempts + 1;
+    // A copy was counted when it began; the other kinds are counted here.
+    const attempts = kind === 'copy' ? record.attempts : record.attempts + 1;
+    const repeats = (record.lastError === reason ? record.repeats ?? 0 : 0) + 1;
     const removing = kind === 'remove';
-    if (policy === 'terminal' || (typeof policy === 'number' && attempts >= policy)) {
-      await this.patch(token, { state: removing ? 'remove-failed' : 'failed', attempts, lastError: reason, nextAttemptAt: undefined });
+    if (policy === 'terminal' || (typeof policy === 'number' && repeats >= policy)) {
+      await this.patch(token, { state: removing ? 'remove-failed' : 'failed', attempts, repeats, lastError: reason, nextAttemptAt: undefined });
       return;
     }
-    const delay = backoffDelay(attempts, this.o.baseDelayMs, this.o.maxDelayMs, this.o.random);
-    await this.patch(token, { attempts, lastError: reason, nextAttemptAt: this.o.now() + delay });
+    await this.patch(token, { attempts, repeats, lastError: reason, nextAttemptAt: this.o.now() + this.retryDelay(attempts, reason) });
+  }
+
+  private async uncount(token: string, kind: WorkKind): Promise<void> {
+    const record = this.records.get(token);
+    if (kind !== 'copy' || !record || record.state !== 'pending') return;
+    await this.patch(token, { attempts: Math.max(0, record.attempts - 1), nextAttemptAt: undefined });
+  }
+
+  /** Backoff, capped at a quarter of an hour; an item that has failed many times waits a day. */
+  private retryDelay(attempts: number, reason?: FailureReason): number {
+    // An outage can be long and is waited out at the usual pace; an item that keeps failing for
+    // some other reason is not worth a download every quarter of an hour.
+    if (attempts > LONG_WAIT_AFTER && (reason === 'store' || reason === 'unexpected' || reason === 'invalid-description')) return LONG_WAIT_MS;
+    return backoffDelay(attempts, this.o.baseDelayMs, this.o.maxDelayMs, this.o.random);
+  }
+
+  private noteByteFailure(signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.byteFailures++;
+    this.changed();
+  }
+
+  private noteByteSuccess(): void {
+    const first = !this.bytesEverOk;
+    this.byteFailures = 0;
+    this.bytesEverOk = true;
+    if (first) void this.o.journal.updateAccountState(this.o.account, { bytesEverOk: true }).catch(() => undefined);
+    this.changed();
   }
 
   // ---- store and session -----------------------------------------------------------------
@@ -904,9 +1074,15 @@ export class PodMirror {
       if (checked?.ok && checked.value === 'private') this.exposureOk = true;
       else if (checked?.ok && checked.value === 'exposed') this.blocked = 'exposed';
       else if (checked?.ok) {
-        // The pod cannot say. Only a container the person confirmed is written to.
-        // The store asks `allowUnknownExposureFor` itself on every write.
-        if (this.target !== null && this.isConfirmed(this.target)) this.exposureOk = true;
+        // The pod cannot say. Only the library container the person confirmed, and what is
+        // beneath it, is written to; the store asks `allowUnknownExposureFor` on every write.
+        const library = this.store.libraryContainer();
+        if (library === null) {
+          // No library yet, so only the storage root could be asked about, and that is never
+          // confirmed. The store creates the library on the first save and then asks about that
+          // URL, which refuses here until the person confirms it.
+          this.exposureOk = true;
+        } else if (this.isConfirmed(library)) this.exposureOk = true;
         else this.blocked = 'exposure-unknown';
       } else if (checked && !checked.ok && checked.error.kind === 'exposed') this.blocked = checked.error.reason === 'library-exposed' ? 'exposed' : 'exposure-unknown';
       else return this.retryPrepareLater(checked && !checked.ok && checked.error.kind === 'offline' ? 'offline' : 'failed');

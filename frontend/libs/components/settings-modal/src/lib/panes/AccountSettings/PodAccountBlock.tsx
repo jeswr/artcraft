@@ -11,13 +11,14 @@ import {
 import { describePause, usePodMirrorSummary, usePodMirrorView } from "@storyteller/pod-mirror-ui";
 import { Button } from "@storyteller/ui-button";
 import { Input } from "@storyteller/ui-input";
+import { PodGoneBlock } from "./PodGoneBlock";
 
 /**
  * What connecting does in this build. Connecting copies new work to the pod; it does not move
  * anything: ArtCraft's hosted library stays the working library.
  */
 const DISCLOSURE =
-  "Connecting signs you in to your Solid pod provider and saves a copy of your new generations, uploads and edits to your pod, with the prompt and settings ArtCraft has for each. ArtCraft's servers still receive what you generate and upload. When you delete an item, ArtCraft removes its pod copy too; a deletion made elsewhere is noticed the next time ArtCraft checks, when it starts and then about once a day. Audio, scene files and files over 50 MB are not copied.";
+  "Connecting signs you in to your Solid pod provider and saves a copy of your new generations, uploads and edits to your pod, with the prompt and settings ArtCraft has for each. ArtCraft's servers still receive what you generate and upload. When you delete an item in ArtCraft, ArtCraft removes its pod copy too. If an item is missing from ArtCraft for any other reason, its copy stays on your pod and this page tells you, so you can decide. Audio, scene files and files over 50 MB are not copied.";
 const RESTART =
   "ArtCraft asks you to confirm the address in a separate dialog, then restarts this window in a restricted pod mode: usage analytics are off and the window can only reach your provider and ArtCraft's own services. Anything unsaved in this window is lost when it restarts.";
 
@@ -327,6 +328,12 @@ const PodMirrorStatus = () => {
           </Button>
         )}
       </div>
+      {summary.mediaHostBlocked && (
+        <p role="status" className="text-sm text-amber-300" data-testid="pod-mirror-media-host">
+          ArtCraft's media host cannot be reached from this app, so nothing can be copied right now. Items stay waiting and are tried again.
+        </p>
+      )}
+      {summary.goneFromArtcraft > 0 && <PodGoneBlock count={summary.goneFromArtcraft} remove={() => view.removeGoneFromPod()} />}
       {confirming ? (
         <div className="flex flex-col gap-2" role="group" aria-label="Confirm forgetting this account">
           <p className="text-xs text-base-fg/70">

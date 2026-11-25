@@ -125,5 +125,6 @@ export function asPodStorePort(store: CreativeAssetStore, storageRoot: string): 
     resumePending: (signal) => store.resumePending(signal),
     checkExposure: (signal) => store.checkExposure(signal),
     exposureTarget: () => store.library ?? storageRoot,
+    libraryContainer: () => store.library,
   };
 }

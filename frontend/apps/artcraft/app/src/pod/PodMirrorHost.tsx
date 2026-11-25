@@ -59,6 +59,7 @@ export function PodMirrorHost({ session, children }: { session: PodSession; chil
         retry: (token) => mirror.retry(token),
         retryAllFailed: () => mirror.retryAllFailed(),
         recheckExposure: () => mirror.recheckExposure(),
+        removeGoneFromPod: () => mirror.removeGoneFromPod(),
         confirmPrivate: () => mirror.confirmPrivate(),
         forgetAccount,
       };
@@ -76,6 +77,8 @@ const UNAVAILABLE_SUMMARY = {
   paused: "stopped",
   exposureTarget: null,
   counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 },
+  goneFromArtcraft: 0,
+  mediaHostBlocked: false,
 } as const;
 
 /** What the person sees when the local record could not be opened: no mirror, and a line saying so. */
@@ -86,6 +89,7 @@ const UNAVAILABLE_VIEW: PodMirrorView = {
   retry: async () => undefined,
   retryAllFailed: async () => 0,
   recheckExposure: NOTHING,
+  removeGoneFromPod: async () => 0,
   confirmPrivate: async () => false,
   forgetAccount: async () => undefined,
   unavailable: true,

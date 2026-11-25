@@ -76,9 +76,9 @@ it("tells the truth about this build: new work is copied to the pod, servers sti
   const text = document.body.textContent ?? "";
   expect(text).toMatch(/saves a copy of your new generations, uploads and edits to your pod/);
   expect(text).toMatch(/ArtCraft's servers still receive what you generate and upload/);
-  expect(text).toMatch(/When you delete an item, ArtCraft removes its pod copy too/);
+  expect(text).toMatch(/When you delete an item in ArtCraft, ArtCraft removes its pod copy too/);
   expect(text).toMatch(/Audio, scene files and files over 50 MB are not copied/);
-  expect(text).toMatch(/a deletion made elsewhere is noticed the next time ArtCraft checks/);
+  expect(text).toMatch(/its copy stays on your pod and this page tells you/);
   expect(text).toMatch(/Anything unsaved in this window is lost/);
   expect(text).not.toMatch(/does not copy any of your work/);
 });
@@ -225,6 +225,7 @@ function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorVi
     recheckExposure: vi.fn(),
     confirmPrivate: vi.fn(async () => true),
     forgetAccount: vi.fn(async () => undefined),
+    removeGoneFromPod: vi.fn(async () => 2),
     ...overrides,
   };
   const fake = fakeSession({ kind: "connected", webId: WEBID });
@@ -238,7 +239,7 @@ function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorVi
   return view;
 }
 
-const SUMMARY: MirrorSummary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 4, pending: 2, failed: 1, skipped: 3, removing: 0 } };
+const SUMMARY: MirrorSummary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 4, pending: 2, failed: 1, skipped: 3, removing: 0 }, goneFromArtcraft: 0, mediaHostBlocked: false };
 const POD_LIBRARY = "https://pod.example/alice/creative-assets/";
 
 it("shows how the copy is going, in words", () => {
@@ -303,4 +304,30 @@ it("forgets the account only after a confirmation, and cancel does nothing", asy
   await user.click(screen.getByRole("button", { name: "Forget this account" }));
   await user.click(within(screen.getByRole("group", { name: "Confirm forgetting this account" })).getByRole("button", { name: "Forget this account" }));
   expect(forget).toHaveBeenCalledTimes(1);
+});
+it("says items gone from ArtCraft are still in the pod, and removes them only after a confirmed choice", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror({ ...SUMMARY, goneFromArtcraft: 2 });
+  expect(screen.getByTestId("pod-gone").textContent).toMatch(/2 items were removed from ArtCraft but are still in your pod/);
+  const trigger = screen.getByRole("button", { name: "Remove these from my pod" });
+  await user.click(trigger);
+  expect(view.removeGoneFromPod).not.toHaveBeenCalled();
+  expect(document.activeElement).toBe(screen.getByRole("alertdialog"));
+  await user.click(screen.getByRole("button", { name: "Keep them" }));
+  expect(view.removeGoneFromPod).not.toHaveBeenCalled();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove these from my pod" }));
+  await user.click(screen.getByRole("button", { name: "Remove these from my pod" }));
+  await user.click(screen.getByRole("button", { name: "Remove from my pod" }));
+  expect(view.removeGoneFromPod).toHaveBeenCalledTimes(1);
+});
+
+it("shows nothing about gone items when there are none", () => {
+  renderWithMirror(SUMMARY);
+  expect(screen.queryByTestId("pod-gone")).toBeNull();
+  expect(screen.queryByTestId("pod-mirror-media-host")).toBeNull();
+});
+
+it("shows one banner when ArtCraft's media host cannot be reached", () => {
+  renderWithMirror({ ...SUMMARY, mediaHostBlocked: true });
+  expect(screen.getAllByTestId("pod-mirror-media-host")).toHaveLength(1);
 });

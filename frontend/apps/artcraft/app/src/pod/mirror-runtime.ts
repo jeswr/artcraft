@@ -15,6 +15,8 @@ export interface MirrorDeps {
   username: string;
   /** The hosted username signed in right now; deletions are only checked while it matches. */
   currentUsername: () => string | null;
+  /** The hosted API origin in use right now (it can be changed while the app runs). */
+  currentHost?: () => string;
 }
 
 export interface RunningMirror {
@@ -28,12 +30,12 @@ export interface RunningMirror {
  * the app's start-up path, so a window that never connects a pod never loads any of it. Throws
  * when the durable journal cannot be opened: a copy that cannot be remembered is not started.
  */
-export async function startPodMirror({ session, webId, username, currentUsername }: MirrorDeps): Promise<RunningMirror> {
+export async function startPodMirror({ session, webId, username, currentUsername, currentHost }: MirrorDeps): Promise<RunningMirror> {
   const journal = await openMirrorJournal();
   const mirror = new PodMirror({
     account: { webId, username },
     journal,
-    hosted: createHostedClient(username, currentUsername),
+    hosted: createHostedClient(username, currentUsername, currentHost),
     openStore: createStoreOpener({ podFetch: () => session.getFetch(), webId, journal }),
     fetchPublicBytes: createPublicBytesFetcher(),
     session: sessionPortFor(session, webId),
