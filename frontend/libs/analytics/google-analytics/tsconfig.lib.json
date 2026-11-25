@@ -14,6 +14,10 @@
       "vite/client"
     ]
   },
+  "exclude": [
+    "src/**/*.spec.ts",
+    "src/**/*.test.ts"
+  ],
   "include": [
     "src/**/*.ts"
   ],
