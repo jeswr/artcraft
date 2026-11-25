@@ -78,7 +78,13 @@ const StatusText = ({
   finishing: boolean;
 }) => {
   if (finishing) {
-    return <>Disconnecting did not finish. Sign-in data may still be stored on this computer.</>;
+    return (
+      <>
+        Disconnecting did not finish. Sign-in data may still be stored on this computer, so ArtCraft keeps this window
+        restricted (no analytics, no third-party scripts) until it is removed. Press Finish disconnecting to try again;
+        if it keeps failing, quit and reopen ArtCraft and try once more.
+      </>
+    );
   }
   switch (state.kind) {
     case "unsupported":
