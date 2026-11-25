@@ -11,6 +11,21 @@ async function openItem(name: string) {
   return { tile, dialog: await screen.findByRole("dialog", { name }) };
 }
 
+describe("the pod viewer: a refreshed description", () => {
+  it("reads the original exactly once when source.get answers with a fresh object for the same file", async () => {
+    // get answers while the original is still in flight, then again after it is shown.
+    const pod = testPod([page([asset(1)])], { files: pngFiles(1), get: () => asset(1, { description: "refreshed" }) });
+    mount(pod);
+    const { dialog } = await openItem("Item 1");
+    await waitFor(() => expect(within(dialog).getByText("refreshed")).toBeTruthy());
+    await waitFor(() => expect(dialog.querySelector("img")?.getAttribute("src")).toMatch(/^blob:/));
+    await act(async () => undefined);
+    expect(pod.reads.filter((url) => url === contentUrl(1))).toHaveLength(1);
+    expect(pod.viewerCounts.acquired).toBe(1);
+    expect(pod.viewerCounts.released).toBe(0);
+  });
+});
+
 describe("the pod viewer", () => {
   it("opens an item over the gallery with every hosted-only action off but reachable, each with the reason", async () => {
     const pod = testPod([page([asset(1, { description: "see https://evil.example/x <b>bold</b>", prompt: "<script>alert(1)</script>" })])], { files: pngFiles(1) });
@@ -51,13 +66,17 @@ describe("the pod viewer", () => {
     // Tab from the last control wraps to the first, and Shift+Tab from the first wraps to the last.
     const stops = Array.from(dialog.querySelectorAll<HTMLElement>("button"));
     stops[stops.length - 1]!.focus();
-    fireEvent.keyDown(stops[stops.length - 1]!, { key: "Tab" });
+    expect(fireEvent.keyDown(document.activeElement!, { key: "Tab" })).toBe(false);
     expect(document.activeElement).toBe(stops[0]);
-    fireEvent.keyDown(stops[0]!, { key: "Tab", shiftKey: true });
+    expect(fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true })).toBe(false);
     expect(document.activeElement).toBe(stops[stops.length - 1]);
-    // Focus that has strayed outside comes back in.
+    // Focus that has left the viewer (on the page body, or on a tile behind it) is brought back in.
     tile.focus();
-    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(fireEvent.keyDown(tile, { key: "Tab" })).toBe(false);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(false);
     expect(dialog.contains(document.activeElement)).toBe(true);
 
     // The gallery's own Escape handling (a capture listener on the document) never sees it.
@@ -109,6 +128,7 @@ describe("the pod viewer", () => {
     const tileImage = container.querySelector("img")!;
     expect(tileImage.getAttribute("draggable")).toBe("false");
     expect(fireEvent.dragStart(tileImage)).toBe(false);
+    expect(fireEvent.contextMenu(tileImage)).toBe(false);
     const { dialog } = await openItem("Item 1");
     const image = await waitFor(() => {
       const node = dialog.querySelector("img");

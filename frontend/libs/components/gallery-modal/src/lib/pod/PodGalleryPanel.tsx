@@ -2,7 +2,7 @@ import { Button } from "@storyteller/ui-button";
 import { LoadingSpinner } from "@storyteller/ui-loading-spinner";
 import { SliderV2 } from "@storyteller/ui-sliderv2";
 import { Tooltip } from "@storyteller/ui-tooltip";
-import { podAssetKey, usePodAssets, type PodAsset, type PodGalleryAccess } from "@storyteller/pod-gallery";
+import { podAssetKey, usePodAssets, type PodAsset, type PodGalleryAccess, type PodLibrary } from "@storyteller/pod-gallery";
 import { RefreshCwIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PodPanelFrame, PodSkeleton } from "./PodPanelFrame";
@@ -76,6 +76,26 @@ export default function PodGalleryPanel({ access, sourceSwitch, onClose, sliderV
   }, [ready, layout.total, view.height, loadMore]);
 
   const closeViewer = useCallback(() => setOpen(null), []);
+  // A reload starts a new list: the item that was open belongs to the old one.
+  useEffect(() => {
+    if (state.status !== "ready") setOpen(null);
+  }, [state.status]);
+  // Closing the gallery frees every picture: the library outlives this panel, so releasing the holds
+  // would leave the pictures cached as live blob URLs. Purging revokes them; resuming lets the next
+  // open load again.
+  const libraryRef = useRef<PodLibrary | null>(null);
+  libraryRef.current = state.status === "ready" ? state.library : null;
+  useEffect(
+    () => () => {
+      const library = libraryRef.current;
+      if (!library) return;
+      for (const loader of [library.tileLoader, library.viewerLoader]) {
+        loader.purge();
+        loader.resume();
+      }
+    },
+    [],
+  );
   const announcement =
     state.status === "loading"
       ? "Loading your pod library"
@@ -157,6 +177,7 @@ export default function PodGalleryPanel({ access, sourceSwitch, onClose, sliderV
                     <PodTile
                       key={podAssetKey(asset.ref)}
                       loader={ready.library.tileLoader}
+                      sessionEnded={ready.library.sessionEnded?.bind(ready.library)}
                       asset={asset}
                       imageFit={imageFit}
                       onOpen={(item, opener) => setOpen({ asset: item, opener })}
@@ -174,7 +195,7 @@ export default function PodGalleryPanel({ access, sourceSwitch, onClose, sliderV
               )}
               {ready.loadMoreFailed && (
                 <div className="flex items-center justify-center gap-3 py-4 text-xs text-base-fg/70" role="alert">
-                  <span>Couldn't load more.</span>
+                  <span>{ready.loadMoreError === "sign-in" ? "Sign in to your pod again (Settings, under Solid pod), then retry." : ready.loadMoreError === "forbidden" ? "Your pod refused access." : "Couldn't load more."}</span>
                   <button type="button" className="text-blue-400 underline hover:text-blue-300" onClick={() => loadMore({ force: true })}>
                     Retry
                   </button>

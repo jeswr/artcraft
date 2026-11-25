@@ -4,13 +4,20 @@ import { usePodMedia } from "@storyteller/pod-gallery/media";
 import { BoxIcon, ImageIcon, ImageOffIcon, RefreshCwIcon, VideoIcon } from "lucide-react";
 import { type CSSProperties, useId } from "react";
 import { twMerge } from "tailwind-merge";
-import { describeMediaError, isRetryable } from "./podMessages";
+import { describeMediaError, isFileRefusal, isRetryable, mayBeSessionEnd, SESSION_ENDED_MEDIA } from "./podMessages";
 
 /** The text of an item's name, or a fixed word for its kind. Pod text is shown as text only. */
 export function assetLabel(asset: PodAsset): string {
   if (asset.name) return asset.name;
   return asset.kind === "video" ? "Video" : asset.kind === "model3d" ? "3D model" : "Image";
 }
+
+/** Props that keep a picture from being dragged out or saved from its menu. */
+export const noDrag = {
+  draggable: false,
+  onDragStart: (event: { preventDefault(): void }) => event.preventDefault(),
+  onContextMenu: (event: { preventDefault(): void }) => event.preventDefault(),
+} as const;
 
 export const KIND_ICON = { image: ImageIcon, video: VideoIcon, model3d: BoxIcon } as const;
 
@@ -23,12 +30,15 @@ export const KIND_ICON = { image: ImageIcon, video: VideoIcon, model3d: BoxIcon 
  */
 export function PodTile({
   loader,
+  sessionEnded,
   asset,
   imageFit = "contain",
   onOpen,
   style,
 }: {
   loader: MediaLoader;
+  /** Asked when a read failed: true when the session has ended, so the tile says to sign in. */
+  sessionEnded?: () => boolean;
   asset: PodAsset;
   imageFit?: "cover" | "contain";
   onOpen: (asset: PodAsset, opener: HTMLElement) => void;
@@ -38,9 +48,14 @@ export function PodTile({
   const KindIcon = KIND_ICON[asset.kind];
   const label = assetLabel(asset);
   const statusId = useId();
-  const failed = media.status === "error" || media.status === "over-budget";
-  const code = media.status === "over-budget" ? "over-budget" : media.error?.code;
-  const problem = failed ? describeMediaError(code ?? "failed") : null;
+  const rawCode = media.status === "over-budget" ? "over-budget" : media.error?.code;
+  // A file the loader refuses (too many pixels, too large, not an image) is a generic tile with the
+  // item's name, like an item with no thumbnail: it is not an error the person can act on.
+  const refused = media.status === "error" && isFileRefusal(rawCode);
+  const failed = (media.status === "error" && !refused) || media.status === "over-budget";
+  const ended = failed && mayBeSessionEnd(rawCode) && sessionEnded?.() === true;
+  const code = rawCode;
+  const problem = failed ? (ended ? SESSION_ENDED_MEDIA : describeMediaError(code ?? "failed")) : null;
   const waiting = media.status === "loading";
 
   return (
@@ -53,7 +68,7 @@ export function PodTile({
         className="relative h-full w-full overflow-hidden border-2 border-transparent bg-ui-controls/30 hover:border-primary focus-visible:border-primary focus-visible:outline-none"
       >
         {media.status === "ready" && media.url ? (
-          <img src={media.url} alt="" draggable={false} onDragStart={(event) => event.preventDefault()} className={twMerge("h-full w-full bg-black/30", imageFit === "contain" ? "object-contain" : "object-cover")} />
+          <img src={media.url} alt="" {...noDrag} className={twMerge("h-full w-full bg-black/30", imageFit === "contain" ? "object-contain" : "object-cover")} />
         ) : failed ? (
           <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-black/30 px-2 text-center text-white/70" data-testid="pod-failed-tile">
             <ImageOffIcon className="text-xl" aria-hidden="true" />

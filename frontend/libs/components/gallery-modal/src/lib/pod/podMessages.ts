@@ -15,7 +15,7 @@ export function describeMediaError(code: MediaErrorCode): string {
     case "unsupported-type":
       return "This file type can't be previewed";
     case "offline":
-      return "Offline";
+      return "Can't reach your pod";
     case "not-found":
       return "File not found in your pod";
     case "forbidden":
@@ -28,15 +28,28 @@ export function describeMediaError(code: MediaErrorCode): string {
   }
 }
 
+/** What a tile or the viewer says when a read failed and the session has ended or been refused. */
+export const SESSION_ENDED_MEDIA = "Sign in to your pod again";
+
+/** Reads whose failure is explained by an ended session: the loaders report it as offline or refused. */
+export function mayBeSessionEnd(code: MediaErrorCode | undefined): boolean {
+  return code === "offline" || code === "forbidden" || code === "failed";
+}
+
+/** The loader refused the file itself (too many pixels, too big, not an image): the tile shows its name instead. */
+export function isFileRefusal(code: MediaErrorCode | undefined): boolean {
+  return code === "too-large" || code === "unsupported-type" || code === "out-of-scope";
+}
+
 /** Failures a second attempt can cure: the tile offers "Try again" for these. */
 export function isRetryable(code: MediaErrorCode | undefined): boolean {
-  return code === "over-budget" || code === "offline" || code === "failed";
+  return code === "over-budget" || code === "offline" || code === "failed" || code === "forbidden";
 }
 
 export function describeListError(kind: PodAssetsErrorKind): { title: string; detail: string } {
   switch (kind) {
     case "offline":
-      return { title: "You're offline", detail: "Your pod can't be reached. This list reloads when you're back online." };
+      return { title: "Your pod can't be reached", detail: "Check your connection. This list reloads when you're back online, or when you press Retry." };
     case "sign-in":
       return { title: "Sign in to your pod again", detail: "Your pod session has ended. Open Settings, under Solid pod, to sign in again; this list reloads when you press Retry." };
     case "forbidden":

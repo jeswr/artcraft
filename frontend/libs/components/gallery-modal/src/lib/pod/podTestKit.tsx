@@ -64,6 +64,8 @@ export interface TestPodOptions {
   tile?: Partial<Parameters<typeof createMediaLoader>[0]>;
   viewer?: Partial<Parameters<typeof createMediaLoader>[0]>;
   getSessionKey?: () => string;
+  /** What `source.get` answers (default: not found). */
+  get?: (ref: PodAsset['ref']) => PodAsset | Promise<PodAsset>;
 }
 
 /** Counts, per loader, the holds taken and given back, so a test can say "everything was released". */
@@ -118,17 +120,18 @@ export function testPod(pages: PodSourceResult<PodListPage>[], options: TestPodO
   let created = 0;
   const objectUrls = { createObjectURL: vi.fn(() => `blob:test/${++created}`), revokeObjectURL: vi.fn() };
   const common = { storage: storage as never, scope: (url: string) => url.startsWith(POD), objectUrls, ...(options.getSessionKey ? { getSessionKey: options.getSessionKey } : {}) };
-  const tileLoader = createMediaLoader({ ...common, maxBytes: 2 * 1024 * 1024, maxTotalBytes: 64 * 1024 * 1024, maxEntries: 320, assumedBytes: 128 * 1024, ...options.tile });
+  const tileLoader = createMediaLoader({ ...common, maxBytes: 512 * 1024, maxTotalBytes: 64 * 1024 * 1024, maxEntries: 640, assumedBytes: 64 * 1024, maxPixels: 1_100_000, ...options.tile });
   const viewerLoader = createMediaLoader({ ...common, maxBytes: 25 * 1024 * 1024, maxTotalBytes: 64 * 1024 * 1024, maxEntries: 4, maxConcurrent: 2, ...options.viewer });
   const tileCounts = counted(tileLoader);
   const viewerCounts = counted(viewerLoader);
   let index = 0;
   const source = {
     list: vi.fn(async () => pages[Math.min(index++, pages.length - 1)]!),
-    get: vi.fn(async () => ({ ok: false as const, error: "not-found" as const })),
+    get: vi.fn(async (ref: PodAsset["ref"]): Promise<PodSourceResult<PodAsset>> => (options.get ? { ok: true, value: await options.get(ref) } : { ok: false, error: "not-found" })),
   };
-  const library: PodLibrary = { source, tileLoader, viewerLoader, invalidateListing: vi.fn() };
-  return { library, source, storage, reads, objectUrls, tileLoader, viewerLoader, tileCounts, viewerCounts, files };
+  const session = { ended: false };
+  const library: PodLibrary = { source, tileLoader, viewerLoader, invalidateListing: vi.fn(), sessionEnded: () => session.ended };
+  return { session, library, source, storage, reads, objectUrls, tileLoader, viewerLoader, tileCounts, viewerCounts, files };
 }
 
 export function page(items: PodAsset[], next: string | null = null, unreadable = 0): PodSourceResult<PodListPage> {

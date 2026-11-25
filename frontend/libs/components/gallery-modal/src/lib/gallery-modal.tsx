@@ -647,6 +647,12 @@ export const GalleryModal = React.memo(
       setSwitchFocus(true);
       setSource(next);
     }, []);
+    // The focus request belongs to the choice that made it: closing the gallery ends it, so reopening
+    // never takes focus.
+    const galleryVisible = galleryModalVisibleViewMode.value;
+    useEffect(() => {
+      if (!galleryVisible) setSwitchFocus(false);
+    }, [galleryVisible]);
     const minColumns = 3;
     const maxColumns = 12;
     // Default gridColumns to 5 on desktop; narrow screens are locked to 2 columns

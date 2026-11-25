@@ -1,17 +1,32 @@
 import type { PodAsset, PodLibrary } from "@storyteller/pod-gallery";
 import { usePodMedia, usePodOriginal } from "@storyteller/pod-gallery/media";
 import { BoxIcon, ImageOffIcon, XIcon } from "lucide-react";
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { assetLabel } from "./PodTile";
-import { dayHeading, describeMediaError, isRetryable, VIEW_ONLY_NOTE } from "./podMessages";
+import { useEffect, useRef, useState } from "react";
+import { assetLabel, noDrag } from "./PodTile";
+import { dayHeading, describeMediaError, isRetryable, mayBeSessionEnd, SESSION_ENDED_MEDIA, VIEW_ONLY_NOTE } from "./podMessages";
+
+/** Tab stays inside the viewer: from its last control to its first, back, and in from outside. */
+function keepFocusInside(event: globalThis.KeyboardEvent, root: HTMLElement | null) {
+  if (!root) return;
+  const stops = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((node) => !node.hasAttribute("disabled"));
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  if (!first || !last) return;
+  const active = document.activeElement;
+  const inside = active !== null && root.contains(active);
+  if (event.shiftKey && (!inside || active === first)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (!inside || active === last)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
 
 /** The actions the ArtCraft library offers that a pod item cannot have yet, each turned off with the reason. */
 const DISABLED_ACTIONS = ["Use in a generation", "Add to a scene or board", "Delete"] as const;
 
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-
-/** Media that must not be draggable out of the viewer, saved from its menu, cast or popped out. */
-const noDrag = { draggable: false, onDragStart: (event: { preventDefault(): void }) => event.preventDefault(), onContextMenu: (event: { preventDefault(): void }) => event.preventDefault() } as const;
 
 /**
  * Shows one pod item in full, over the gallery. The file is read through the viewer loader and
@@ -25,6 +40,7 @@ const noDrag = { draggable: false, onDragStart: (event: { preventDefault(): void
 export function PodViewer({ library, asset, opener, onClose }: { library: PodLibrary; asset: PodAsset; opener: HTMLElement | null; onClose: () => void }) {
   const [detail, setDetail] = useState(asset);
   const root = useRef<HTMLDivElement>(null);
+  const rootRef = root;
   const closeRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -43,6 +59,12 @@ export function PodViewer({ library, asset, opener, onClose }: { library: PodLib
     closeRef.current?.focus();
     // Window, capture phase: before the dialog library's Escape handling, so the gallery stays open.
     const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Tab") {
+        // At the window, so it holds wherever focus is (on the body, or on the dialog library's own
+        // content element behind this view), not only while it is inside the viewer.
+        keepFocusInside(event, rootRef.current);
+        return;
+      }
       if (event.key !== "Escape" && event.key !== "Esc") return;
       event.stopImmediatePropagation();
       event.preventDefault();
@@ -55,22 +77,6 @@ export function PodViewer({ library, asset, opener, onClose }: { library: PodLib
     };
   }, [opener]);
 
-  const trap = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "Tab" || !root.current) return;
-    const stops = Array.from(root.current.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((node) => !node.hasAttribute("disabled"));
-    const first = stops[0];
-    const last = stops[stops.length - 1];
-    if (!first || !last) return;
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || !root.current.contains(active))) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && (active === last || !root.current.contains(active))) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
   const label = assetLabel(detail);
   return (
     <div
@@ -79,7 +85,6 @@ export function PodViewer({ library, asset, opener, onClose }: { library: PodLib
       aria-modal="true"
       aria-label={label}
       className="absolute inset-0 z-[60] flex flex-col bg-ui-background/95 text-base-fg backdrop-blur-sm sm:flex-row"
-      onKeyDown={trap}
     >
       <div className="flex min-h-0 flex-1 items-center justify-center p-4">
         <PodFullMedia library={library} asset={detail} />
@@ -137,7 +142,7 @@ function ModelPreview({ library, asset }: { library: PodLibrary; asset: PodAsset
   }
   if (media.status === "loading") return <div className="h-48 w-48 animate-pulse bg-white/[0.06]" data-testid="pod-viewer-loading" />;
   if (media.status === "error" || media.status === "over-budget") {
-    return <Problem code={media.status === "over-budget" ? "over-budget" : media.error?.code} onRetry={media.retry} />;
+    return <Problem code={media.status === "over-budget" ? "over-budget" : media.error?.code} onRetry={media.retry} ended={mayBeSessionEnd(media.error?.code) && library.sessionEnded?.() === true} />;
   }
   return <Problem text="3D preview isn't available for pod items yet" icon="model" />;
 }
@@ -146,7 +151,7 @@ function OriginalMedia({ library, asset }: { library: PodLibrary; asset: PodAsse
   const original = usePodOriginal(library.viewerLoader, asset.content);
   const label = assetLabel(asset);
   if (original.status === "loading") return <div className="h-48 w-48 animate-pulse bg-white/[0.06]" data-testid="pod-viewer-loading" />;
-  if (original.status === "error" || !original.url) return <Problem code={original.error?.code} onRetry={original.retry} />;
+  if (original.status === "error" || !original.url) return <Problem code={original.error?.code} onRetry={original.retry} ended={mayBeSessionEnd(original.error?.code) && library.sessionEnded?.() === true} />;
   const type = original.contentType ?? "";
   if (type.startsWith("image/")) return <img src={original.url} alt={label} {...noDrag} className="max-h-full max-w-full object-contain" />;
   if (type.startsWith("video/")) {
@@ -161,9 +166,9 @@ function OriginalMedia({ library, asset }: { library: PodLibrary; asset: PodAsse
   return <Problem text="This file type can't be previewed" />;
 }
 
-function Problem({ code, text, icon = "error", onRetry }: { code?: Parameters<typeof describeMediaError>[0] | undefined; text?: string; icon?: "error" | "model"; onRetry?: () => void }) {
+function Problem({ code, text, icon = "error", onRetry, ended }: { code?: Parameters<typeof describeMediaError>[0] | undefined; text?: string; icon?: "error" | "model"; onRetry?: () => void; ended?: boolean }) {
   const Icon = icon === "error" ? ImageOffIcon : BoxIcon;
-  const message = text ?? describeMediaError(code ?? "failed");
+  const message = ended ? SESSION_ENDED_MEDIA : (text ?? describeMediaError(code ?? "failed"));
   return (
     <div className="flex h-48 w-48 flex-col items-center justify-center gap-2 bg-black/30 px-3 text-center text-sm text-white/80" data-testid="pod-viewer-placeholder" role="status">
       <Icon className="text-2xl" aria-hidden="true" />

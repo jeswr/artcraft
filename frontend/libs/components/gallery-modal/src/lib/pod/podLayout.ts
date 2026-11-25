@@ -59,18 +59,24 @@ export function layoutGrid(groups: readonly DayGroup[], columns: number, width: 
   return { rows, total: top + GRID_PADDING, tileSize, gap };
 }
 
-/** The rows to mount: those on or one row-height near the view, never more than `maxTiles` tiles. */
+/**
+ * The rows to mount: those on or one tile-height near the view, so the view is always full. The tile
+ * count follows from the window (rows in view times columns), and the tile loader is sized for
+ * `MAX_MOUNTED_TILES`. Only rows past the view are dropped when that many are mounted already: a row
+ * that shows in the view is never left blank.
+ */
 export function visibleRows(layout: Layout, scrollTop: number, viewport: number, maxTiles = MAX_MOUNTED_TILES): GridRow[] {
   const margin = layout.tileSize;
   const from = scrollTop - margin;
   const to = scrollTop + viewport + margin;
+  const viewEnd = scrollTop + viewport;
   const out: GridRow[] = [];
   let tiles = 0;
   for (const row of layout.rows) {
     if (row.top + row.height < from) continue;
     if (row.top > to) break;
     if (row.kind === "tiles") {
-      if (tiles + row.assets.length > maxTiles) break;
+      if (row.top > viewEnd && tiles + row.assets.length > maxTiles) break;
       tiles += row.assets.length;
     }
     out.push(row);

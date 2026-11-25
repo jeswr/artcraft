@@ -63,7 +63,7 @@ describe("the My pod panel: the grid", () => {
   it("names an offline pod and retries on request", async () => {
     const pod = testPod([{ ok: false, error: "offline" }, page([asset(1)])], { files: pngFiles(1) });
     mount(pod);
-    await screen.findAllByText("You're offline");
+    await screen.findAllByText("Your pod can't be reached");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await screen.findByRole("button", { name: "Item 1" });
     expect(pod.source.list).toHaveBeenCalledTimes(2);
@@ -132,17 +132,20 @@ describe("the My pod panel: the grid", () => {
 });
 
 describe("the My pod panel: tiles that fail", () => {
-  it("writes a failure on the tile, exposes it to assistive technology, and offers no retry for a file that is too large", async () => {
-    const files = pngFiles(2);
-    files.set(thumbUrl(2), { bytes: png(2), declared: 5 * 1024 * 1024 });
-    const pod = testPod([page([asset(1), asset(2)])], { files });
+  it("shows a generic tile with the name for a thumbnail the loader refuses: too many pixels, or too large", async () => {
+    const files = pngFiles(3);
+    // 2000 x 2000 is 4 MP: far more than a tile can use, and about 16 MB decoded.
+    files.set(thumbUrl(2), { bytes: png(2, 2000, 2000) });
+    files.set(thumbUrl(3), { bytes: png(3), declared: 5 * 1024 * 1024 });
+    const pod = testPod([page([asset(1), asset(2), asset(3)])], { files });
     const { container } = mount(pod);
-    await waitFor(() => expect(screen.getByTestId("pod-failed-tile").textContent).toBe("Too large to preview"));
+    await waitFor(() => expect(screen.getAllByTestId("pod-generic-tile")).toHaveLength(2));
     expect(container.querySelectorAll("img")).toHaveLength(1);
-    const button = screen.getByRole("button", { name: "Item 2" });
-    expect(screen.getByTestId("pod-tile-status").textContent).toBe("Too large to preview");
-    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe("Too large to preview");
+    expect(screen.getAllByTestId("pod-generic-tile").map((tile) => tile.textContent)).toEqual(["Item 2", "Item 3"]);
+    expect(screen.queryByTestId("pod-failed-tile")).toBeNull();
     expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+    // The refused picture was never given a blob URL.
+    expect(pod.objectUrls.createObjectURL).toHaveBeenCalledTimes(1);
   });
 
   it("offers Try again for a pod that could not be reached, and loads the picture when it comes back", async () => {
@@ -152,7 +155,7 @@ describe("the My pod panel: tiles that fail", () => {
       throw Object.assign(new Error("network"), { code: "network" });
     });
     const { container } = mount(pod);
-    await waitFor(() => expect(screen.getByTestId("pod-failed-tile").textContent).toBe("Offline"));
+    await waitFor(() => expect(screen.getByTestId("pod-failed-tile").textContent).toBe("Can't reach your pod"));
     pod.storage.read.mockImplementation(working);
     fireEvent.click(screen.getByRole("button", { name: "Try again: Item 1" }));
     await waitFor(() => expect(container.querySelectorAll("img")).toHaveLength(1));
@@ -187,6 +190,97 @@ describe("the My pod panel: tiles that fail", () => {
     await waitFor(() => expect(pod.tileCounts.released).toBeGreaterThan(0));
     expect(pod.tileCounts.acquired).toBeGreaterThan(first);
     expect(screen.queryByRole("button", { name: "Item 1" })).toBeNull();
+  });
+});
+
+describe("an ended session is 'sign in again' on every path", () => {
+  const SIGN_IN = "Sign in to your pod again";
+  const network = () => {
+    throw Object.assign(new Error("network"), { code: "network" });
+  };
+
+  it("while paging: a failed 'load more' says to sign in, not 'couldn't load more'", async () => {
+    const first = Array.from({ length: 40 }, (_, index) => asset(index + 1));
+    const pod = testPod([page(first, "c2"), { ok: false, error: "sign-in" }], { files: pngFiles(40, false) });
+    const { container } = mount(pod);
+    await screen.findByRole("button", { name: "Item 1" });
+    const scroller = container.querySelector<HTMLElement>(".overflow-y-auto")!;
+    Object.defineProperty(scroller, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(scroller, "clientHeight", { value: 700, configurable: true });
+    Object.defineProperty(scroller, "scrollTop", { value: 1250, configurable: true });
+    act(() => {
+      fireEvent.scroll(scroller);
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(SIGN_IN);
+    expect(alert.textContent).not.toMatch(/Couldn't load more|offline/i);
+  });
+
+  it("on a tile: a read that fails once the session has ended is not 'Can't reach your pod' or 'refused'", async () => {
+    const pod = testPod([page([asset(1), asset(2)])], { files: pngFiles(2) });
+    pod.session.ended = true;
+    pod.storage.read.mockImplementation(async () => network());
+    mount(pod);
+    await waitFor(() => expect(screen.getAllByTestId("pod-tile-status")).toHaveLength(2));
+    expect(screen.getAllByTestId("pod-tile-status").map((node) => node.textContent)).toEqual([SIGN_IN, SIGN_IN]);
+    expect(screen.queryByText(/Can't reach|refused/)).toBeNull();
+  });
+
+  it("on a tile: the loader's 'refused' (a 401 answer) is also the sign-in sentence while the session has ended", async () => {
+    const pod = testPod([page([asset(1)])], { files: pngFiles(1) });
+    pod.session.ended = true;
+    pod.storage.read.mockImplementation(async () => {
+      throw Object.assign(new Error("401"), { code: "unauthorized", status: 401 });
+    });
+    mount(pod);
+    await waitFor(() => expect(screen.getByTestId("pod-tile-status")).toBeTruthy());
+    expect(screen.getByTestId("pod-tile-status").textContent).toBe(SIGN_IN);
+  });
+
+  it("in the viewer: the original's failure says to sign in", async () => {
+    const pod = testPod([page([asset(1)])], { files: pngFiles(1) });
+    mount(pod);
+    const tile = await screen.findByRole("button", { name: "Item 1" });
+    await waitFor(() => expect(pod.tileCounts.acquired).toBe(1));
+    pod.session.ended = true;
+    pod.storage.read.mockImplementation(async () => network());
+    fireEvent.click(tile);
+    const placeholder = await screen.findByTestId("pod-viewer-placeholder");
+    await waitFor(() => expect(placeholder.textContent).toContain(SIGN_IN));
+    expect(placeholder.textContent).not.toMatch(/reach|refused/);
+  });
+
+  it("without an ended session the same failures keep their own words", async () => {
+    const pod = testPod([page([asset(1)])], { files: pngFiles(1) });
+    pod.storage.read.mockImplementation(async () => network());
+    mount(pod);
+    await waitFor(() => expect(screen.getByTestId("pod-tile-status").textContent).toBe("Can't reach your pod"));
+  });
+});
+
+describe("closing the gallery and refreshing", () => {
+  it("revokes every blob URL when the panel closes (tiles and the open original), and the loaders load again after", async () => {
+    const pod = testPod([page([asset(1), asset(2)])], { files: pngFiles(2) });
+    const { container, unmount } = mount(pod);
+    await waitFor(() => expect(container.querySelectorAll("img")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Item 1" }));
+    await waitFor(() => expect(pod.viewerCounts.acquired).toBe(1));
+    unmount();
+    expect(pod.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(pod.objectUrls.createObjectURL.mock.calls.length);
+    expect(pod.tileLoader.stats().entries).toBe(0);
+    expect(pod.viewerLoader.stats().entries).toBe(0);
+    // Purged and resumed: a later open reads again.
+    const again = await pod.tileLoader.acquire(thumbUrl(1));
+    expect(again.ok).toBe(true);
+  });
+
+  it("closes the viewer when the list is refreshed", async () => {
+    const pod = testPod([page([asset(1)])], { files: pngFiles(1) });
+    mount(pod);
+    fireEvent.click(await screen.findByRole("button", { name: "Item 1" }));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh list" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });
 

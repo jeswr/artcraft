@@ -160,8 +160,10 @@ describe("what the gallery lets go of", () => {
     // Neither the panel nor the hosted library is on screen at any point after closing.
     expect(screen.queryByRole("button", { name: "Item 1" })).toBeNull();
     expect(screen.queryByText("All Assets", { selector: "button" })).toBeNull();
-    expect(pod.tileCounts.released).toBe(2);
-    expect(pod.viewerCounts.released).toBe(1);
+    // Closing frees the pictures, not just the holds: every blob URL made is revoked.
+    expect(pod.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(pod.objectUrls.createObjectURL.mock.calls.length);
+    expect(pod.tileLoader.stats().entries).toBe(0);
+    expect(pod.viewerLoader.stats().entries).toBe(0);
   });
 
   it("releases everything when the pod is disconnected, and returns to the ArtCraft library", async () => {
@@ -178,7 +180,7 @@ describe("what the gallery lets go of", () => {
         <GalleryModal mode="view" />
       </PodGalleryProvider>,
     );
-    expect(pod.tileCounts.released).toBe(2);
+    expect(pod.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("My pod")).toBeNull();
     expect(screen.getByText("All Assets", { selector: "button" })).toBeTruthy();
   });
