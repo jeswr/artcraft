@@ -6,6 +6,24 @@ import { FetchProxy as fetch } from "@storyteller/tauri-utils";
 
 const SESSION_STORAGE_KEY = "artcraft_signed_session";
 
+/** The window event that says the hosted library gained an item that no other event announces. */
+export const HOSTED_LIBRARY_CHANGED_EVENT = "hosted-library-changed";
+
+/**
+ * Called when a media upload has succeeded, so anything that mirrors the library (a connected
+ * pod) can look for the new item without waiting for its next scheduled check. It carries no
+ * data; listeners ask the library what changed.
+ */
+export function notifyHostedLibraryChanged(): void {
+  try {
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(HOSTED_LIBRARY_CHANGED_EVENT));
+  } catch {
+    // a listener's failure is never an upload's failure
+  }
+}
+
+const isMediaUpload = (endpoint: string) => endpoint.includes("/v1/media_files/upload/");
+
 /** Store a signed session JWT for use as a header fallback (mobile browsers block 3rd-party cookies). */
 export function storeSignedSession(signedSession: string) {
   try {
@@ -166,6 +184,7 @@ export class ApiManager {
       credentials: "include",
       body: body,
     });
+    if (response.ok && isMediaUpload(endpoint)) notifyHostedLibraryChanged();
     return response.json();
   }
 

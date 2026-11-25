@@ -1,3 +1,4 @@
+import { HOSTED_LIBRARY_CHANGED_EVENT } from "@storyteller/api";
 import type { MirrorEventSource, MirrorSourceEvent } from "@storyteller/pod-mirror";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -14,12 +15,18 @@ const CHANGE_EVENTS = [
   "canvas_bg_removed_event",
 ] as const;
 
+/** The window event the task queue fires when a task changes. */
+export const TASK_QUEUE_UPDATE_EVENT = "task-queue-update";
+
+/** Window events that say "look at the library again": an upload landed, or a task moved. */
+const WINDOW_CHANGE_EVENTS = [HOSTED_LIBRARY_CHANGED_EVENT, TASK_QUEUE_UPDATE_EVENT] as const;
+
 /**
  * The existing Tauri events, as the mirror's source. Listening starts on `subscribe` and stops
  * on the returned function. Payload fields are read defensively: an event that does not look as
  * expected falls back to "something changed", which makes the mirror walk the listing.
  */
-export function createTauriMirrorEvents(listenFn: typeof listen = listen): MirrorEventSource {
+export function createTauriMirrorEvents(listenFn: typeof listen = listen, target: Pick<Window, "addEventListener" | "removeEventListener"> = window): MirrorEventSource {
   return {
     subscribe(handler: (event: MirrorSourceEvent) => void) {
       let stopped = false;
@@ -49,8 +56,15 @@ export function createTauriMirrorEvents(listenFn: typeof listen = listen): Mirro
         typeof data?.media_file_token === "string" ? { type: "deleted", token: data.media_file_token } : { type: "changed" },
       );
       for (const name of CHANGE_EVENTS) on<unknown>(name, () => ({ type: "changed" }));
+      // Uploads and editor outputs announce nothing through Tauri. The mirror walks the library
+      // after a quiet moment (one walk for a burst), so these need no token.
+      const onWindowEvent = () => {
+        if (!stopped) handler({ type: "changed" });
+      };
+      for (const name of WINDOW_CHANGE_EVENTS) target.addEventListener(name, onWindowEvent);
       return () => {
         stopped = true;
+        for (const name of WINDOW_CHANGE_EVENTS) target.removeEventListener(name, onWindowEvent);
         for (const pending of unlisteners) void pending.then((off) => off()).catch(() => undefined);
       };
     },

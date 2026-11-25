@@ -26,10 +26,14 @@ function toResult<T>(response: ApiResponse<T, unknown>): HostedResult<T> {
  * The mirror's hosted calls over the existing hosted clients (which keep using the hosted
  * session as before). Nothing here touches the pod.
  */
-export function createHostedClient(username: string): HostedClient {
+export function createHostedClient(username: string, currentUsername: () => string | null = () => username): HostedClient {
   const media = new MediaFilesApi();
   const prompts = new PromptsApi();
   return {
+    currentUsername,
+    async getMediaFiles(tokens) {
+      return toResult(await media.ListMediaFilesByTokens({ mediaTokens: [...tokens] }));
+    },
     async getMediaFile(token) {
       return toResult(await media.GetMediaFileByToken({ mediaFileToken: token }));
     },

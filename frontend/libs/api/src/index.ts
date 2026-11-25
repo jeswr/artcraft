@@ -32,4 +32,4 @@ export * from "./lib/models/Character.js";
 export * from "./lib/models/Folder.js";
 export * from "./lib/config/StorytellerApiHostStore.js";
 export * from "./lib/enums/EIntermediateFile.js";
-export { HttpApiError } from "./lib/ApiManager.js";
+export { HttpApiError, HOSTED_LIBRARY_CHANGED_EVENT, notifyHostedLibraryChanged } from "./lib/ApiManager.js";

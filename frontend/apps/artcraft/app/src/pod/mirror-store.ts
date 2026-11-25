@@ -2,7 +2,7 @@ import { checkOwnerOnly } from "@jeswr/pod-access";
 import { exposureFromOwnerOnly } from "@jeswr/pod-media-store";
 import { createTypeIndex } from "@jeswr/pod-type-index";
 import { createPodClient } from "@jeswr/storage-client";
-import { type MirrorJournal, type OpenStore, openCreativeAssetStore } from "@storyteller/pod-mirror";
+import { asPodStorePort, type MirrorJournal, type OpenStore, openCreativeAssetStore } from "@storyteller/pod-mirror";
 
 /** The WebID's profile document: any URL inside the storage will do for discovery. */
 export function profileDocumentOf(webId: string): string {
@@ -14,10 +14,12 @@ export function profileDocumentOf(webId: string): string {
 /**
  * Builds the mirror's store from the session's authenticated `fetch` and nothing else: pod
  * client, Type Index, the media store with the creative-assets model, the durable delete
- * journal, and the read-only owner-only probe for the exposure check.
+ * journal (this WebID's and this storage's entries only), and the read-only owner-only probe
+ * for the exposure check. Writes into a container whose exposure cannot be determined happen
+ * only when the caller says the person confirmed it.
  */
 export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; webId: string; journal: MirrorJournal }): OpenStore {
-  return async (signal) => {
+  return async (signal, { allowUnknownExposure }) => {
     const podFetch = deps.podFetch();
     if (!podFetch) return { ok: false, reason: "failed" };
     try {
@@ -27,10 +29,11 @@ export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; w
         features,
         typeIndex: createTypeIndex({ storage, features, profile: deps.webId, fetch: podFetch }),
         exposure: exposureFromOwnerOnly((url) => checkOwnerOnly({ storage, url, ownerWebId: deps.webId })),
-        journal: deps.journal.deletes,
+        journal: deps.journal.deletesFor(deps.webId, storage.root),
+        allowUnknownExposure,
         signal,
       });
-      if (opened.ok) return { ok: true, store: opened.value };
+      if (opened.ok) return { ok: true, store: asPodStorePort(opened.value, storage.root) };
       return { ok: false, reason: opened.error.kind === "offline" ? "offline" : "failed" };
     } catch {
       return { ok: false, reason: signal.aborted ? "failed" : "offline" };

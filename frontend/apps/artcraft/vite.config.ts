@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { podBootstrapPlugin } from "./pod-bootstrap-plugin";
+import { typeIndexRegexFix } from "./app/src/pod/type-index-regex-fix";
 
 // NB(bt): This configuration file can specify bundler rollup options, compiler plugins,
 // import path resolution, dev server HTTP headers, CORS options, path rewriting, etc.
@@ -37,29 +38,6 @@ const sparkWasmDataUrlFix = (): Plugin => ({
 
     return {
       code: patched,
-      map: null,
-    };
-  },
-});
-
-// The pod type index ships a regex literal that rollup prints right after a `for await (...)`
-// header. Vite's import-analysis lexer reads that slash as a division and aborts the build.
-// A RegExp constructor expresses the same pattern; remove this when the SDK changes the literal.
-const TYPE_INDEX_LWS = "/@jeswr/pod-type-index/dist/lws.js";
-const TYPE_INDEX_PATTERN = "/^[a-z][a-z0-9+.-]*:[^\\s\\p{Cc}<>\"{}|^`\\\\]+$/iu";
-
-const typeIndexRegexFix = (): Plugin => ({
-  name: "pod-type-index-regex-fix",
-  enforce: "pre",
-  transform(code, id) {
-    if (!id.includes(TYPE_INDEX_LWS) || !code.includes(TYPE_INDEX_PATTERN)) {
-      return null;
-    }
-    return {
-      code: code.replace(
-        TYPE_INDEX_PATTERN,
-        `new RegExp(${JSON.stringify(TYPE_INDEX_PATTERN.slice(1, -3))}, "iu")`,
-      ),
       map: null,
     };
   },

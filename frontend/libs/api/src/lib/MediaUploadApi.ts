@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { ApiManager, ApiResponse } from "./ApiManager.js";
+import { ApiManager, ApiResponse, notifyHostedLibraryChanged } from "./ApiManager.js";
 import { FilterEngineCategories } from "./enums/QueryFilters.js";
 import { Visibility } from "./enums/Visibility.js";
 import { EIntermediateFile } from "./enums/EIntermediateFile.js";
@@ -99,6 +99,7 @@ export class MediaUploadApi extends ApiManager {
     const result = await response.json();
 
     if (result.success && result.media_file_token) {
+      notifyHostedLibraryChanged();
       return { success: true, data: result.media_file_token };
     } else {
       return { success: false, errorMessage: "Failed to Get Media Token" };
