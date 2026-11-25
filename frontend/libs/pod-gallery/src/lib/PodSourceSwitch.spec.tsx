@@ -26,4 +26,22 @@ describe('the gallery source switch', () => {
     fireEvent.click(pod);
     expect(onChange).toHaveBeenCalledWith('pod');
   });
+
+  it('puts focus on the chosen button when it was just re-created by choosing a source', () => {
+    render(
+      <PodGalleryProvider access={{ sessionKey: 'k', open: async () => Promise.reject(new Error('unused')) }}>
+        <PodSourceSwitch source="pod" onChange={() => undefined} focusOnMount />
+      </PodGalleryProvider>,
+    );
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'My pod' }));
+  });
+
+  it('does not take focus when it first appears', () => {
+    render(
+      <PodGalleryProvider access={{ sessionKey: 'k', open: async () => Promise.reject(new Error('unused')) }}>
+        <PodSourceSwitch source="hosted" onChange={() => undefined} />
+      </PodGalleryProvider>,
+    );
+    expect(document.activeElement).toBe(document.body);
+  });
 });
