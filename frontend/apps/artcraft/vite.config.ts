@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { podBootstrapPlugin } from "./pod-bootstrap-plugin";
-import { typeIndexRegexFix } from "./app/src/pod/type-index-regex-fix";
 
 // NB(bt): This configuration file can specify bundler rollup options, compiler plugins,
 // import path resolution, dev server HTTP headers, CORS options, path rewriting, etc.
@@ -63,7 +62,6 @@ export default defineConfig({
   plugins: [
     react(),
     sparkWasmDataUrlFix(),
-    typeIndexRegexFix(),
     tsconfigPaths({
       // Resolve workspace packages to source for every importer, including shared
       // libraries. Fresh release checkouts have no prebuilt library dist files.
