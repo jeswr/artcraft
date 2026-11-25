@@ -1,7 +1,7 @@
-import { CloudAlertIcon, CloudCheckIcon, CloudOffIcon, CloudUploadIcon, LoaderCircleIcon } from 'lucide-react';
+import { CloudAlertIcon, CloudCheckIcon, CloudOffIcon, CloudUploadIcon, LoaderCircleIcon, PauseIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { describePodState, type Tone } from './messages.js';
-import { usePodItemState, usePodMirrorView } from './view.js';
+import { usePodItemState, usePodMirrorSummary, usePodMirrorView } from './view.js';
 
 const TONE_CLASS: Record<Tone, string> = {
   ok: 'text-green-300',
@@ -18,10 +18,11 @@ const TONE_CLASS: Record<Tone, string> = {
 export function PodItemBadge({ token, className }: { token: string; className?: string }) {
   const view = usePodMirrorView();
   const state = usePodItemState(token);
+  const summary = usePodMirrorSummary();
   if (!view || !state) return null;
-  const text = describePodState(state);
-  const icon = iconFor(state.kind);
-  const box = `flex h-5 w-5 items-center justify-center bg-black/50 backdrop-blur-lg ${TONE_CLASS[text.tone]} ${className ?? ''}`;
+  const text = describePodState(state, summary?.paused ?? null);
+  const icon = iconFor(state.kind, text.tone);
+  const box = `flex h-6 w-6 items-center justify-center bg-black/50 backdrop-blur-lg ${TONE_CLASS[text.tone]} ${className ?? ''}`;
   if (text.retryable) {
     return (
       <button
@@ -46,9 +47,11 @@ export function PodItemBadge({ token, className }: { token: string; className?: 
   );
 }
 
-function iconFor(kind: string): ReactNode {
+function iconFor(kind: string, tone: Tone): ReactNode {
   const cls = 'text-[10px]';
   if (kind === 'saved') return <CloudCheckIcon className={cls} aria-hidden="true" />;
+  // A waiting item is not in progress: a still icon, not a spinner.
+  if ((kind === 'pending' || kind === 'removing') && tone === 'muted') return <PauseIcon className={cls} aria-hidden="true" />;
   if (kind === 'pending' || kind === 'removing') {
     return <LoaderCircleIcon className={`${cls} motion-safe:animate-spin`} aria-hidden="true" />;
   }
@@ -61,11 +64,12 @@ function iconFor(kind: string): ReactNode {
 export function PodItemStatusRow({ token }: { token: string | undefined }) {
   const view = usePodMirrorView();
   const state = usePodItemState(token);
+  const summary = usePodMirrorSummary();
   if (!view || !token || !state) return null;
-  const text = describePodState(state);
+  const text = describePodState(state, summary?.paused ?? null);
   return (
     <div className="mt-3 flex items-center gap-2 text-sm text-white/80" data-testid="pod-item-status">
-      <span className={TONE_CLASS[text.tone]}>{iconFor(state.kind)}</span>
+      <span className={TONE_CLASS[text.tone]}>{iconFor(state.kind, text.tone)}</span>
       <span>{text.label}</span>
       {text.retryable && (
         <button

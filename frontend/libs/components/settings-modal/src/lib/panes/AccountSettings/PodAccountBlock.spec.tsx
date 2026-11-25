@@ -76,8 +76,9 @@ it("tells the truth about this build: new work is copied to the pod, servers sti
   const text = document.body.textContent ?? "";
   expect(text).toMatch(/saves a copy of your new generations, uploads and edits to your pod/);
   expect(text).toMatch(/ArtCraft's servers still receive what you generate and upload/);
-  expect(text).toMatch(/Deleting an item deletes both copies/);
-  expect(text).toMatch(/Audio is not copied yet/);
+  expect(text).toMatch(/When you delete an item, ArtCraft removes its pod copy too/);
+  expect(text).toMatch(/Audio, scene files and files over 16 MB are not copied/);
+  expect(text).toMatch(/a deletion made elsewhere is noticed the next time ArtCraft checks/);
   expect(text).toMatch(/Anything unsaved in this window is lost/);
   expect(text).not.toMatch(/does not copy any of your work/);
 });
@@ -214,13 +215,17 @@ it("offers only finishing the disconnect in a finishing window", async () => {
   expect(session.leave).toHaveBeenCalledTimes(1);
 });
 
-function renderWithMirror(summary: MirrorSummary, forgetAccount = vi.fn(async () => undefined)) {
+function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorView> = {}) {
   const view: PodMirrorView = {
     stateOf: () => undefined,
     summary: () => summary,
     subscribe: () => () => undefined,
     retry: async () => undefined,
-    forgetAccount,
+    retryAllFailed: vi.fn(async () => 1),
+    recheckExposure: vi.fn(),
+    confirmPrivate: vi.fn(async () => true),
+    forgetAccount: vi.fn(async () => undefined),
+    ...overrides,
   };
   const fake = fakeSession({ kind: "connected", webId: WEBID });
   render(
@@ -230,28 +235,69 @@ function renderWithMirror(summary: MirrorSummary, forgetAccount = vi.fn(async ()
       </PodMirrorViewProvider>
     </PodSessionProvider>,
   );
-  return forgetAccount;
+  return view;
 }
 
-const SUMMARY: MirrorSummary = { version: 1, running: true, paused: null, counts: { saved: 4, pending: 2, failed: 1, skipped: 3, removing: 0 } };
+const SUMMARY: MirrorSummary = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 4, pending: 2, failed: 1, skipped: 3, removing: 0 } };
+const POD_LIBRARY = "https://pod.example/alice/creative-assets/";
 
 it("shows how the copy is going, in words", () => {
   renderWithMirror(SUMMARY);
-  expect(screen.getByTestId("pod-mirror-status").textContent).toMatch(/Saved to pod: 4\. Saving: 2\. Not saved: 1\. Not copied: 3\./);
+  expect(screen.getByTestId("pod-mirror-status").textContent).toMatch(/Saved to pod: 4\. Waiting or saving: 2\. Not saved: 1\. Not copied: 3\./);
   expect(screen.queryByTestId("pod-mirror-paused")).toBeNull();
 });
 
-it("says why copying is paused when the pod library is readable by others", () => {
-  renderWithMirror({ ...SUMMARY, paused: "exposed" });
+it("announces what needs attention, not the counts", () => {
+  renderWithMirror(SUMMARY);
+  const live = within(screen.getByTestId("pod-mirror-status")).getByRole("status");
+  expect(live.textContent).toMatch(/1 item was not saved or removed/);
+  expect(live.textContent).not.toMatch(/Saved to pod/);
+});
+
+it("retries every failed item from one button", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror(SUMMARY);
+  await user.click(screen.getByRole("button", { name: "Retry all failed" }));
+  expect(view.retryAllFailed).toHaveBeenCalledTimes(1);
+});
+
+it("offers no retry-all when nothing failed", () => {
+  renderWithMirror({ ...SUMMARY, counts: { ...SUMMARY.counts, failed: 0 } });
+  expect(screen.queryByRole("button", { name: "Retry all failed" })).toBeNull();
+});
+
+it("says why copying is paused when the pod library is readable by others, and checks again on request", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror({ ...SUMMARY, paused: "exposed", exposureTarget: POD_LIBRARY });
   expect(screen.getByTestId("pod-mirror-paused").textContent).toMatch(/can be read by others/);
+  expect(screen.queryByRole("button", { name: /Confirm this container is private/ })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Check again" }));
+  expect(view.recheckExposure).toHaveBeenCalledTimes(1);
+});
+
+it("names what could not be verified and lets the person confirm the container is private", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror({ ...SUMMARY, paused: "exposure-unknown", exposureTarget: POD_LIBRARY });
+  expect(screen.getByTestId("pod-mirror-unverified").textContent).toContain(POD_LIBRARY);
+  await user.click(screen.getByRole("button", { name: "Confirm this container is private" }));
+  expect(view.confirmPrivate).toHaveBeenCalledTimes(1);
+  expect(view.recheckExposure).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Check again" })).toBeTruthy();
+});
+
+it("says copying is unavailable when the local record cannot be opened", () => {
+  renderWithMirror(SUMMARY, { unavailable: true });
+  expect(screen.getByTestId("pod-mirror-status").textContent).toMatch(/unavailable on this computer/);
+  expect(screen.queryByRole("button", { name: "Forget this account" })).toBeNull();
 });
 
 it("forgets the account only after a confirmation, and cancel does nothing", async () => {
   const user = userEvent.setup();
-  const forget = renderWithMirror(SUMMARY);
+  const { forgetAccount: forget } = renderWithMirror(SUMMARY);
   await user.click(screen.getByRole("button", { name: "Forget this account" }));
   expect(forget).not.toHaveBeenCalled();
   expect(document.body.textContent).toMatch(/Nothing on your pod is deleted/);
+  expect(document.body.textContent).toMatch(/no longer be able to remove those copies/);
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(forget).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Forget this account" }));

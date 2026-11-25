@@ -9,13 +9,18 @@ afterEach(cleanup);
 
 const item: GalleryItem = { id: 'm_1', label: 'Fox', thumbnail: 'https://cdn.example/t.png', createdAt: '2026-06-01T00:00:00Z', mediaClass: 'image' };
 
+const SUMMARY = { version: 1, running: true, paused: null, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 } } as const;
+
 function renderTile(state: ItemState | undefined, tile: GalleryItem = item) {
   const retry = vi.fn(async () => undefined);
   const view: PodMirrorView = {
     stateOf: (token) => (token === tile.id ? state : undefined),
-    summary: () => ({ version: 1, running: true, paused: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 } }),
+    summary: () => SUMMARY,
     subscribe: () => () => undefined,
     retry,
+    retryAllFailed: async () => 0,
+    recheckExposure: () => undefined,
+    confirmPrivate: async () => false,
     forgetAccount: async () => undefined,
   };
   const tree = (
@@ -35,6 +40,18 @@ describe('the pod state on a gallery tile', () => {
     renderTile({ kind: 'saved', descriptionUrl: 'https://pod/d', thumbnail: 'none' });
     expect(screen.getByRole('img', { name: 'Saved to pod' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Fox' })).toBeTruthy();
+  });
+
+  it('keeps the indicator and its retry outside the tile button, so each has its own role and name', () => {
+    renderTile({ kind: 'saved', descriptionUrl: 'https://pod/d', thumbnail: 'none' });
+    expect(screen.getByRole('img', { name: 'Saved to pod' }).closest('button')).toBeNull();
+    cleanup();
+    renderTile({ kind: 'failed', reason: 'offline', attempts: 1 });
+    const retry = screen.getByRole('button', { name: /Retry$/ });
+    expect(retry.parentElement?.closest('button')).toBeNull();
+    expect(retry.querySelector('button')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Fox' }).contains(retry)).toBe(false);
+    expect(retry.tabIndex).not.toBe(-1);
   });
 
   it('retries a failed item from the tile without opening it', () => {

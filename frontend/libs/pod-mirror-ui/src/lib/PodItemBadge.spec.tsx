@@ -8,10 +8,10 @@ import { type PodMirrorView, PodMirrorViewProvider } from './view.js';
 
 afterEach(cleanup);
 
-function fakeView(states: Record<string, ItemState>) {
+function fakeView(states: Record<string, ItemState>, paused: MirrorSummary['paused'] = null) {
   const listeners = new Set<() => void>();
   const retry = vi.fn(async () => undefined);
-  const summary: MirrorSummary = { version: 1, running: true, paused: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 } };
+  const summary: MirrorSummary = { version: 1, running: true, paused, exposureTarget: null, counts: { saved: 0, pending: 0, failed: 0, skipped: 0, removing: 0 } };
   const view: PodMirrorView = {
     stateOf: (token) => states[token],
     summary: () => summary,
@@ -20,6 +20,9 @@ function fakeView(states: Record<string, ItemState>) {
       return () => listeners.delete(l);
     },
     retry,
+    retryAllFailed: async () => 0,
+    recheckExposure: () => undefined,
+    confirmPrivate: async () => false,
     forgetAccount: async () => undefined,
   };
   return { view, retry, set: (token: string, state: ItemState) => { states[token] = state; for (const l of listeners) l(); } };
@@ -78,8 +81,46 @@ describe('PodItemBadge', () => {
     expect(fake.retry).toHaveBeenCalledWith('m_1');
   });
 
+  it('says "Paused", not "Saving", while the mirror is paused, with no spinner', () => {
+    const fake = fakeView({ m_1: { kind: 'pending', attempts: 0 }, m_2: { kind: 'removing', attempts: 0 } }, 'exposed');
+    const { container } = render(
+      <PodMirrorViewProvider view={fake.view}>
+        <PodItemBadge token="m_1" />
+        <PodItemBadge token="m_2" />
+      </PodMirrorViewProvider>,
+    );
+    expect(screen.getByRole('img', { name: /^Paused, not yet saved to pod: your pod library can be read by others$/ })).toBeTruthy();
+    expect(screen.getByRole('img', { name: /^Paused, not yet removed from pod/ })).toBeTruthy();
+    expect(screen.queryByRole('img', { name: /^Saving/ })).toBeNull();
+    expect(container.querySelector('.animate-spin')).toBeNull();
+  });
+
+  it('says an item that is backing off will be tried again, and why', () => {
+    const fake = fakeView({ m_1: { kind: 'pending', attempts: 3, lastError: 'offline' } });
+    render(
+      <PodMirrorViewProvider view={fake.view}>
+        <PodItemBadge token="m_1" />
+      </PodMirrorViewProvider>,
+    );
+    expect(screen.getByRole('img', { name: 'Will try again to save to pod: you are offline' })).toBeTruthy();
+  });
+
+  it('offers a retry for an item skipped over its date, and for no other skip', () => {
+    const fake = fakeView({ m_1: { kind: 'skipped', reason: 'bad-date' }, m_2: { kind: 'skipped', reason: 'too-large' } });
+    render(
+      <PodMirrorViewProvider view={fake.view}>
+        <PodItemBadge token="m_1" />
+        <PodItemBadge token="m_2" />
+      </PodMirrorViewProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /could not read when it was made\. Retry$/ }));
+    expect(fake.retry).toHaveBeenCalledWith('m_1');
+    expect(screen.getAllByRole('button')).toHaveLength(1);
+    expect(screen.getByRole('img', { name: /larger than 16 MB/ })).toBeTruthy();
+  });
+
   it('every text starts with what it says and never leaks internals', () => {
-    for (const reason of ['conflict', 'forbidden', 'too-large', 'unsupported', 'exposed', 'invalid-description', 'bytes-unavailable', 'hosted-unavailable', 'offline', 'store', 'unexpected'] as const) {
+    for (const reason of ['conflict', 'forbidden', 'unsupported', 'exposed', 'invalid-description', 'bytes-unavailable', 'cdn-blocked', 'hosted-unavailable', 'offline', 'store', 'unexpected'] as const) {
       const { label } = describePodState({ kind: 'failed', reason, attempts: 1 });
       expect(label.startsWith('Not saved to pod: ')).toBe(true);
       expect(label).not.toMatch(/https?:|m_/);

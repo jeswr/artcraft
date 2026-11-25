@@ -7,6 +7,14 @@ export interface PodMirrorView {
   summary(): MirrorSummary;
   subscribe(listener: () => void): () => void;
   retry(token: string): Promise<void>;
+  /** Puts every failed item back in the queue; resolves with how many. */
+  retryAllFailed(): Promise<number>;
+  /** Lifts an exposure pause and asks the pod again. */
+  recheckExposure(): void;
+  /** The person says the container is private, for a pod that cannot say; resolves false if nothing was waiting. */
+  confirmPrivate(): Promise<boolean>;
+  /** True when copying cannot run here (the local record could not be opened). */
+  unavailable?: boolean;
   /** Purges this account's journal after the person confirms. */
   forgetAccount(): Promise<void>;
 }
