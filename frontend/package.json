@@ -15,7 +15,12 @@
     "@hugeicons/core-free-icons": "^1.0.13",
     "@hugeicons/react": "^1.0.4",
     "@jeswr/desktop-auth": "file:vendor/solid/jeswr-desktop-auth-0.1.0.tgz",
+    "@jeswr/pod-access": "file:vendor/solid/jeswr-pod-access-0.1.0.tgz",
     "@jeswr/pod-auth": "file:vendor/solid/jeswr-pod-auth-0.1.0.tgz",
+    "@jeswr/pod-media-store": "file:vendor/solid/jeswr-pod-media-store-0.1.0.tgz",
+    "@jeswr/pod-type-index": "file:vendor/solid/jeswr-pod-type-index-0.1.0.tgz",
+    "@jeswr/solid-creative-assets": "file:vendor/solid/jeswr-solid-creative-assets-0.1.0.tgz",
+    "@jeswr/storage-client": "file:vendor/solid/jeswr-storage-client-0.1.0.tgz",
     "@preact/signals-core": "1.14.2",
     "@preact/signals-react": "^3.0.1",
     "@radix-ui/react-dialog": "^1.1.14",
@@ -130,8 +135,15 @@
     "libs/state/*"
   ],
   "overrides": {
+    "@jeswr/fetch-rdf": "file:vendor/solid/jeswr-fetch-rdf-0.1.0.tgz",
     "@jeswr/guarded-fetch": "file:vendor/solid/jeswr-guarded-fetch-0.1.0.tgz",
+    "@jeswr/model-runtime": "file:vendor/solid/jeswr-model-runtime-0.2.0.tgz",
+    "@jeswr/rdf-serialize": "file:vendor/solid/jeswr-rdf-serialize-0.1.0.tgz",
     "@jeswr/reactive-authentication": "file:vendor/solid/jeswr-reactive-authentication-0.1.5.tgz",
-    "@jeswr/suite-native": "file:vendor/solid/jeswr-suite-native-0.1.0.tgz"
+    "@jeswr/solid-odrl": "file:vendor/solid/jeswr-solid-odrl-0.1.0.tgz",
+    "@jeswr/storage-capabilities": "file:vendor/solid/jeswr-storage-capabilities-0.1.0.tgz",
+    "@jeswr/suite-native": "file:vendor/solid/jeswr-suite-native-0.1.0.tgz",
+    "@jeswr/suite-vocab": "file:vendor/solid/jeswr-suite-vocab-0.1.0.tgz",
+    "solid-agent-notify": "file:vendor/solid/solid-agent-notify-0.1.0.tgz"
   }
 }

@@ -28,6 +28,11 @@ npm packages added for Solid sign-in (frontend/vendor/solid/README.md) — @capa
   buffer, readable-stream, oauth4webapi, process, undici (MIT);
   idb-keyval, fake-indexeddb (test only) (Apache-2.0); multiformats (Apache-2.0 OR MIT);
   @tauri-apps/plugin-deep-link, @tauri-apps/plugin-opener (MIT OR Apache-2.0).
+npm packages added for the pod mirror (frontend/vendor/solid/README.md) — @solid/object,
+  jsonld-streaming-parser, jsonld-context-parser, rdf-data-factory, relative-to-absolute-iri,
+  @bergos/jsonparse, content-type, abort-controller, event-target-shim, events, base64-js,
+  safe-buffer, string_decoder (MIT); canonicalize (Apache-2.0); ieee754 (BSD-3-Clause). The
+  @jeswr packages packed there are MIT.
 normalize.css v8.0.1 (frontend/apps/artcraft/app/src/styles/normalize.css) — MIT License.
   Copyright (c) Nicolas Gallagher and Jonathan Neal. https://github.com/necolas/normalize.css
 three-dots v0.3.2 (portion of frontend/apps/artcraft/app/src/styles/base.css) — MIT License.

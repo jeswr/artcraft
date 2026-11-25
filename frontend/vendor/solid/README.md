@@ -64,4 +64,73 @@ SHA-256 of the tarballs as committed:
 89d27479963625ada5355a62d9a277d18a9f08ebd63948039fe11d3bcd4229a0  jeswr-suite-native-0.1.0.tgz
 ```
 
+## Pod mirror packages (added with `libs/pod-mirror`)
+
+Twelve more packed workspace packages of the Solid SDK monorepo, all private there, all MIT.
+`pod-media-store` was packed from the local branch `feat/pod-media-store` at `ce7d766`
+(no `origin/feat/pod-media-store` ref exists in the checkout; the same commit is on the remote
+under `refs/heads/feat/pod-media-store`). `solid-creative-assets` was packed from
+`feat/creative-assets` at `d6dcc9a`. Every other package was packed from the first of those two
+branches, whose other packages equal main at `d20ddf6`. `jeswr-guarded-fetch-0.1.0.tgz` above is
+unchanged: its built `dist/` is byte-identical to the one at this commit.
+
+| Tarball | Role | Licence |
+| --- | --- | --- |
+| `jeswr-pod-media-store-0.1.0.tgz` | content-addressed binary plus description store | MIT |
+| `jeswr-solid-creative-assets-0.1.0.tgz` | the asset description model (build and parse) | MIT |
+| `jeswr-storage-client-0.1.0.tgz` | `createPodClient`, the one pod I/O interface | MIT |
+| `jeswr-storage-capabilities-0.1.0.tgz` | storage discovery under storage-client | MIT |
+| `jeswr-pod-type-index-0.1.0.tgz` | Type Index discovery and registration | MIT |
+| `jeswr-pod-access-0.1.0.tgz` | read-only owner-only check for the exposure probe | MIT |
+| `jeswr-fetch-rdf-0.1.0.tgz` | bounded RDF fetch and parse | MIT |
+| `jeswr-model-runtime-0.2.0.tgz` | runtime under the generated model | MIT |
+| `jeswr-rdf-serialize-0.1.0.tgz` | `n3.Writer` serialisation helper | MIT |
+| `jeswr-suite-vocab-0.1.0.tgz` | vocabulary constants | MIT |
+| `jeswr-solid-odrl-0.1.0.tgz` | pod-access dependency | MIT |
+| `solid-agent-notify-0.1.0.tgz` | pod-access dependency | MIT |
+
+`frontend/package.json` references `pod-media-store`, `solid-creative-assets`, `storage-client`,
+`pod-type-index` and `pod-access` with `file:` specs and maps the other seven through `overrides`.
+
+New third-party packages in the production closure, each checked against the same allowlist
+(quoted above, fetched 2026-11-25): `@solid/object` MIT, `jsonld-streaming-parser` MIT,
+`jsonld-context-parser` MIT, `rdf-data-factory` MIT, `relative-to-absolute-iri` MIT,
+`@bergos/jsonparse` MIT, `canonicalize` Apache-2.0, `content-type` MIT, `abort-controller` MIT,
+`event-target-shim` MIT, `events` MIT, `base64-js` MIT, `ieee754` BSD-3-Clause,
+`safe-buffer` MIT, `string_decoder` MIT; type-only packages `@rdfjs/types`, `@types/n3`,
+`@types/http-link-header`, `@types/readable-stream` (MIT). Nothing is Node-only in the paths the
+app imports (`undici` is reachable only from `@jeswr/guarded-fetch/node`). The app imports
+`@jeswr/storage-client` only at its root, as the SDK layer rules ask; the memory pod
+(`@jeswr/storage-client/memory`) is imported only by the integration test.
+
+Rebuilding, from a checkout of the SDK with Node 24, one worktree per branch:
+
+```sh
+# branch feat/creative-assets
+pnpm install --frozen-lockfile --filter "@jeswr/solid-creative-assets..." --filter "@jeswr/solid-sdk-workspace"
+pnpm exec turbo run build --filter "@jeswr/solid-creative-assets..."
+for p in fetch-rdf model-runtime suite-vocab solid-creative-assets; do (cd packages/$p && pnpm pack --pack-destination <dir>); done
+# branch feat/pod-media-store
+pnpm install --frozen-lockfile --filter "@jeswr/pod-media-store..." --filter "@jeswr/pod-access..." --filter "@jeswr/solid-sdk-workspace"
+pnpm exec turbo run build --filter "@jeswr/pod-media-store..." --filter "@jeswr/pod-access..."
+for p in pod-media-store storage-client storage-capabilities pod-type-index pod-access rdf-serialize solid-odrl solid-agent-notify; do (cd packages/$p && pnpm pack --pack-destination <dir>); done
+```
+
+SHA-256 of the added tarballs as committed:
+
+```
+0dbcc9440b342e6dea45a7e29fe47918e417b300abce592ee0318c4faaf9af63  jeswr-fetch-rdf-0.1.0.tgz
+cf164e21246efe5c8ef3455df3f604592bf39eaaa8e7e457e27e48d852f71351  jeswr-model-runtime-0.2.0.tgz
+9295bc1f24ddcaf7dd0e4be2860ebf0a5e1057a533e614de30126f1e1819220c  jeswr-pod-access-0.1.0.tgz
+dc22055399669c880122ccb18a77dfa835adf78a668dc303ec42b43b2031fe6d  jeswr-pod-media-store-0.1.0.tgz
+de9a7fc23875d22de462814ee6aa9a05ef6a00732947a6496c22194b7958e2a0  jeswr-pod-type-index-0.1.0.tgz
+f99e60e4b33c8bd66232680f1782f305a3af6a623b7451fd88c00a637e2f3a74  jeswr-rdf-serialize-0.1.0.tgz
+228dc2a65acbbde1db2f7ab45484c1ca8c6be8a4bab0690e628e0ed5e3b46e34  jeswr-solid-creative-assets-0.1.0.tgz
+1165f1d01c8b021471c374fb446bead14d76a030c6183f74f81f175e5244cea4  jeswr-solid-odrl-0.1.0.tgz
+5bea6ce143ea34ad9c5428d08a29dd42908a1ed18caf81ef24f3ec9bea596b72  jeswr-storage-capabilities-0.1.0.tgz
+4cf3522225827b709c949fc41b17c0815866dc9ac55f6a2623047a71490facfe  jeswr-storage-client-0.1.0.tgz
+f4ed44e367e4344b5bfa97674c6d5cc1fa3dee7c6a9c3711f1a3b345dbc3b4a6  jeswr-suite-vocab-0.1.0.tgz
+3ed8c7e94a5c0463e166889b43a6b49f0983db18ed43c2ef543f24ce037bb933  solid-agent-notify-0.1.0.tgz
+```
+
 These packages are experimental and security critical; they are unreleased and unaudited.
