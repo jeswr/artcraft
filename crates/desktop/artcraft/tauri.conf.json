@@ -76,6 +76,7 @@
           "https://*.unpkg.com",
           "https://clarity.ms",
           "https://unpkg.com",
+          "https://www.googletagmanager.com",
           "ipc://localhost",
           "tauri:",
           "tauri://localhost"

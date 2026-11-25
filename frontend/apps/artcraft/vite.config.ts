@@ -5,6 +5,7 @@ import path from "path";
 import { resolve } from "node:path";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
+import { podBootstrapPlugin } from "./pod-bootstrap-plugin";
 
 // NB(bt): This configuration file can specify bundler rollup options, compiler plugins,
 // import path resolution, dev server HTTP headers, CORS options, path rewriting, etc.
@@ -65,6 +66,10 @@ export default defineConfig({
       // Resolve workspace packages to source for every importer, including shared
       // libraries. Fresh release checkouts have no prebuilt library dist files.
       projects: [path.resolve(workspaceRoot, "tsconfig.base.json")],
+    }),
+    podBootstrapPlugin({
+      entry: path.resolve(appRoot, "src/bootstrap.ts"),
+      workspaceRoot,
     }),
     wasm(),
     topLevelAwait(),
