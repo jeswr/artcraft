@@ -19,6 +19,15 @@ tauri-plugin-http (crates/vendor/tauri-plugin-http/) — MIT or Apache-2.0. Copy
   @jeswr/guarded-fetch (frontend/vendor/solid/) — MIT License. Packed from the Solid SDK
   workspace, branch feat/desktop-auth, commit 225a553. Their npm dependencies keep their own
   licenses (MIT, Apache-2.0 or MIT, listed in frontend/vendor/solid/README.md).
+Rust crates added for Solid sign-in (Cargo.lock) — const-random, const-random-macro, dlv-list
+  (MIT OR Apache-2.0), ordered-multimap, rust-ini (MIT), tauri-plugin-deep-link,
+  tauri-plugin-single-instance (Apache-2.0 OR MIT) and tiny-keccak (CC0-1.0, a public-domain
+  dedication). Each keeps its own copyright notice in its published source.
+npm packages added for Solid sign-in (frontend/vendor/solid/README.md) — @capacitor/core,
+  @key-value-kit/core, @key-value-kit/storage, @rdfjs/wrapper, dpop, http-link-header, jose, n3,
+  buffer, readable-stream, oauth4webapi, process, undici (MIT);
+  idb-keyval, fake-indexeddb (test only) (Apache-2.0); multiformats (Apache-2.0 OR MIT);
+  @tauri-apps/plugin-deep-link, @tauri-apps/plugin-opener (MIT OR Apache-2.0).
 normalize.css v8.0.1 (frontend/apps/artcraft/app/src/styles/normalize.css) — MIT License.
   Copyright (c) Nicolas Gallagher and Jonathan Neal. https://github.com/necolas/normalize.css
 three-dots v0.3.2 (portion of frontend/apps/artcraft/app/src/styles/base.css) — MIT License.

@@ -17,6 +17,23 @@ registry dependency, or remove them, when that decision is made.
 `frontend/package.json` references `pod-auth` and `desktop-auth` with `file:` specs and maps the
 other three through `overrides`, because the packed manifests name each other by plain version.
 
+Licence check. The allowlist is `standards/licences.md` in storytold/craft-contrib, fetched from
+https://raw.githubusercontent.com/storytold/craft-contrib/main/standards/licences.md on
+2026-11-25. Its rule, lines 9 and 11-25 to 33:
+
+> A licence expression is allowed when every identifier in it is on this list. A licence not on
+> it MUST NOT be used until an RFC adds it.
+> `ISC`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, ...
+> `0BSD`, `Unlicense`, ..., `CC0-1.0`, `CC-BY-4.0`, ...
+> Each keeps its notice: you MUST record it in `ATTRIBUTION.md` and `NOTICE`.
+
+Every new package was checked against that list: each npm package below and each new Rust crate
+(`const-random`, `const-random-macro`, `dlv-list` MIT OR Apache-2.0; `ordered-multimap`,
+`rust-ini` MIT; `tauri-plugin-deep-link`, `tauri-plugin-single-instance` Apache-2.0 OR MIT;
+`tiny-keccak` CC0-1.0) carries only allowlisted identifiers. They are recorded in the repository
+`NOTICE`; this repository has no `ATTRIBUTION.md`, so `NOTICE` is the record. The workspace crate
+`pod_mode` is our own code and declares `MIT OR Apache-2.0`.
+
 Third-party packages these add (production closure, all licences are on the allowlist in
 `standards/licences.md`): `@capacitor/core` MIT, `@key-value-kit/core` MIT,
 `@key-value-kit/storage` MIT, `@rdfjs/wrapper` MIT, `dpop` MIT, `http-link-header` MIT,
