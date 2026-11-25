@@ -153,3 +153,27 @@ resurrects a concurrently deleted description). SHA-256 now
 `dddf848335bf654db3e5b57b7aa74f5d6cd01ac330213f8ae0c92ba766761b61`.
 
 These packages are experimental and security critical; they are unreleased and unaudited.
+
+## Pod media loader (added with the "My pod" gallery source)
+
+`jeswr-pod-media-loader-0.1.0.tgz` is the packed `@jeswr/pod-media-loader` (MIT, `securityCritical`, private
+in the SDK, experimental and unaudited). It reads authenticated pod media through the storage client, sniffs
+the bytes against a passive-media allowlist and hands out reference-counted `blob:` URLs typed by the sniffed
+type only. It was packed from `origin/feat/pod-media-loader` of the SDK at commit
+`5810c65bf4922b6b57baa1b8eb1a434bba154e9b` ("feat(pod-media-loader): safe authenticated pod media as blob
+object URLs"), built and packed in its own worktree of that commit:
+
+```sh
+pnpm install --frozen-lockfile --filter "@jeswr/pod-media-loader..." --filter "@jeswr/solid-sdk-workspace"
+pnpm exec turbo run build --filter "@jeswr/pod-media-loader..."
+(cd packages/pod-media-loader && pnpm pack --pack-destination <this directory>)
+```
+
+Its two dependencies, `@jeswr/storage-client` and `@jeswr/guarded-fetch`, are the tarballs already vendored
+above (the packed manifest names both as `0.1.0`); nothing else is added. Its only peer, `react`, is optional and
+already present. `frontend/package.json` references it with a `file:` spec like the other direct dependencies.
+No new third-party package enters the production closure; the licence (MIT) is on the allowlist.
+
+```
+4ce4e9b98503c2a4a5b9e3c9f643f70cbb396cc6612ec16b028b21ac6a31f6d6  jeswr-pod-media-loader-0.1.0.tgz
+```
