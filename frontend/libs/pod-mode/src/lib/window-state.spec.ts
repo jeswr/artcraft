@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   analyticsAllowed,
+  gatePodMode,
   HOST_POD_MODE_KEY,
   isPodMode,
   latchPodWindow,
@@ -83,7 +84,13 @@ describe('sessionRestoreAllowed', () => {
 });
 
 describe('the shell is the authority', () => {
-  const host = (over: Record<string, unknown> = {}) => ({ enabled: true, storageOrigins: [], headerPolicy: false, ...over });
+  const host = (over: Record<string, unknown> = {}) => ({
+    enabled: true,
+    storageOrigins: [],
+    headerPolicy: false,
+    credentialsMayExist: true,
+    ...over,
+  });
 
   it('a planted localStorage flag does not make a window a pod window', () => {
     const storage = memoryStorage();
@@ -99,21 +106,94 @@ describe('the shell is the authority', () => {
 
   it('reads the global the initialization script defines and fails closed when it is malformed', () => {
     expect(readHostPodMode()).toBeNull();
-    vi.stubGlobal(HOST_POD_MODE_KEY, { enabled: false, storageOrigins: [], headerPolicy: false });
-    expect(readHostPodMode()).toEqual({ enabled: false, storageOrigins: [], headerPolicy: false });
-    for (const bad of ['yes', null, { enabled: 'yes' }, { enabled: true, storageOrigins: [1], headerPolicy: true }, { enabled: true, storageOrigins: [], headerPolicy: true, issuer: 5 }]) {
+    vi.stubGlobal(HOST_POD_MODE_KEY, { enabled: false, storageOrigins: [], headerPolicy: false, credentialsMayExist: false });
+    expect(readHostPodMode()).toEqual({ enabled: false, storageOrigins: [], headerPolicy: false, credentialsMayExist: false });
+    vi.stubGlobal(HOST_POD_MODE_KEY, { enabled: true, issuer: 'https://id.example', storageOrigins: [], headerPolicy: true, credentialsMayExist: true, freshConnect: 'https://id.example' });
+    expect(readHostPodMode()?.freshConnect).toBe('https://id.example');
+    const closed = { enabled: true, storageOrigins: [], headerPolicy: false, credentialsMayExist: true };
+    const good = { enabled: true, storageOrigins: [], headerPolicy: true, credentialsMayExist: true };
+    for (const bad of [
+      'yes',
+      null,
+      { enabled: 'yes' },
+      { ...good, storageOrigins: [1] },
+      { ...good, issuer: 5 },
+      { ...good, freshConnect: 5 },
+      { enabled: false, storageOrigins: [], headerPolicy: false },
+      { ...good, credentialsMayExist: 'no' },
+    ]) {
       vi.stubGlobal(HOST_POD_MODE_KEY, bad);
-      expect(readHostPodMode()).toEqual({ enabled: true, storageOrigins: [], headerPolicy: false });
+      expect(readHostPodMode()).toEqual(closed);
     }
   });
 
-  it('reports a policy only in a pod window, from the header or the meta element', () => {
-    expect(podPolicyApplied({ readHost: () => host({ enabled: false, headerPolicy: true }) })).toBe(false);
+  it('loads no analytics while credentials may exist, even outside pod mode', () => {
+    expect(analyticsAllowed({ readHost: () => host({ enabled: false, credentialsMayExist: true }) })).toBe(false);
     resetPodWindowForTests();
-    expect(podPolicyApplied({ readHost: () => host() })).toBe(false);
+    expect(analyticsAllowed({ readHost: () => host({ enabled: false, credentialsMayExist: false }) })).toBe(true);
+    resetPodWindowForTests();
+    expect(analyticsAllowed({ readHost: () => host({ enabled: true }) })).toBe(false);
+  });
+
+  describe('gatePodMode (production)', () => {
+    const prod = (readHost: () => ReturnType<typeof host> | null) => ({ readHost, dev: false });
+
+    it('needs the shell: enabled, with its header policy in force', () => {
+      expect(gatePodMode(prod(() => host({ headerPolicy: true })))).toBe('ok');
+      resetPodWindowForTests();
+      expect(gatePodMode(prod(() => host({ headerPolicy: false })))).toBe('policy-not-applied');
+      resetPodWindowForTests();
+      expect(gatePodMode(prod(() => host({ enabled: false, headerPolicy: true })))).toBe('not-pod-window');
+    });
+
+    it('does not accept a meta policy, the writable latch or a missing shell', () => {
+      markMetaPolicyApplied();
+      expect(gatePodMode(prod(() => host({ headerPolicy: false })))).toBe('policy-not-applied');
+      resetPodWindowForTests();
+      expect(gatePodMode(prod(() => null))).toBe('policy-not-applied');
+    });
+
+    it('cannot be switched on by overwriting the latch object', () => {
+      const planted = {
+        podMode: true,
+        analyticsLoaded: false,
+        metaPolicy: true,
+        host: host({ headerPolicy: true }),
+      };
+      (globalThis as Record<symbol, unknown>)[Symbol.for('artcraft.podWindowState')] = planted;
+      expect(gatePodMode(prod(() => host({ enabled: false, headerPolicy: false })))).toBe('not-pod-window');
+      expect(gatePodMode(prod(() => null))).toBe('policy-not-applied');
+    });
+
+    it('refuses once an analytics loader ran', () => {
+      expect(gatePodMode(prod(() => host({ headerPolicy: true })))).toBe('ok');
+      markAnalyticsLoaded();
+      expect(gatePodMode(prod(() => host({ headerPolicy: true })))).toBe('window-not-clean');
+    });
+  });
+
+  describe('gatePodMode (development)', () => {
+    it('accepts the meta policy alone, with or without a shell', () => {
+      const dev = (readHost: () => ReturnType<typeof host> | null) => ({ readHost, dev: true });
+      expect(gatePodMode(dev(() => host()))).toBe('policy-not-applied');
+      markMetaPolicyApplied();
+      expect(gatePodMode(dev(() => host()))).toBe('ok');
+      resetPodWindowForTests();
+      const storage = memoryStorage();
+      storage.setItem(POD_MODE_FLAG_KEY, '1');
+      expect(gatePodMode({ ...dev(() => null), storage })).toBe('policy-not-applied');
+      markMetaPolicyApplied();
+      expect(gatePodMode({ ...dev(() => null), storage })).toBe('ok');
+    });
+  });
+
+  it('reports a policy only in a pod window, from the header or (in development) the meta element', () => {
+    expect(podPolicyApplied({ dev: true, readHost: () => host({ enabled: false, headerPolicy: true }) })).toBe(false);
+    resetPodWindowForTests();
+    expect(podPolicyApplied({ dev: true, readHost: () => host() })).toBe(false);
     markMetaPolicyApplied();
-    expect(podPolicyApplied()).toBe(true);
+    expect(podPolicyApplied({ dev: true })).toBe(true);
     resetPodWindowForTests();
-    expect(podPolicyApplied({ readHost: () => host({ headerPolicy: true }) })).toBe(true);
+    expect(podPolicyApplied({ dev: true, readHost: () => host({ headerPolicy: true }) })).toBe(true);
   });
 });

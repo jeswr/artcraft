@@ -14,8 +14,19 @@ export type HostPodMode = {
   enabled: boolean;
   issuer?: string;
   storageOrigins: readonly string[];
-  /** The shell added the narrowing policy to this document's response headers. */
+  /** The shell sends the pod policy as the response header of this window's documents. */
   headerPolicy: boolean;
+  /**
+   * Pod mode, or credentials that were never confirmed wiped. While true no analytics load,
+   * even in a window that is not in pod mode.
+   */
+  credentialsMayExist: boolean;
+  /**
+   * The issuer of a connect the person approved in the shell's dialog in this process. A
+   * record merely loaded from disk never carries it, so only an approval can start a fresh
+   * sign-in. The shell hands it out once, to a click.
+   */
+  freshConnect?: string;
 };
 
 export const HOST_POD_MODE_KEY = '__ARTCRAFT_POD_MODE__';
@@ -28,6 +39,8 @@ export type PodModeDeps = {
   readHost?: () => HostPodMode | null;
   /** Calls into the shell. Absent in a plain browser, where the localStorage fallback is used. */
   requests?: PodModeRequests;
+  /** Overrides `import.meta.env.DEV`: a development run may rely on the meta policy alone. */
+  dev?: boolean;
 };
 
 export type EnterResult = 'requested' | 'declined';
@@ -42,12 +55,15 @@ export type PodModeRequests = {
   requestLeave(): Promise<void>;
   /** Rebuilds the window, staying in the current mode. */
   requestReload(): Promise<void>;
+  /** A wipe succeeded in a window that is not in pod mode: the shell clears its flag. */
+  requestCredentialsCleared(): Promise<void>;
+  /** The click that starts a fresh sign-in: the issuer the person approved, once. */
+  requestConsumeFresh(): Promise<string>;
 };
 
 type WindowState = {
   podMode: boolean;
   analyticsLoaded: boolean;
-  headerPolicy: boolean;
   metaPolicy: boolean;
   host: HostPodMode | null;
 };
@@ -87,10 +103,12 @@ export function readPodModeFlag(deps: PodModeDeps = {}): boolean {
 export function readHostPodMode(): HostPodMode | null {
   const raw = (globalThis as Record<string, unknown>)[HOST_POD_MODE_KEY];
   if (raw === undefined) return null;
-  const closed: HostPodMode = { enabled: true, storageOrigins: [], headerPolicy: false };
+  const closed: HostPodMode = { enabled: true, storageOrigins: [], headerPolicy: false, credentialsMayExist: true };
   if (typeof raw !== 'object' || raw === null) return closed;
   const r = raw as Record<string, unknown>;
   if (typeof r.enabled !== 'boolean' || typeof r.headerPolicy !== 'boolean' || !Array.isArray(r.storageOrigins)) return closed;
+  if (typeof r.credentialsMayExist !== 'boolean') return closed;
+  if (r.freshConnect !== undefined && typeof r.freshConnect !== 'string') return closed;
   if (!r.storageOrigins.every((o) => typeof o === 'string')) return closed;
   if (r.issuer !== undefined && typeof r.issuer !== 'string') return closed;
   return {
@@ -98,6 +116,8 @@ export function readHostPodMode(): HostPodMode | null {
     ...(r.issuer === undefined ? {} : { issuer: r.issuer as string }),
     storageOrigins: [...(r.storageOrigins as string[])],
     headerPolicy: r.headerPolicy,
+    credentialsMayExist: r.credentialsMayExist,
+    ...(r.freshConnect === undefined ? {} : { freshConnect: r.freshConnect as string }),
   };
 }
 
@@ -111,7 +131,7 @@ function state(deps: PodModeDeps = {}): WindowState {
   const host = hostOf(deps);
   // With a shell, its answer is the authority and localStorage is not read at all.
   const podMode = host === null ? readPodModeFlag(deps) : host.enabled;
-  return (h[KEY] = { podMode, analyticsLoaded: false, headerPolicy: host?.headerPolicy === true && host.enabled, metaPolicy: false, host });
+  return (h[KEY] = { podMode, analyticsLoaded: false, metaPolicy: false, host });
 }
 
 /** The shell's record as latched at load, or null when there is no shell. */
@@ -121,8 +141,7 @@ export function latchedHostPodMode(deps: PodModeDeps = {}): HostPodMode | null {
 
 /** A narrowing policy is in force: the shell's response header or an inserted meta element. */
 export function podPolicyApplied(deps: PodModeDeps = {}): boolean {
-  const s = state(deps);
-  return s.podMode && (s.headerPolicy || s.metaPolicy);
+  return gatePodMode(deps) === 'ok';
 }
 
 /** Called after the narrowing meta policy was inserted into <head>. */
@@ -144,8 +163,38 @@ export function isPodMode(deps: PodModeDeps = {}): boolean {
   return state(deps).podMode;
 }
 
+/**
+ * No analytics in a pod window, and none in an ordinary window the shell says may still hold
+ * pod credentials (until a wipe is confirmed).
+ */
 export function analyticsAllowed(deps: PodModeDeps = {}): boolean {
-  return !isPodMode(deps);
+  return !isPodMode(deps) && latchedHostPodMode(deps)?.credentialsMayExist !== true;
+}
+
+export type PodGate = 'ok' | 'not-pod-window' | 'window-not-clean' | 'policy-not-applied';
+
+/**
+ * Whether pod-auth may be built in this window. In a production build only the shell's frozen
+ * global counts, read afresh each time: pod mode on, and its header policy in force. The
+ * writable latch is consulted only for "did an analytics loader ever run". A meta policy alone
+ * is accepted only in a development run, where the dev server serves the page and the shell
+ * cannot add a header.
+ */
+export function gatePodMode(deps: PodModeDeps = {}): PodGate {
+  const dev = deps.dev ?? import.meta.env?.DEV === true;
+  const s = state(deps);
+  const host = hostOf(deps);
+  if (host !== null) {
+    if (!host.enabled) return 'not-pod-window';
+    if (s.analyticsLoaded) return 'window-not-clean';
+    if (host.headerPolicy) return 'ok';
+    return dev && s.metaPolicy ? 'ok' : 'policy-not-applied';
+  }
+  // No shell: a plain browser. Only a development run may go on, with the meta policy.
+  if (!dev) return 'policy-not-applied';
+  if (!s.podMode) return 'not-pod-window';
+  if (s.analyticsLoaded) return 'window-not-clean';
+  return s.metaPolicy ? 'ok' : 'policy-not-applied';
 }
 
 /** Called by the analytics loaders: a third-party script may now be running in this window. */

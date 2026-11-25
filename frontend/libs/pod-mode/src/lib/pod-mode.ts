@@ -108,3 +108,15 @@ export async function reloadPodWindow(deps: PodModeDeps = {}): Promise<void> {
   if (deps.requests) return deps.requests.requestReload();
   reloadOf(deps)();
 }
+
+/** A wipe succeeded in a window that is not in pod mode. Requires a shell. */
+export async function credentialsCleared(deps: PodModeDeps = {}): Promise<void> {
+  if (!deps.requests) return reloadOf(deps)();
+  return deps.requests.requestCredentialsCleared();
+}
+
+/** The click that starts a fresh sign-in: the issuer the person approved, once. Requires a shell. */
+export async function consumeFreshConnect(deps: PodModeDeps = {}): Promise<string> {
+  if (!deps.requests) throw new Error('consumeFreshConnect: needs the desktop shell');
+  return deps.requests.requestConsumeFresh();
+}

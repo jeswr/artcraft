@@ -12,10 +12,10 @@ describe('buildPodModeCsp', () => {
     expect(
       buildPodModeCsp({ issuer: 'https://id.example', storage: 'https://pod.example' }, HOSTED_CONNECT_SOURCES),
     ).toBe(
-      "default-src 'self' asset: blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; " +
-        "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; " +
-        "img-src 'self' asset: blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; " +
-        "media-src 'self' asset: blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; " +
+      "default-src 'self' blob: data: https://*.fakeyou.com https://*.storyteller.ai ipc://localhost tauri://localhost; " +
+        "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; " +
+        "img-src 'self' blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; " +
+        "media-src 'self' blob: data: https://*.fakeyou.com https://*.storyteller.ai ipc://localhost tauri://localhost; " +
         "object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; " +
         "connect-src 'self' asset: blob: data: http://ipc.localhost https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost " +
         'https://unpkg.com/detect-gpu@5.0.70/ ipc://localhost tauri://localhost https://id.example https://pod.example',

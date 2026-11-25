@@ -48,7 +48,7 @@ describe('applyPodModePolicy', () => {
   });
 
   it('builds the policy from the shell\'s origins and records that a policy is in force', () => {
-    const readHost = () => ({ enabled: true, issuer: 'https://id.example', storageOrigins: ['https://pod.example', 'https://pod2.example'], headerPolicy: false });
+    const readHost = () => ({ enabled: true, issuer: 'https://id.example', storageOrigins: ['https://pod.example', 'https://pod2.example'], headerPolicy: false, credentialsMayExist: true });
     const doc = newDoc();
     expect(podPolicyApplied({ readHost })).toBe(false);
     expect(applyPodModePolicy(doc, { readHost })).toBe(true);
@@ -59,7 +59,7 @@ describe('applyPodModePolicy', () => {
   });
 
   it('records no policy when the insertion throws', () => {
-    const readHost = () => ({ enabled: true, storageOrigins: [], headerPolicy: false });
+    const readHost = () => ({ enabled: true, storageOrigins: [], headerPolicy: false, credentialsMayExist: true });
     const doc = newDoc();
     doc.head.remove();
     expect(() => applyPodModePolicy(doc, { readHost })).toThrow();

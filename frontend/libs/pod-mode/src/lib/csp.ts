@@ -18,12 +18,22 @@ export const HOSTED_CONNECT_SOURCES: readonly string[] = [
   'tauri://localhost',
 ];
 
-// Sources for default-src, img-src and media-src: the static default-src without the analytics
-// hosts and without 'unsafe-eval'/'unsafe-inline', plus the asset protocol for local files.
-// Deliberately not `*`: the static img-src is `*`, which is an exfiltration channel.
+// Sources for default-src and media-src: the static default-src without the analytics hosts and
+// without 'unsafe-eval'/'unsafe-inline', and nothing the static default-src lacks. Deliberately
+// not `*`: the static img-src is `*`, which is an exfiltration channel.
 const HOSTED_CONTENT_SOURCES: readonly string[] = [
   "'self'",
-  'asset:',
+  'blob:',
+  'data:',
+  'https://*.fakeyou.com',
+  'https://*.storyteller.ai',
+  'ipc://localhost',
+  'tauri://localhost',
+];
+
+// img-src: the same, plus the asset host, which the static `img-src *` also covers.
+const HOSTED_IMAGE_SOURCES: readonly string[] = [
+  "'self'",
   'blob:',
   'data:',
   'https://*.fakeyou.com',
@@ -70,8 +80,8 @@ export function buildPodModeCsp(
     "script-src 'self' 'wasm-unsafe-eval'",
     "worker-src 'self' blob:",
     "style-src 'self' 'unsafe-inline'",
-    "font-src 'self' data:",
-    `img-src ${content}`,
+    "font-src 'self'",
+    `img-src ${HOSTED_IMAGE_SOURCES.join(' ')}`,
     `media-src ${content}`,
     "object-src 'none'",
     "base-uri 'self'",

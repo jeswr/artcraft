@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { addStorageOrigin, enterPodMode, leavePodMode, readPodModeOrigins, readPodOrigins, reloadPodWindow } from './pod-mode.js';
+import { addStorageOrigin, consumeFreshConnect, credentialsCleared, enterPodMode, leavePodMode, readPodModeOrigins, readPodOrigins, reloadPodWindow } from './pod-mode.js';
 import {
   type HostPodMode,
   type PodModeRequests,
@@ -125,6 +125,8 @@ function requests(over: Partial<PodModeRequests> = {}): PodModeRequests & { call
     requestAddStorageOrigin: async (o) => (calls.push(`add ${o}`), 'requested'),
     requestLeave: async () => void calls.push('leave'),
     requestReload: async () => void calls.push('reload'),
+    requestCredentialsCleared: async () => void calls.push('cleared'),
+    requestConsumeFresh: async () => (calls.push('consume'), 'https://id.example'),
     ...over,
   };
 }
@@ -177,7 +179,7 @@ describe('with the desktop shell', () => {
     resetPodWindowForTests();
     const storage = memoryStorage();
     storage.setItem(POD_MODE_ORIGINS_KEY, '{"issuer":"https://planted.example"}');
-    const host: HostPodMode = { enabled: true, issuer: 'https://id.example', storageOrigins: ['https://pod.example'], headerPolicy: true };
+    const host: HostPodMode = { enabled: true, issuer: 'https://id.example', storageOrigins: ['https://pod.example'], headerPolicy: true, credentialsMayExist: true };
     expect(readPodModeOrigins({ storage, readHost: () => host })).toEqual({
       issuer: 'https://id.example',
       storageOrigins: ['https://pod.example'],
@@ -189,10 +191,26 @@ describe('with the desktop shell', () => {
       resetPodWindowForTests();
       return readPodModeOrigins({ readHost: () => host });
     };
-    const bad: HostPodMode = { enabled: true, issuer: 'https://a.example; script-src *', storageOrigins: [], headerPolicy: false };
+    const bad: HostPodMode = { enabled: true, issuer: 'https://a.example; script-src *', storageOrigins: [], headerPolicy: false, credentialsMayExist: true };
     expect(read(bad)).toBeNull();
     expect(read({ ...bad, issuer: 'https://ok.example', storageOrigins: ['x'] })).toBeNull();
-    expect(read({ enabled: false, storageOrigins: [], headerPolicy: false })).toBeNull();
-    expect(read({ enabled: true, storageOrigins: [], headerPolicy: false })).toEqual({ storageOrigins: [] });
+    expect(read({ enabled: false, storageOrigins: [], headerPolicy: false, credentialsMayExist: true })).toBeNull();
+    expect(read({ enabled: true, storageOrigins: [], headerPolicy: false, credentialsMayExist: true })).toEqual({ storageOrigins: [] });
+  });
+});
+
+describe('credentialsCleared and consumeFreshConnect', () => {
+  it('ask the shell', async () => {
+    const r = requests();
+    await credentialsCleared({ requests: r });
+    expect(await consumeFreshConnect({ requests: r })).toBe('https://id.example');
+    expect(r.calls).toEqual(['cleared', 'consume']);
+  });
+
+  it('refuse a fresh sign-in without a shell, and reload instead of clearing', async () => {
+    await expect(consumeFreshConnect({})).rejects.toThrow();
+    const reload = vi.fn();
+    await credentialsCleared({ reload });
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 });
