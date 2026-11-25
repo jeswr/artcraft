@@ -327,6 +327,8 @@ export class PodMirror {
   private importRun: ImportRun = { state: 'idle', walked: 0 };
   /** The last journal write failed (and none has worked since): deletes wait, and the summary says so. */
   private journalFailing = false;
+  /** Another window upgraded the journal's database and this connection was closed: the app must be reloaded. */
+  private journalClosed = false;
   private libraryMissing: { at: number; checked: number; tokens: string[] } | null = null;
   private importWalker: Promise<void> | null = null;
   private importTimer: ReturnType<typeof setTimeout> | null = null;
@@ -377,6 +379,9 @@ export class PodMirror {
     this.unsubscribers.push(this.o.session.subscribe(() => this.onSessionChange()));
     if (this.o.network) this.unsubscribers.push(this.o.network.subscribe(() => this.onNetworkChange()));
     if (this.o.events) this.unsubscribers.push(this.o.events.subscribe((event) => this.onEvent(event)));
+    this.journalClosed = false;
+    const offClose = this.o.journal.onClose?.(() => this.onJournalClosed());
+    if (offClose) this.unsubscribers.push(offClose);
     this.changed();
     void this.prepare().then(() => this.reconcile().catch(() => undefined));
     // The pod can only be asked once the store is open; `prepare` asks for a pass when it is.
@@ -1223,6 +1228,7 @@ export class PodMirror {
 
   private pauseReason(): PauseReason | null {
     if (!this.running) return 'stopped';
+    if (this.journalClosed) return 'journal-closed';
     if (!this.o.session.isConnected()) return 'session';
     if (this.o.network && !this.o.network.isOnline()) return 'offline';
     if (this.blocked) return this.blocked;
@@ -1768,6 +1774,14 @@ export class PodMirror {
       this.store = null;
       this.exposureOk = false;
     }
+    this.changed();
+  }
+
+  /** The journal connection is gone: nothing can be recorded, so nothing is copied or removed until a reload. */
+  private onJournalClosed(): void {
+    if (!this.running) return;
+    this.journalClosed = true;
+    for (const { controller } of this.inflight.values()) controller.abort();
     this.changed();
   }
 

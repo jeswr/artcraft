@@ -207,6 +207,42 @@ describe('indexeddb journal durability', () => {
     expect(await journal.isPairedElsewhere('https://p/d', { ...ACCOUNT, token: 'other' })).toBe(true);
   });
 
+  it('tells whoever holds the journal when another window upgrades the database, and every call then fails closed', async () => {
+    const factory = new IDBFactory();
+    const journal = await open(factory);
+    await journal.create(record());
+    let told = 0;
+    journal.onClose?.(() => told++);
+    await new Promise<void>((resolve, reject) => {
+      const req = factory.open(DB_NAME, DB_VERSION + 1);
+      req.onsuccess = () => {
+        req.result.close();
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    expect(told).toBe(1);
+    await expect(journal.get(ACCOUNT, 'm_1')).rejects.toBeInstanceOf(Error);
+  });
+
+  it('does not leak a connection from an open that was blocked: a later upgrade is not held up by it', async () => {
+    const factory = new IDBFactory();
+    // A window that does not close on versionchange (an older build) holds version 2.
+    const old = await openRaw(factory, 2, (db) => upgradeJournal(db, 0));
+    await expect(open(factory)).rejects.toMatchObject({ name: 'JournalError', kind: 'blocked' });
+    old.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const outcome = await new Promise<string>((resolve) => {
+      const req = factory.open(DB_NAME, DB_VERSION + 1);
+      req.onblocked = () => resolve('blocked');
+      req.onsuccess = () => {
+        req.result.close();
+        resolve('opened');
+      };
+    });
+    expect(outcome).toBe('opened');
+  });
+
   it('refuses a database written by a newer version, with a closed error', async () => {
     const factory = new IDBFactory();
     await new Promise<void>((resolve) => {

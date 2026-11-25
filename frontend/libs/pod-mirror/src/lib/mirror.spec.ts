@@ -2233,6 +2233,29 @@ describe('the pod check believes a 404 only with a second opinion and under a ce
   });
 });
 
+describe('a journal whose connection was closed by another window', () => {
+  it('pauses with journal-closed: nothing more is copied or removed, and the summary says a reload is needed', async () => {
+    const journal = createMemoryMirrorJournal();
+    let close: () => void = () => undefined;
+    journal.onClose = (listener) => {
+      close = listener;
+      return () => undefined;
+    };
+    const t = setup([hostedFile(1), hostedFile(2)], {}, journal);
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.store.puts).toHaveLength(1);
+    close();
+    expect(t.mirror.summary().paused).toBe('journal-closed');
+    await t.mirror.enqueue(token(2));
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.store.puts).toHaveLength(1);
+    expect(t.store.removed).toEqual([]);
+  });
+});
+
 describe('a journal that cannot be written', () => {
   const URL_ = 'https://pod.example/alice/creative-assets/2026/06/shared';
 

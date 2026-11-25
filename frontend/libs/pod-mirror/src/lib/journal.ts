@@ -123,6 +123,11 @@ export interface MirrorJournal {
   /** Purges this account's records and state, and the delete entries of its WebID only. */
   forgetAccount(account: MirrorAccount): Promise<void>;
   close(): void;
+  /**
+   * Called when the connection is closed from outside, because another window upgraded the
+   * database (`versionchange`). Every call after that fails. Returns an unsubscribe function.
+   */
+  onClose?(listener: () => void): () => void;
 }
 
 export class JournalError extends Error {
@@ -198,6 +203,7 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
   const KR = options.keyRange ?? (globalThis as { IDBKeyRange?: typeof IDBKeyRange }).IDBKeyRange;
   if (!factory || !KR) throw new JournalError('unavailable');
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    let abandoned = false;
     let open: IDBOpenDBRequest;
     try {
       open = factory.open(options.name ?? DB_NAME, DB_VERSION);
@@ -206,12 +212,25 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       return;
     }
     open.onupgradeneeded = (event) => upgradeJournal(open.result, event.oldVersion, open.transaction ?? undefined);
-    open.onsuccess = () => resolve(open.result);
-    open.onblocked = () => reject(new JournalError('blocked'));
+    open.onsuccess = () => {
+      // A blocked open still completes once the other connection closes; nobody is waiting for it
+      // any more, and a connection nobody holds would block the next upgrade for ever.
+      if (abandoned) open.result.close();
+      else resolve(open.result);
+    };
+    open.onblocked = () => {
+      abandoned = true;
+      reject(new JournalError('blocked'));
+    };
     open.onerror = () => reject(new JournalError(open.error?.name === 'VersionError' ? 'newer-version' : 'unavailable'));
   });
-  // A version change from another window must not wedge this one.
-  db.onversionchange = () => db.close();
+  // A version change from another window must not wedge this one: the connection is closed, and
+  // whoever holds the journal is told, since every call from now on fails.
+  const closeListeners = new Set<() => void>();
+  db.onversionchange = () => {
+    db.close();
+    for (const listener of [...closeListeners]) listener();
+  };
 
   const deletesFor = (webId: string, storage: string): DeleteJournal => {
     const scope = scopeOf(webId, storage);
@@ -323,6 +342,10 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
     },
     close() {
       db.close();
+    },
+    onClose(listener) {
+      closeListeners.add(listener);
+      return () => closeListeners.delete(listener);
     },
   };
 }
