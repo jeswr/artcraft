@@ -561,3 +561,19 @@ it.each(["origin-limit", "invalid-response", "sign-in-failed", "approval-too-fas
   expect(screen.getByRole("alert").textContent).toBe(ERROR_TEXT[error]);
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
 });
+
+it("shows the missing-library notice when the pod check found the library missing, and Copy again calls copyAgain()", async () => {
+  const user = userEvent.setup();
+  const copyAgain = vi.fn(async () => 7);
+  renderWithMirror({ ...SUMMARY, libraryMissing: { missing: 9, checked: 12 } }, { copyAgain });
+  const notice = screen.getByTestId("pod-library-missing");
+  expect(notice.textContent).toMatch(/9 of the 12 items/);
+  expect(copyAgain).not.toHaveBeenCalled();
+  await user.click(within(notice).getByRole("button", { name: "Copy again" }));
+  expect(copyAgain).toHaveBeenCalledTimes(1);
+});
+
+it("shows no missing-library notice when the mirror does not report one", () => {
+  renderWithMirror(SUMMARY, { copyAgain: vi.fn(async () => 0) });
+  expect(screen.queryByTestId("pod-library-missing")).toBeNull();
+});

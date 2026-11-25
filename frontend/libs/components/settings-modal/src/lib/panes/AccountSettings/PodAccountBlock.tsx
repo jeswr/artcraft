@@ -8,7 +8,7 @@ import {
   usePodSessionOrNull,
   usePodSessionState,
 } from "@storyteller/pod-session";
-import { describePause, usePodMirrorSummary, usePodMirrorView } from "@storyteller/pod-mirror-ui";
+import { describePause, PodLibraryMissingBlock, usePodMirrorSummary, usePodMirrorView } from "@storyteller/pod-mirror-ui";
 import { Button } from "@storyteller/ui-button";
 import { Input } from "@storyteller/ui-input";
 import { PodGoneBlock } from "./PodGoneBlock";
@@ -483,6 +483,8 @@ const PodMirrorStatus = () => {
           ArtCraft's media host cannot be reached from this app, so nothing can be copied right now. Items stay waiting and are tried again.
         </p>
       )}
+      {/* Renders only when the pod check found much of the library missing; nothing was queued until the person presses Copy again. */}
+      <PodLibraryMissingBlock />
       {summary.goneFromArtcraft > 0 && <PodGoneBlock count={summary.goneFromArtcraft} remove={() => view.removeGoneFromPod()} />}
       {view.import && <PodImportBlock controls={view.import} status={summary.import} engineStatus={summary.paused} />}
       {confirming ? (
