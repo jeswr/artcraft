@@ -1036,6 +1036,19 @@ describe('deletions that happened while no mirror was running', () => {
     expect(t.store.removed).toHaveLength(1);
   });
 
+  it('keeps an item the batch omits when its own lookup still finds it', async () => {
+    const t = await saved(2);
+    const real = t.hosted.getMediaFiles.bind(t.hosted);
+    t.hosted.getMediaFiles = async (tokens, signal) => {
+      const got = await real(tokens, signal);
+      return got.ok ? { ok: true, value: got.value.filter((f) => f.token !== token(1)) } : got;
+    };
+    expect(await t.mirror.verify(true)).toMatchObject({ removed: 0, stoppedBy: 'done' });
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+    expect(t.store.removed).toHaveLength(0);
+  });
+
   it('removes nothing when the lookup fails, when the item cannot be confirmed, or when offline', async () => {
     const t = await saved(2);
     t.hosted.files.delete(token(1));
@@ -1284,20 +1297,30 @@ describe('stopping and losing the session mid-copy', () => {
   it('does not use a store that finished opening after the session changed', async () => {
     const t = setup([hostedFile(1)]);
     let finish: (value: { ok: true; store: ReturnType<typeof fakeStore> }) => void = () => undefined;
-    const slow = fakeStore();
-    const opened = new Promise<{ ok: true; store: ReturnType<typeof fakeStore> }>((resolve) => (finish = resolve));
+    const stale = fakeStore();
+    const fresh = fakeStore();
+    void fresh;
+    let calls = 0;
     const mirror = new PodMirror({
       account: ACCOUNT, journal: t.journal, hosted: t.hosted, fetchPublicBytes: t.bytes.fetch, session: t.session, random: () => 0.5,
-      openStore: (async () => opened) as unknown as OpenStore,
+      openStore: (async () => {
+        calls++;
+        if (calls === 1) return new Promise((resolve) => (finish = resolve as typeof finish));
+        return { ok: true as const, store: fresh };
+      }) as unknown as OpenStore,
     });
     await mirror.start();
     await vi.advanceTimersByTimeAsync(0);
     t.session.set(true); // the session changed while the store was opening
-    finish({ ok: true, store: slow });
+    await vi.advanceTimersByTimeAsync(0);
+    finish({ ok: true, store: stale });
     await vi.advanceTimersByTimeAsync(0);
     await mirror.enqueue(token(1));
     await vi.advanceTimersByTimeAsync(0);
-    expect(slow.puts).toEqual([]);
+    await mirror.idle();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await mirror.idle();
+    expect(stale.puts).toEqual([]);
     await mirror.stop();
   });
 });
@@ -1333,6 +1356,19 @@ describe('what the hosted side says about an item', () => {
     await settle(t.mirror);
     const put = t.store.puts[1] as { description: { generation?: { usedAssets?: string[] } } };
     expect(put.description.generation?.usedAssets).toBeUndefined();
+  });
+
+  it('does not link a reference image that is only pending, even when it names a description', async () => {
+    const reference = hostedFile(2);
+    const file = hostedFile(1, { maybe_prompt_token: 'p_1' });
+    const t = setup([file, reference]);
+    t.hosted.prompts.set('p_1', hostedPrompt('p_1', { maybe_context_images: [{ media_token: token(2), semantic: 'reference' }] }));
+    await t.journal.create({ webId: ACCOUNT.webId, username: ACCOUNT.username, token: token(2), state: 'pending', attempts: 1, descriptionUrl: 'https://pod.example/media/stale', createdAt: 1, updatedAt: 1 });
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    const put = t.store.puts.find((p) => (p as { description: { generation?: unknown } }).description.generation) as { description: { generation?: { usedAssets?: string[] } } } | undefined;
+    expect(put?.description.generation?.usedAssets).toBeUndefined();
   });
 
   it('does not fetch a thumbnail for a 3D model', async () => {
