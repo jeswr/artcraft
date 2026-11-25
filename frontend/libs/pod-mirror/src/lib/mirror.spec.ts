@@ -2063,12 +2063,15 @@ describe('a saved item whose pod copy is gone', () => {
     expect(t.store.removed).toEqual([]);
   });
 
-  it('is not recorded as a finished pass when the pod could not be asked, so the next start tries again', async () => {
+  it('does not record the pod pass as done when the pod could not be asked, so the next start tries again, and does not repeat the hosted pass', async () => {
     const t = await saved();
-    await t.journal.updateAccountState(JOURNAL_ACCOUNT, { verifiedAt: undefined });
+    await t.journal.updateAccountState(JOURNAL_ACCOUNT, { verifiedAt: undefined, podVerifiedAt: undefined });
     t.store.getFailure = { kind: 'offline', reason: 'storage' };
     expect(await t.mirror.verify(true)).toMatchObject({ stoppedBy: 'pod-unavailable' });
-    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.verifiedAt).toBeUndefined();
+    const state = await t.journal.getAccountState(JOURNAL_ACCOUNT);
+    expect(state?.podVerifiedAt).toBeUndefined();
+    // The hosted half did run, and is recorded on its own.
+    expect(state?.verifiedAt).toBeDefined();
   });
 
   it('is not copied again when the hosted item is gone too: it is only marked, as before', async () => {
@@ -2096,6 +2099,90 @@ describe('a saved item whose pod copy is gone', () => {
     expect(result.requeued).toBe(2);
     expect(t.store.gets).toHaveLength(1);
     expect(t.mirror.summary().counts.saved).toBe(2);
+  });
+});
+
+describe('the verification pass at start', () => {
+  const URL_ = 'https://pod.example/alice/creative-assets/2026/06/gone';
+  const seeded = async () => {
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
+    await journal.create({ ...JOURNAL_ACCOUNT, token: token(1), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: URL_ });
+    return journal;
+  };
+  const batches = (t: ReturnType<typeof setup>) => t.hosted.calls.filter((c) => c.startsWith('batch')).length;
+
+  it('asks the pod after the store opens, with no forced pass, and requeues a copy the pod says is gone', async () => {
+    const t = setup([hostedFile(1)], {}, await seeded());
+    t.store.missing.add(URL_);
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.store.gets).toContain(URL_);
+    expect(t.store.puts).toHaveLength(1);
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved' });
+    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.podVerifiedAt).toBeDefined();
+  });
+
+  it('still asks the pod when the store takes a while to open', async () => {
+    const t = setup([hostedFile(1)], {}, await seeded());
+    t.store.missing.add(URL_);
+    const inner = t.open;
+    const slow = (async (signal: AbortSignal, options: never) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return inner(signal, options);
+    }) as unknown as OpenStore;
+    const mirror = new PodMirror({ account: ACCOUNT, journal: t.journal, hosted: t.hosted, openStore: slow, fetchPublicBytes: t.bytes.fetch, session: t.session, network: t.network, events: t.events, random: () => 0.5 });
+    await mirror.start();
+    await vi.advanceTimersByTimeAsync(60);
+    await settle(mirror);
+    expect(t.store.gets).toContain(URL_);
+    expect(t.store.puts).toHaveLength(1);
+  });
+
+  it('records the hosted pass and the pod pass apart: a start where the pod cannot be reached does not make the hosted check repeat', async () => {
+    const journal = await seeded();
+    const first = setup([hostedFile(1)], {}, journal);
+    first.open.fail = 'offline';
+    await first.mirror.start();
+    await settle(first.mirror);
+    expect(batches(first)).toBe(1);
+    expect(first.store.gets).toHaveLength(0);
+    let state = await journal.getAccountState(JOURNAL_ACCOUNT);
+    expect(state?.verifiedAt).toBeDefined();
+    expect(state?.podVerifiedAt).toBeUndefined();
+    await first.mirror.stop();
+
+    // Five minutes later the pod answers: only the pod half runs.
+    vi.setSystemTime(Date.now() + 5 * 60_000);
+    const second = setup([hostedFile(1)], {}, journal);
+    await second.mirror.start();
+    await settle(second.mirror);
+    expect(batches(second)).toBe(0);
+    expect(second.store.gets).toContain(URL_);
+    state = await journal.getAccountState(JOURNAL_ACCOUNT);
+    expect(state?.podVerifiedAt).toBeDefined();
+    await second.mirror.stop();
+
+    // A third start inside the hour repeats neither.
+    vi.setSystemTime(Date.now() + 5 * 60_000);
+    const third = setup([hostedFile(1)], {}, journal);
+    await third.mirror.start();
+    await settle(third.mirror);
+    expect(batches(third)).toBe(0);
+    expect(third.store.gets).toHaveLength(0);
+  });
+
+  it('runs the pod pass once the store opens after an earlier failed open, without a restart', async () => {
+    const t = setup([hostedFile(1)], {}, await seeded());
+    t.open.fail = 'failed';
+    t.store.missing.add(URL_);
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.store.gets).toHaveLength(0);
+    t.open.fail = null;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle(t.mirror);
+    expect(t.store.gets).toContain(URL_);
   });
 });
 

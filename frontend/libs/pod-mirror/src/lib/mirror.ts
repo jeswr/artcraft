@@ -335,6 +335,7 @@ export class PodMirror {
     if (this.o.events) this.unsubscribers.push(this.o.events.subscribe((event) => this.onEvent(event)));
     this.changed();
     void this.prepare().then(() => this.reconcile().catch(() => undefined));
+    // The pod can only be asked once the store is open; `prepare` asks for a pass when it is.
     void this.verify(false, this.o.verifyOnStartAfterMs).catch(() => undefined);
     this.armInterval();
     this.armVerify();
@@ -417,7 +418,14 @@ export class PodMirror {
    */
   verify(force = false, minGapMs = this.o.verifyIntervalMs): Promise<VerifyResult> {
     if (!this.running) return Promise.resolve({ checked: 0, flagged: 0, requeued: 0, stoppedBy: 'not-running' });
-    this.verifying ??= this.verifyPass(force, minGapMs).finally(() => {
+    // A request that comes while a pass runs waits for it and is then judged on its own (the
+    // pass that just ended usually makes it "too soon"): the start pass cannot swallow the one
+    // that follows the store opening.
+    if (this.verifying) {
+      const running = this.verifying;
+      return running.then(() => this.verify(force, minGapMs), () => this.verify(force, minGapMs));
+    }
+    this.verifying = this.verifyPass(force, minGapMs).finally(() => {
       this.verifying = null;
     });
     return this.verifying;
@@ -930,54 +938,80 @@ export class PodMirror {
    * only ever writes, it never deletes. The multi-device limit is in the README.
    */
   private async verifyPass(force: boolean, minGapMs: number): Promise<VerifyResult> {
-    const { journal, account, hosted } = this.o;
+    const { journal, account } = this.o;
     const result: VerifyResult = { checked: 0, flagged: 0, requeued: 0, stoppedBy: 'done' };
     const state = await journal.getAccountState(account);
-    if (!force && state?.verifiedAt !== undefined && this.o.now() - state.verifiedAt < minGapMs) return { ...result, stoppedBy: 'too-soon' };
+    // The hosted pass and the pod pass are recorded apart: one that could not run (the pod was
+    // not open yet, the hosted side was down) never makes the other repeat.
+    const due = (at: number | undefined) => force || at === undefined || this.o.now() - at >= minGapMs;
+    const hostedDue = due(state?.verifiedAt);
+    const podDue = due(state?.podVerifiedAt);
+    if (!hostedDue && !podDue) return { ...result, stoppedBy: 'too-soon' };
     // A lookup made as a different hosted user, or on another backend, would call every item "gone".
     if (!this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
+    let stoppedBy: VerifyResult['stoppedBy'] = 'done';
+    if (hostedDue) {
+      const hostedStop = await this.hostedPass(result);
+      if (hostedStop) stoppedBy = hostedStop;
+      else await journal.updateAccountState(account, { verifiedAt: this.o.now() }).catch(() => undefined);
+    }
+    if (podDue && this.running) {
+      const podStop = await this.podPass(result);
+      if (podStop) stoppedBy = stoppedBy === 'done' ? podStop : stoppedBy;
+      else await journal.updateAccountState(account, { podVerifiedAt: this.o.now() }).catch(() => undefined);
+    }
+    return { ...result, stoppedBy };
+  }
+
+  /** Marks saved items the hosted side no longer has. Returns why it stopped early, if it did. */
+  private async hostedPass(result: VerifyResult): Promise<VerifyResult['stoppedBy'] | undefined> {
+    const { hosted } = this.o;
     const signal = this.lifecycle?.signal;
     const saved = [...this.records.values()].filter((record) => record.state === 'saved').map((record) => record.token);
-    const podAnswers = new Map<string, 'present' | 'missing'>();
-    const podCheck = { halted: !this.store, answers: podAnswers };
     for (let at = 0; at < saved.length; at += this.o.verifyChunk) {
-      if (!this.canTalk()) return { ...result, stoppedBy: this.running ? 'hosted-unavailable' : 'not-running' };
+      if (!this.canTalk()) return this.running ? 'hosted-unavailable' : 'not-running';
       const chunk = saved.slice(at, at + this.o.verifyChunk);
       const batch = await hosted.getMediaFiles(chunk, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
-      if (!batch.ok || !this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
+      if (!batch.ok || !this.sameIdentity()) return 'hosted-unavailable';
       const present = new Set(batch.value.map((file) => file.token));
       result.checked += chunk.length;
-      const alive: string[] = [];
       for (const token of chunk) {
         if (present.has(token)) {
           await this.markPresent(token);
-          alive.push(token);
           continue;
         }
         // Absent from a batch is a hint. Only the item's own lookup answering "not found" counts.
         const own = await hosted.getMediaFile(token, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
-        if (!own.ok && own.kind === 'unavailable') return { ...result, stoppedBy: 'hosted-unavailable' };
+        if (!own.ok && own.kind === 'unavailable') return 'hosted-unavailable';
         if (own.ok) {
           await this.markPresent(token);
-          alive.push(token);
           continue;
         }
-        if (!this.canTalk()) return { ...result, stoppedBy: this.running ? 'hosted-unavailable' : 'not-running' };
-        if (!this.sameIdentity()) return { ...result, stoppedBy: 'hosted-unavailable' };
+        if (!this.canTalk()) return this.running ? 'hosted-unavailable' : 'not-running';
+        if (!this.sameIdentity()) return 'hosted-unavailable';
         const record = this.records.get(token);
         if (record?.state !== 'saved') continue;
         if (!record.goneFromArtcraft) await this.patch(token, { goneFromArtcraft: true });
         result.flagged++;
       }
-      for (const token of alive) {
-        if (!this.canTalk() || !this.sameIdentity()) break;
-        if (await this.verifyPodCopy(token, podCheck, signal)) result.requeued++;
-      }
     }
-    // A pass that could not ask the pod at all is not counted as done: the next start tries again.
-    if (podCheck.halted && saved.length > 0) return { ...result, stoppedBy: 'pod-unavailable' };
-    await journal.updateAccountState(account, { verifiedAt: this.o.now() }).catch(() => undefined);
-    return result;
+    return undefined;
+  }
+
+  /**
+   * Asks the pod about every saved item. Returns why it stopped early, if it did: a pass that
+   * could not ask the pod is not recorded as done, so the next opportunity tries again.
+   */
+  private async podPass(result: VerifyResult): Promise<VerifyResult['stoppedBy'] | undefined> {
+    const signal = this.lifecycle?.signal;
+    const check = { halted: false, answers: new Map<string, 'present' | 'missing'>() };
+    if (!this.store) return 'pod-unavailable';
+    for (const token of [...this.records.keys()]) {
+      if (!this.canTalk() || !this.sameIdentity()) return this.running ? 'pod-unavailable' : 'not-running';
+      if (check.halted) return 'pod-unavailable';
+      if (await this.verifyPodCopy(token, check, signal)) result.requeued++;
+    }
+    return check.halted ? 'pod-unavailable' : undefined;
   }
 
   /** True when the pod copy of a saved item is definitively gone and the item was queued to be copied again. */
@@ -1005,10 +1039,13 @@ export class PodMirror {
       check.answers.set(url, answer);
     }
     if (answer !== 'missing') return false;
+    // Only an item the hosted side still has is copied again; one it no longer lists is left to the hosted pass's mark.
+    const own = await this.o.hosted.getMediaFile(token, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
+    if (!own.ok || !this.sameIdentity()) return false;
     return withCopyLock(url, async () => {
       const current = this.records.get(token);
       if (current?.state !== 'saved' || current.descriptionUrl !== url) return false;
-      // The hosted item is still there (the caller only passes those): copy it again from the start.
+      // The hosted item is still there: copy it again from the start.
       await this.patch(token, {
         state: 'pending',
         descriptionUrl: undefined,
@@ -1494,6 +1531,8 @@ export class PodMirror {
       this.preparing = null;
       this.changed();
       this.pump();
+      // The store is open: the pod pass that could not run at start (or after a reconnect) can.
+      if (this.running && this.store && this.exposureOk) void this.verify(false, this.o.verifyOnStartAfterMs).catch(() => undefined);
     });
     return this.preparing;
   }

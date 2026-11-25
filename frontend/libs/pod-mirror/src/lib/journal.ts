@@ -76,6 +76,8 @@ export interface AccountState {
   bytesEverOk?: boolean;
   /** When the hosted deletions were last checked (ms, local clock, scheduling only). */
   verifiedAt?: number;
+  /** When the pod copies were last checked (ms, local clock, scheduling only); apart from `verifiedAt`. */
+  podVerifiedAt?: number;
   /** Library containers the person confirmed are private, for servers that cannot say. */
   confirmedPrivate?: string[];
   /** The last "copy my existing library" run; only a `running` one resumes by itself. */
