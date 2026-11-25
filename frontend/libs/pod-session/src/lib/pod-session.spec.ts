@@ -303,6 +303,36 @@ describe('an ordinary window that may still hold pod credentials', () => {
     expect(t.podMode.log).not.toContain('cleared');
   });
 
+  it('finishes a disconnect that the pod window handed over: wipes again, then clears the flag, and keeps the answer', async () => {
+    // The pod window asked the shell to leave and left its answer; the shell keeps the flag set.
+    const t = setup({ flagged: true, marker: 'done' });
+    await t.session.start();
+    expect(t.order).toEqual(['wipe']);
+    expect(t.podMode.log).toEqual(['cleared']);
+    expect(t.session.getState()).toEqual({ kind: 'disconnected', outcome: 'disconnected' });
+    const failed = setup({ flagged: true, marker: 'done-revocation-failed' });
+    await failed.session.start();
+    expect(failed.podMode.log).toEqual(['cleared']);
+    expect(failed.session.getState()).toEqual({ kind: 'signed-out-locally' });
+  });
+
+  it('an interrupted disconnect (the flag survived a restart) is finished before anything else runs', async () => {
+    // No marker at all: the previous window was gone before it could write one.
+    const t = setup({ flagged: true });
+    await t.session.start();
+    expect(t.order).toEqual(['wipe']);
+    expect(t.createAuth).not.toHaveBeenCalled();
+    expect(t.podMode.log).toEqual(['cleared']);
+  });
+
+  it('keeps asking to finish for as long as the wipe cannot be confirmed', async () => {
+    const t = setup({ flagged: true, wipe: () => 'deferred' });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'wipe-failed' });
+    expect(t.podMode.log).toEqual([]);
+    expect(t.session.finishing()).toBe(true);
+  });
+
   it('refuses to connect while credentials may exist', async () => {
     const t = setup({ flagged: true, wipe: () => 'deferred' });
     await t.session.connect(ISSUER);

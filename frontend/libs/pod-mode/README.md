@@ -21,8 +21,12 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
   800 ms, and a refusal starts a 5 s cool-down), persists the record, remembers the approval in
   process memory as a one-shot "fresh connect" and rebuilds the main window. Adding a storage
   origin works the same way (`addStorageOrigin`). Leaving is `pod_mode_leave_command`; the app
-  cannot verify the page wiped first, so `leavePodMode(wipe)` enforces the order. After a wipe
-  in a window that is not in pod mode, `pod_mode_credentials_cleared_command` clears the flag.
+  cannot verify the page wiped first, so `leavePodMode(wipe)` enforces the order, but leaving
+  **never clears `credentials_may_exist`**: it records "not in pod mode, credentials may still
+  exist" and rebuilds the window as a restricted "finishing" window. Only
+  `pod_mode_credentials_cleared_command`, sent by a window that is not in pod mode after its own
+  wipe reported success, clears the flag (and leaving outside pod mode is refused, so the flag
+  cannot be raised that way).
   No credential ever reaches Rust: the commands take origins only, and only the main window may
   call them. Commands are serialised: a second one while one is in progress answers `busy`.
 - **One CSP header, read live.** In pod mode the app sets a single `Content-Security-Policy`
@@ -90,9 +94,12 @@ What remains:
   session). The session library therefore deletes every pod-auth database (the names pod-auth's key-value store
   creates, whatever the client id) before a fresh sign-in, and the UI
   shows the WebID. A separate data directory per mode would remove this; it is noted, not built.
-- **The finishing window.** Leaving or a failed wipe leaves the record disabled but the
-  `credentials_may_exist` flag set, so the window is restricted (no analytics, header policy)
-  and only offers "Finish disconnecting" until a wipe succeeds and the flag is cleared.
+- **The finishing window.** Leaving, or a quit or crash at any point after the app saved the
+  leave, leaves the record disabled but the `credentials_may_exist` flag set, so every launch
+  is restricted (no analytics, header policy) and the window deletes the pod-auth data before
+  doing anything else; it offers "Finish disconnecting" if that delete cannot be confirmed.
+  Only a confirmed wipe in that window clears the flag. This also covers a page that skipped
+  its wipe before asking to leave: the finishing window repeats it.
 - `pod_mode_leave_command` cannot check that the window wiped first. A compromised page can
   skip the wipe and leave, which restores analytics in a window that still holds pod data.
 - The person can approve a malicious origin; the dialog names it, and nothing else defends

@@ -43,14 +43,21 @@ pub fn add_storage_origin(
   Ok(next)
 }
 
-/// Back to ordinary mode, credentials flag cleared. The window asks for this only after its
-/// wipe reported success; the app cannot check, so the window's flow enforces the order.
-pub fn leave() -> PodModeRecord {
-  PodModeRecord::default()
+/// Leaves pod mode: the issuer and storage origins go, the window stops being a pod window, but
+/// `credentials_may_exist` STAYS set. The app cannot check that the page wiped its credential
+/// store (a compromised page can skip the wipe, and an interruption can stop a real one), so
+/// only a later `credentials_cleared`, asked for by a window that is no longer in pod mode after
+/// its own wipe reported success, clears the flag. Until then every launch is restricted and
+/// finishes the wipe first.
+pub fn leave(record: &PodModeRecord) -> Result<PodModeRecord, TransitionError> {
+  if !record.enabled {
+    return Err(TransitionError::NotInPodMode);
+  }
+  Ok(PodModeRecord { enabled: false, issuer: None, storage_origins: Vec::new(), credentials_may_exist: true })
 }
 
 /// A successful wipe in a window that is not in pod mode clears the flag. Pod mode itself is
-/// never ended this way.
+/// never ended this way. This is the only way the flag is cleared.
 pub fn credentials_cleared(record: &PodModeRecord) -> Result<PodModeRecord, TransitionError> {
   if record.enabled {
     return Err(TransitionError::InPodMode);
@@ -109,7 +116,29 @@ mod tests {
   }
 
   #[test]
-  fn leave_is_the_ordinary_record() {
-    assert_eq!(leave(), PodModeRecord::default());
+  fn leave_drops_the_origins_but_keeps_the_credentials_flag() {
+    let mut pod = enter("https://login.example", HttpRefused).unwrap();
+    pod = add_storage_origin(&pod, "https://pod.example", HttpRefused).unwrap();
+    let left = leave(&pod).unwrap();
+    assert_eq!(
+      left,
+      PodModeRecord { enabled: false, issuer: None, storage_origins: Vec::new(), credentials_may_exist: true },
+    );
+    assert!(left.restricted());
+    assert!(crate::record::is_valid(&left, HttpRefused), "the record must survive a restart");
+  }
+
+  #[test]
+  fn leave_needs_pod_mode_so_it_can_never_raise_the_flag_in_an_ordinary_window() {
+    assert_eq!(leave(&PodModeRecord::default()), Err(TransitionError::NotInPodMode));
+    let flagged = PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() };
+    assert_eq!(leave(&flagged), Err(TransitionError::NotInPodMode));
+  }
+
+  #[test]
+  fn only_the_wipe_confirmation_after_a_leave_reaches_the_ordinary_record() {
+    let pod = enter("https://login.example", HttpRefused).unwrap();
+    let left = leave(&pod).unwrap();
+    assert_eq!(credentials_cleared(&left), Ok(PodModeRecord::default()));
   }
 }

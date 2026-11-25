@@ -185,19 +185,24 @@ and trust that server."
     Ok(Reply::Applied)
   }
 
-  /// Leave pod mode. The window asks only after its own wipe reported success; the app cannot
-  /// check that, so the window's flow enforces the order.
+  /// Leave pod mode. The window asks after its own wipe reported success, but the app cannot
+  /// check that, so the record keeps `credentials_may_exist` set and the rebuilt window is a
+  /// restricted "finishing" window. The flag clears only when that window confirms a wipe
+  /// through `credentials_cleared`; a quit or a failure before then leaves it set for the
+  /// next launch.
   pub async fn leave(&self, caller: &str) -> Result<Reply, CommandError> {
     self.only_main(caller)?;
     let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
     let before = self.store.record();
-    self.persist(&before, &transition::leave())?;
+    let next = transition::leave(&before)?;
+    self.persist(&before, &next)?;
     self.store.set_fresh(None);
     self.rebuilt().await?;
     Ok(Reply::Applied)
   }
 
-  /// A wipe succeeded in a window that is not in pod mode: the credentials flag clears.
+  /// A wipe succeeded in a window that is not in pod mode: the credentials flag clears. This is
+  /// the only command that clears it.
   pub async fn credentials_cleared(&self, caller: &str) -> Result<Reply, CommandError> {
     self.only_main(caller)?;
     let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
@@ -452,14 +457,58 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn leave_clears_the_record_and_the_approval_then_rebuilds() {
+  async fn leave_ends_pod_mode_but_keeps_the_credentials_flag_and_forgets_the_approval() {
     let (w, c) = world();
     in_pod_mode(&w);
     *w.fresh.lock().unwrap() = Some(ISSUER.into());
     assert_eq!(c.leave(MAIN).await, Ok(Reply::Applied));
-    assert_eq!(*w.record.lock().unwrap(), PodModeRecord::default());
+    let record = w.record.lock().unwrap().clone();
+    assert!(!record.enabled && record.issuer.is_none() && record.storage_origins.is_empty());
+    assert!(record.credentials_may_exist, "only a confirmed wipe may clear the flag");
+    assert!(record.restricted());
     assert!(w.fresh.lock().unwrap().is_none());
     assert_eq!(w.rebuilds.load(SeqCst), 1);
+  }
+
+  #[tokio::test]
+  async fn leave_outside_pod_mode_is_refused_and_changes_nothing() {
+    let (w, c) = world();
+    assert_eq!(c.leave(MAIN).await, Err(CommandError::NotInPodMode));
+    assert!(w.persisted.lock().unwrap().is_empty());
+    assert_eq!(w.rebuilds.load(SeqCst), 0);
+  }
+
+  #[tokio::test]
+  async fn a_disconnect_interrupted_after_leave_leaves_the_flag_for_the_next_launch() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    // The window cannot be rebuilt, so the app restarts; the finishing window never gets to confirm.
+    *w.rebuild_fails.lock().unwrap() = true;
+    assert_eq!(c.leave(MAIN).await, Err(CommandError::WindowFailed));
+    assert_eq!(w.restarts.load(SeqCst), 1);
+    let on_disk = w.persisted.lock().unwrap().last().cloned().unwrap();
+    assert!(!on_disk.enabled && on_disk.credentials_may_exist);
+    // Next launch: a new controller reading what was persisted. It is still restricted, and
+    // nothing but a wipe confirmation clears it.
+    let (w2, c2) = world();
+    *w2.record.lock().unwrap() = on_disk;
+    assert!(w2.record.lock().unwrap().restricted());
+    assert_eq!(c2.leave(MAIN).await, Err(CommandError::NotInPodMode));
+    assert_eq!(c2.reload(MAIN).await, Ok(Reply::Applied));
+    assert!(w2.record.lock().unwrap().credentials_may_exist, "a reload does not clear it");
+    assert_eq!(c2.credentials_cleared(MAIN).await, Ok(Reply::Applied));
+    assert_eq!(*w2.record.lock().unwrap(), PodModeRecord::default());
+  }
+
+  #[tokio::test]
+  async fn a_failed_write_on_leave_keeps_the_pod_mode_record() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    let before = w.record.lock().unwrap().clone();
+    *w.persist_fails.lock().unwrap() = true;
+    assert_eq!(c.leave(MAIN).await, Err(CommandError::PersistFailed));
+    assert_eq!(*w.record.lock().unwrap(), before);
+    assert_eq!(w.rebuilds.load(SeqCst), 0);
   }
 
   #[tokio::test]

@@ -16,8 +16,8 @@ pub struct PodModeRecord {
   pub enabled: bool,
   pub issuer: Option<String>,
   pub storage_origins: Vec<String>,
-  /// Set when pod mode is entered; cleared only by a leave the window asks for after its wipe
-  /// reported success, or by a successful wipe in an ordinary window. While it is set, even an
+  /// Set when pod mode is entered and kept by leaving it; cleared only by a successful wipe
+  /// that a window outside pod mode confirms (`credentials_cleared`). While it is set, even an
   /// ordinary window loads no analytics: pod credentials may still be in web storage.
   #[serde(default)]
   pub credentials_may_exist: bool,
@@ -177,6 +177,22 @@ mod tests {
     assert_eq!(load(dir.path(), HttpRefused), Loaded::Valid(flagged.clone()));
     assert!(flagged.restricted() && !flagged.enabled);
     assert!(!PodModeRecord::default().restricted());
+  }
+
+  #[test]
+  fn an_interrupted_disconnect_survives_a_restart_until_a_wipe_is_confirmed() {
+    use crate::transition::{credentials_cleared, leave};
+    let dir = tempfile::tempdir().unwrap();
+    save(dir.path(), &enabled(ISSUER, &[POD])).unwrap();
+    let Loaded::Valid(pod) = load(dir.path(), HttpRefused) else { panic!("valid") };
+    save(dir.path(), &leave(&pod).unwrap()).unwrap();
+    // The app quits here: the next start reads a restricted, finishing record from disk.
+    let Loaded::Valid(finishing) = load(dir.path(), HttpRefused) else { panic!("valid") };
+    assert!(!finishing.enabled && finishing.credentials_may_exist && finishing.restricted());
+    assert!(record_path(dir.path()).exists());
+    // Only the confirmed wipe returns the app to the ordinary record, which is "no file".
+    save(dir.path(), &credentials_cleared(&finishing).unwrap()).unwrap();
+    assert!(!record_path(dir.path()).exists());
   }
 
   #[test]

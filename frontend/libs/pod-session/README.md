@@ -60,7 +60,10 @@ await session.leave();           // from any state: revoke, wipe locally, ask th
 
 - **Finishing.** An ordinary window the app flags as possibly holding credentials
   (`finishing()`) loads no pod-auth and offers only "Finish disconnecting" (`leave()`); once
-  the wipe is confirmed the app clears its flag (`requestCredentialsCleared`).
+  the wipe is confirmed the app clears its flag (`requestCredentialsCleared`). Leaving pod
+  mode always passes through this window: the app keeps the flag when it ends pod mode, so the
+  window that follows a leave (or a launch after an interrupted one) repeats the wipe and is
+  the only thing that clears the flag.
 
 ## Build-time configuration
 
