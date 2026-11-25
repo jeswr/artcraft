@@ -7,6 +7,7 @@ pod-mode requests.
 States: `disconnected` (with an `outcome` of `disconnected` or `declined` so a rebuilt window
 still shows the answer), `connecting` (the app's native dialog is open), `ready-to-sign-in` (the person approved the
 address; nothing starts until they click Continue), `signing-in`,
+`needs-approval(origin, phase)` (pod-auth needs to read from an address the window may not contact yet),
 `connected(webId)`, `leaving`, `signed-out-locally` (disconnected here, but the provider could
 not be told), `error(kind)` and `unsupported(reason)`. Error kinds and reasons are closed sets;
 no state, message or log carries a token, a callback URL or a host's error text.
@@ -14,14 +15,16 @@ no state, message or log carries a token, a callback URL or a host's error text.
 ```ts
 const session = createPodSession({
   config, // readConfig(identifier)
-  createAuth: () => createDefaultAuth(config, { openUrl, onOpenUrl }),
+  createAuth: (options) => createDefaultAuth(config, { openUrl, onOpenUrl }, options),
   wipeStores: () => deletePodAuthDatabases(),
   podMode: realPodModePort(requests), // requests: the app's pod-mode commands
 });
 await session.start();           // settle a step left by a rebuild, self-test, restore
-await session.connect(issuer);   // validates, asks the app, which confirms and rebuilds
+await session.connect(input);    // a WebID or a provider address: validates, asks the app, which confirms and rebuilds
 await session.beginSignIn();     // the click in the rebuilt window that starts the sign-in
 const podFetch = session.getFetch(); // pod-auth's fetch, or null unless connected
+await session.approveOrigin();   // from needs-approval: asks the app (dialog, rebuild)
+await session.retry();           // from a declined address: runs the restore again
 await session.leave();           // from any state: revoke, wipe locally, ask the app to leave
 ```
 
@@ -105,35 +108,58 @@ checks that the wipe finds the database names pod-auth really creates.
 `wipe.ts` matches pod-auth's IndexedDB database names (key-value-kit naming) as of the vendored
 packages; the integration spec fails if a later version renames them.
 
-## Known limit: a WebID on another origin than the issuer
+## A WebID on another origin than the provider
 
-During `login()` and `restore()`, `@jeswr/pod-auth` reads the WebID document itself
-(`boundary.learn` -> `secureDocumentFetch`) on the global fetch it captured when it was built
-(`nonReactiveFetch()` in `createProviders`; there is no `fetch` option for the browser
-`PodAuth`, only for the agent path). The window's policy lists the issuer's origin only, so a
-WebID on any other origin (issuer `https://login.example`, WebID `https://id.example/...`; or
-issuer `https://solidcommunity.net`, WebID `https://alice.solidcommunity.net/...`) is blocked
-after the token exchange: `login()` rejects, the session is scrubbed and the state is
-`error('sign-in-failed')`, with no dialog. `learn` runs **before** the session is persisted, so
-even an approved origin could not resume with `restore()`.
+The person may type either a **WebID** (`https://id.example/alice#me`) or a **provider address**
+(`https://login.example`). `parseSignInInput` tells them apart: a bare origin is a provider, an
+https URL with a path or fragment (no credentials, no query) is a WebID. Nothing is fetched to
+decide.
 
-This cannot be fixed in ArtCraft without editing the vendored SDK. The change that is needed in
-`@jeswr/pod-auth` (API shape, not implemented here):
+`@jeswr/pod-auth` reads some documents itself before and after the sign-in: issuer metadata, the
+Client Identifier Document, the WebID profile (also the engine's verify read) and storage
+descriptions. Its `fetch` option is the transport for exactly those body-less, credential-less
+GET and HEAD reads, never for token, registration or revocation POSTs and never for
+`auth.fetch`. The session passes the origin gate there, in explain-first mode
+(`{ prompt: false }`): a request to an origin the window's policy does not list is **not sent**;
+it is refused with `StorageOriginRefused('needs-approval', origin)`, which pod-auth reports as
+`InjectedFetchError` with the refusal as its `cause` (`refusalOf` finds it there). The gate passes
+the request through unchanged (so `redirect` is honoured) and returns the real response.
 
-1. `PodAuthOptions.fetch?: typeof fetch`, the transport for pod-auth's own unauthenticated
-   requests (WebID and storage-description reads, issuer metadata, token endpoints), as
-   `createAgentProviders` already accepts through `policy.fetch`. ArtCraft would pass a fetch
-   that asks the app to admit an unlisted origin first.
-2. An ordering guarantee plus a hook: `ui.onIdentity?(identity: { webId: string; issuer: string },
-   signal: AbortSignal): Promise<'continue' | 'interrupted'>`, called after the token exchange
-   **and after the session (tokens, DPoP key) has been durably remembered**, before
-   `boundary.learn`. ArtCraft would admit the WebID origin there (the app rebuilds the window);
-   `'interrupted'` makes `login()` reject with a typed code (`interrupted`) without discarding the
-   remembered session, so the rebuilt window's `restore()` runs `learn` with the origin allowed
-   and there is no second trip to the identity provider.
+- **WebID typed.** The app is asked to enter pod mode for the WebID's own origin, which becomes the
+  window's recorded origin. After the dialog and rebuild, Continue runs `login({ webId })`;
+  pod-auth reads the profile first, finds the issuer there, and goes to it. A refusal before the
+  authorization request costs no trip to the provider.
+- **Provider typed.** The window allows the provider only. If pod-auth then needs another origin
+  (the WebID the provider reports, the Client Identifier Document host), the state is
+  `needs-approval`: the page says which address and that nothing was sent there, and **Allow**
+  calls `approveOrigin()` (native dialog, rebuild). The rebuilt window offers Continue again with
+  what was typed.
+- **Restore.** A refusal while restoring keeps the stored session: nothing is wiped, logged out
+  or revoked. `needs-approval` offers Allow (and Leave); a declined or too-fast answer is an
+  error that `retry()` runs again.
+- `InvalidInjectedResponseError` (the supplied fetch returned something pod-auth cannot accept)
+  is the fixed plain failure `invalid-response`.
 
-Until then only a WebID on the issuer's origin signs in; a storage root or Type Index on another
-origin works through the gate.
+What survives the rebuild is a `localStorage` entry (`artcraft.podSession.pending`) holding only
+the hint the person typed and the origin awaiting approval: never a token, code, verifier or
+callback URL. It is read back through the same validators as fresh input, and used only when the
+app also reports a fresh approval for that exact origin. It is cleared on success, decline,
+cancel and leave. The app sets that fresh approval after an accepted add as well; without a
+pending hint (a connected session's later approvals) the window just restores. The trade-off: a
+planted hint plus a planted record plus an Allow the person clicked could offer one Continue click,
+and the page shows the address (and WebID) before it.
+
+**Remaining limits.**
+
+- **An issuer-only sign-in costs a second sign-in when the WebID is elsewhere.** The engine
+  verifies the WebID profile before persisting the session, so a refusal then fails the sign-in
+  after authentication with nothing stored, and the retry goes to the provider again. Typing the
+  WebID avoids this.
+- POSTs (token, registration, revocation) and the browser's own redirect hops are not routed
+  through the gate. Under the window's policy they fail untyped, and a provider whose token
+  endpoint is on another origin than the issuer is not supported.
+- The first sign-in may ask about the Client Identifier Document host (it is another origin than
+  the provider).
 
 ## Deep links (the sign-in callback)
 

@@ -12,15 +12,16 @@ import {
   reloadPodWindow,
 } from '@storyteller/pod-mode';
 import { checkConfig, type ConfigCheck, type PodSessionConfig } from './config.js';
-import { parseIssuerInput } from './issuer.js';
+import { parseSignInInput } from './issuer.js';
+import { localStoragePending, originOfHint, type PendingStore, type SignInHint } from './pending.js';
 import { runSelfTest, type SelfTestResult } from './self-test.js';
 import type { PodSessionErrorKind, PodSessionState } from './state.js';
-import { createOriginGate, gateFetch, type OriginAdmission } from './storage-origins.js';
+import { createOriginGate, gateFetch, isInvalidInjectedResponse, type OriginAdmission, refusalOf } from './storage-origins.js';
 import type { WipeOutcome } from './wipe.js';
 
 /** The part of `@jeswr/pod-auth`'s `PodAuth` this machine uses. */
 export interface PodAuthPort {
-  login(hint: { issuer: string }, options: { signal: AbortSignal }): Promise<{ webId: string | null }>;
+  login(hint: { issuer: string } | { webId: string }, options: { signal: AbortSignal }): Promise<{ webId: string | null }>;
   restore(): Promise<{ webId: string | null } | null>;
   logout(): Promise<void>;
   dispose?(): void;
@@ -81,13 +82,19 @@ export interface Marker {
 
 export interface PodSessionDeps {
   config: PodSessionConfig;
-  /** Builds a fresh pod-auth. Called only where credentials may be read or created. */
-  createAuth(): PodAuthPort;
+  /**
+   * Builds a fresh pod-auth. Called only where credentials may be read or created.
+   * `options.fetch` is pod-auth's transport for its own unauthenticated reads: the origin gate in
+   * its explain-first mode. Absent where there is no shell (a plain browser).
+   */
+  createAuth(options?: { fetch?: typeof fetch }): PodAuthPort;
   /** Deletes every locally stored pod credential. Rejects when it cannot; `deferred` is not done. */
   wipeStores(): Promise<WipeOutcome>;
   selfTest?: () => Promise<SelfTestResult>;
   podMode?: PodModePort;
   marker?: Marker;
+  /** The hint typed and the origin approved while a sign-in waits for a window rebuild. */
+  pending?: PendingStore;
 }
 
 export interface PodSession {
@@ -106,6 +113,14 @@ export interface PodSession {
   finishing(): boolean;
   /** Abandons a sign-in that is waiting for the browser. */
   cancel(): void;
+  /**
+   * From `needs-approval`: asks the app to let this window contact the address pod-auth needs
+   * (native dialog; the window reloads when it is allowed). A sign-in is then offered again; a
+   * restore simply runs again. A decline ends in `error('origin-declined')`.
+   */
+  approveOrigin(): Promise<void>;
+  /** From an error that left the stored session alone (a declined address): tries the restore again. */
+  retry(): Promise<void>;
   /**
    * Leaves pod mode from any state: revokes if it can, always wipes the local data, then asks
    * the app to leave. Revocation failing does not stop the wipe; a wipe that cannot finish is
@@ -131,6 +146,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   const podMode = deps.podMode ?? realPodModePort();
   const marker = deps.marker ?? localStorageMarker();
   const selfTest = deps.selfTest ?? (() => runSelfTest());
+  const pending = deps.pending ?? localStoragePending(undefined, deps.config.allowLoopbackHttp);
 
   let state: PodSessionState = { kind: 'disconnected' };
   const listeners = new Set<(state: PodSessionState) => void>();
@@ -140,6 +156,9 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   let leaving: Promise<void> | null = null;
   const originGate = podMode.admission ? createOriginGate(podMode.admission) : null;
   let gated: { source: typeof fetch; fetch: typeof fetch } | null = null;
+  // pod-auth's own reads: an unlisted origin is refused at once so the page can explain first.
+  const authFetch: typeof fetch | undefined = originGate ? gateFetch((input, init) => globalThis.fetch(input, init), originGate, { prompt: false }) : undefined;
+  const buildAuth = (): PodAuthPort => deps.createAuth(authFetch ? { fetch: authFetch } : undefined);
 
   const set = (next: PodSessionState): void => {
     state = next;
@@ -179,7 +198,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
         // An ordinary window, or a build with no client yet, has never held a session.
         if (!podMode.isPodMode() || checkConfig(deps.config) === 'not-configured') return true;
         if (gate() !== null) return false;
-        auth = deps.createAuth();
+        auth = buildAuth();
       }
       await auth.logout();
       return true;
@@ -206,55 +225,81 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     if (!wiped) marker.set(revoked ? 'wipe' : 'leave-revocation-failed');
   }
 
-  async function signIn(issuer: string): Promise<void> {
+  /** The pod-auth login hint for what the person typed. */
+  const loginHint = (hint: SignInHint) => (hint.kind === 'webid' ? { webId: hint.webId } : { issuer: hint.issuer });
+
+  async function signIn(hint: SignInHint, origin: string): Promise<void> {
     const blocked = gate();
     if (blocked !== null) return fail(blocked);
     const controller = new AbortController();
     abort = controller;
-    set({ kind: 'signing-in', issuer });
+    set({ kind: 'signing-in', issuer: origin });
     try {
       // A fresh sign-in starts from empty stores: anything already there was not written by
       // this window's own sign-in. A delete that is only queued is not empty.
       if ((await deps.wipeStores()) !== 'wiped') return fail('wipe-failed');
       if (controller.signal.aborted) return settleCancelled();
-      const created = deps.createAuth();
+      const created = buildAuth();
       auth = created;
-      const identity = await created.login({ issuer }, { signal: controller.signal });
+      const identity = await created.login(loginHint(hint), { signal: controller.signal });
       if (controller.signal.aborted) {
         await scrub();
         return settleCancelled();
       }
       if (identity.webId === null) {
         await scrub();
+        pending.set(null);
         return fail('sign-in-failed');
       }
+      pending.set(null);
       set({ kind: 'connected', webId: identity.webId });
     } catch (error) {
       // Tokens may already be stored when the failure came after the exchange.
       await scrub();
       if (controller.signal.aborted) return settleCancelled();
-      fail(classify(error));
+      settleFailure(error, 'sign-in', hint);
     } finally {
       if (abort === controller) abort = null;
     }
+  }
+
+  /**
+   * A failure that may be the origin gate speaking: an address that is not allowed yet is
+   * explained first (`needs-approval`; what the person typed is kept so the sign-in can be
+   * offered again after the window reloads), a final refusal is reported as such, and a
+   * document pod-auth could not accept is a plain failure. Anything else is classified as before.
+   */
+  function settleFailure(error: unknown, phase: 'sign-in' | 'restore', hint?: SignInHint): void {
+    const refusal = refusalOf(error);
+    if (refusal?.reason === 'needs-approval') {
+      if (phase === 'sign-in' && hint) pending.set({ hint, origin: refusal.origin });
+      return set({ kind: 'needs-approval', origin: refusal.origin, phase });
+    }
+    if (phase === 'sign-in') pending.set(null);
+    if (refusal) return fail(refusal.reason === 'limit' ? 'origin-limit' : refusal.reason === 'declined' ? 'origin-declined' : phase === 'restore' ? 'restore-failed' : 'sign-in-failed');
+    if (isInvalidInjectedResponse(error)) return fail('invalid-response');
+    fail(phase === 'restore' ? 'restore-failed' : classify(error));
   }
 
   async function restore(): Promise<void> {
     const blocked = gate();
     if (blocked !== null) return fail(blocked);
     try {
-      const created = deps.createAuth();
+      const created = buildAuth();
       auth = created;
       const identity = await created.restore();
       if (identity?.webId) set({ kind: 'connected', webId: identity.webId });
       else releaseAuth();
-    } catch {
+    } catch (error) {
+      // A refusal is never a reason to drop the stored session: nothing is wiped, so approving
+      // the address (or declining) leaves the sign-in data as it was.
       releaseAuth();
-      fail('restore-failed');
+      settleFailure(error, 'restore');
     }
   }
 
   function settleCancelled(): void {
+    pending.set(null);
     releaseAuth();
     set({ kind: 'disconnected' });
   }
@@ -293,6 +338,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   }
 
   async function runLeave(): Promise<void> {
+    pending.set(null);
     abort?.abort();
     set({ kind: 'leaving', step: 'revoking' });
     const revoked = await revoke();
@@ -329,13 +375,13 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
 
     start() {
       started ??= (async () => {
-        const pending = marker.get();
+        const markerPending = marker.get();
         const inPod = podMode.isPodMode();
-        if (inPod && (pending === 'leave' || pending === 'leave-revocation-failed')) {
-          await settleLeaveMarker(pending);
+        if (inPod && (markerPending === 'leave' || markerPending === 'leave-revocation-failed')) {
+          await settleLeaveMarker(markerPending);
           return state;
         }
-        if (inPod && pending === 'wipe') {
+        if (inPod && markerPending === 'wipe') {
           set({ kind: 'leaving', step: 'clearing' });
           if (!(await wipeNow())) {
             fail('wipe-failed');
@@ -348,10 +394,10 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
           // only thing to do is delete them; nothing here opens pod-auth.
           marker.set(null);
           set({ kind: 'leaving', step: 'clearing' });
-          if (await wipeNow()) await finishLeave(pending !== 'leave-revocation-failed' && pending !== 'done-revocation-failed');
+          if (await wipeNow()) await finishLeave(markerPending !== 'leave-revocation-failed' && markerPending !== 'done-revocation-failed');
           else fail('wipe-failed');
           return state;
-        } else if (pending !== 'done' && pending !== 'done-revocation-failed') {
+        } else if (markerPending !== 'done' && markerPending !== 'done-revocation-failed') {
           marker.set(null);
         }
         const result = await selfTest().catch((): SelfTestResult => ({ ok: false, reason: 'key-not-persistable' }));
@@ -359,42 +405,58 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
           set({ kind: 'unsupported', reason: result.reason });
           return state;
         }
-        if (pending === 'done') {
+        if (markerPending === 'done') {
           marker.set(null);
           set({ kind: 'disconnected', outcome: 'disconnected' });
-        } else if (pending === 'done-revocation-failed') {
+        } else if (markerPending === 'done-revocation-failed') {
           marker.set(null);
           set({ kind: 'signed-out-locally' });
         }
         if (!inPod) return state;
         // A connect the person approved in the dialog in this process waits for a click. Nothing
         // starts a sign-in on its own, and a record merely loaded from disk only restores.
+        // The pending hint is what makes an approval a sign-in rather than a restore: a window
+        // rebuilt after an approval for a connected session has none and just restores.
         const fresh = podMode.freshIssuer();
-        if (fresh !== null && fresh === podMode.recordedIssuer() && gate() === null) {
-          set({ kind: 'ready-to-sign-in', issuer: fresh });
+        const waiting = pending.get();
+        if (fresh !== null && fresh === podMode.recordedIssuer() && waiting !== null && originOfHint(waiting.hint) === fresh && gate() === null) {
+          set({
+            kind: 'ready-to-sign-in',
+            issuer: fresh,
+            ...(waiting.hint.kind === 'webid' ? { webId: waiting.hint.webId } : {}),
+            ...(waiting.origin ? { approved: waiting.origin } : {}),
+          });
           return state;
         }
+        if (waiting !== null) pending.set(null);
         if (state.kind !== 'error') await restore();
         return state;
       })();
       return started;
     },
 
-    async connect(issuerInput) {
+    async connect(input) {
       await session.start();
       const k = state.kind;
       if (k !== 'disconnected' && k !== 'error' && k !== 'signed-out-locally') return;
       if (podMode.isPodMode() || podMode.finishing()) return;
       const config = checkConfig(deps.config);
       if (config !== 'ok') return fail(config === 'invalid' ? 'invalid-config' : 'not-configured');
-      const issuer = parseIssuerInput(issuerInput, deps.config.allowLoopbackHttp);
-      if (issuer === null) return fail('invalid-issuer');
-      set({ kind: 'connecting', issuer });
+      const typed = parseSignInInput(input, deps.config.allowLoopbackHttp);
+      if (typed === null) return fail('invalid-issuer');
+      // For a WebID the app is asked about the profile's own origin: the window must be able to
+      // reach it before pod-auth can read the profile and find the provider.
+      pending.set({ hint: typed.kind === 'webid' ? { kind: 'webid', webId: typed.webId } : { kind: 'issuer', issuer: typed.issuer } });
+      set({ kind: 'connecting', issuer: typed.origin });
       try {
-        const answer = await podMode.requestEnter(issuer);
-        if (answer === 'declined') set({ kind: 'disconnected', outcome: 'declined' });
+        const answer = await podMode.requestEnter(typed.origin);
+        if (answer === 'declined') {
+          pending.set(null);
+          set({ kind: 'disconnected', outcome: 'declined' });
+        }
         // 'requested': the app rebuilds this window; the person clicks Continue in the new one.
       } catch {
+        pending.set(null);
         fail('request-failed');
       }
     },
@@ -402,6 +464,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
     async beginSignIn() {
       if (state.kind !== 'ready-to-sign-in') return;
       const shown = state.issuer;
+      const waiting = pending.get();
       let issuer: string;
       try {
         issuer = await podMode.consumeFresh();
@@ -409,14 +472,53 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
         return fail('request-failed');
       }
       if (issuer !== shown) return fail('request-failed');
-      await signIn(issuer);
+      // What was typed, if it still names the approved address; otherwise the address itself.
+      const hint: SignInHint = waiting && originOfHint(waiting.hint) === issuer ? waiting.hint : { kind: 'issuer', issuer };
+      await signIn(hint, issuer);
+    },
+
+    async approveOrigin() {
+      if (state.kind !== 'needs-approval' || !podMode.admission) return;
+      const { origin, phase } = state;
+      let answer: Awaited<ReturnType<OriginAdmission['request']>>;
+      try {
+        answer = await podMode.admission.request(origin);
+      } catch (error) {
+        pending.set(null);
+        const word = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+        if (word === 'refused_origin') return fail('origin-declined');
+        if (word === 'too_many_prompts' || word === 'too_many_origins') return fail('origin-limit');
+        return fail('request-failed');
+      }
+      if (answer === 'declined') {
+        pending.set(null);
+        return fail('origin-declined');
+      }
+      if (answer === 'too-fast') return fail('approval-too-fast');
+      // 'requested': the app rebuilds this window and the new one picks up from the pending hint.
+      // A window that is still here already had the address listed, so there is nothing to wait for.
+      if (phase === 'restore') await restore();
+      else {
+        pending.set(null);
+        fail('request-failed');
+      }
+    },
+
+    async retry() {
+      if (state.kind !== 'error' || !podMode.isPodMode()) return;
+      if (state.error !== 'origin-declined' && state.error !== 'restore-failed' && state.error !== 'approval-too-fast') return;
+      set({ kind: 'disconnected' });
+      await restore();
     },
 
     finishing: () => podMode.finishing(),
 
     cancel() {
       if (state.kind === 'signing-in') abort?.abort();
-      else if (state.kind === 'ready-to-sign-in') set({ kind: 'disconnected' });
+      else if (state.kind === 'ready-to-sign-in') {
+        pending.set(null);
+        set({ kind: 'disconnected' });
+      }
     },
 
     leave() {

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PodSessionConfig } from './config.js';
 import { createPodSession, localStorageMarker, type PodSessionDeps } from './pod-session.js';
+import { StorageOriginRefused } from './storage-origins.js';
 import type { PodSessionState } from './state.js';
-import { fakeAuth, fakePodMode, memoryMarker } from './testing.js';
+import type { PendingSignIn } from './pending.js';
+import { fakeAuth, fakePodMode, memoryMarker, memoryPending } from './testing.js';
 import type { WipeOutcome } from './wipe.js';
 
 const ISSUER = 'https://login.example';
@@ -30,6 +32,10 @@ function setup(options: {
   selfTest?: PodSessionDeps['selfTest'];
   wipe?: (call: number) => Promise<WipeOutcome> | WipeOutcome;
   createAuth?: () => ReturnType<typeof fakeAuth>;
+  /** What the typed sign-in left in page storage; by default a typed issuer matching `fresh`. */
+  pending?: PendingSignIn | null;
+  listed?: string[];
+  addAnswer?: Parameters<typeof fakePodMode>[0]['addAnswer'];
 } = {}) {
   const podMode = fakePodMode({
     podWindow: options.podWindow ?? false,
@@ -40,11 +46,13 @@ function setup(options: {
     consumeFails: options.consumeFails ?? false,
     answer: options.answer ?? 'requested',
     leaveFails: options.leaveFails ?? false,
+    ...(options.listed || options.addAnswer ? { listed: options.listed ?? [], addAnswer: options.addAnswer ?? 'requested' } : {}),
   });
+  const pending = memoryPending(options.pending !== undefined ? options.pending : options.fresh ? { hint: { kind: 'issuer', issuer: options.fresh } } : null);
   const marker = memoryMarker(options.marker ?? null);
   const auth = options.auth ?? fakeAuth();
   const order: string[] = [];
-  const createAuth = vi.fn(() => {
+  const createAuth = vi.fn((_options?: { fetch?: typeof fetch }) => {
     order.push('createAuth');
     return options.createAuth ? options.createAuth() : auth;
   });
@@ -59,11 +67,12 @@ function setup(options: {
     wipeStores,
     podMode,
     marker,
+    pending,
     selfTest: options.selfTest ?? (async () => ({ ok: true })),
   });
   const states: PodSessionState[] = [];
   session.subscribe((s) => states.push(s));
-  return { session, podMode, marker, auth, createAuth, wipeStores, order, states };
+  return { session, podMode, marker, pending, auth, createAuth, wipeStores, order, states };
 }
 
 describe('connect', () => {
@@ -758,5 +767,254 @@ describe('localStorageMarker', () => {
     expect(marker.get()).toBeNull();
     expect(() => marker.set('wipe')).not.toThrow();
     expect(() => marker.set(null)).not.toThrow();
+  });
+});
+
+const OTHER = 'https://pod.example';
+const PROFILE = 'https://pod.example/alice/profile/card#me';
+const refusal = (reason: ConstructorParameters<typeof StorageOriginRefused>[0], origin = OTHER) =>
+  Object.assign(new Error('pod-auth could not read it'), { name: 'InjectedFetchError', cause: new StorageOriginRefused(reason, origin) });
+
+describe('a WebID or a provider address', () => {
+  it('asks the app about the origin of a typed WebID and remembers only what was typed', async () => {
+    const t = setup();
+    await t.session.connect(` ${PROFILE} `);
+    expect(t.podMode.entered).toEqual([OTHER]);
+    expect(t.pending.value).toEqual({ hint: { kind: 'webid', webId: PROFILE } });
+    expect(t.session.getState()).toEqual({ kind: 'connecting', issuer: OTHER });
+    expect(t.createAuth).not.toHaveBeenCalled();
+  });
+
+  it.each(['https://pod.example/card?x=1', 'https://u:p@pod.example/card#me', 'http://pod.example/card#me', 'ftp://pod.example/card'])('refuses %j', async (input) => {
+    const t = setup();
+    await t.session.connect(input);
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'invalid-issuer' });
+    expect(t.podMode.entered).toEqual([]);
+    expect(t.pending.value).toBeNull();
+  });
+
+  it('forgets what was typed when the person declines or the app fails', async () => {
+    for (const answer of ['declined', 'throws'] as const) {
+      const t = setup({ answer });
+      await t.session.connect(PROFILE);
+      expect(t.pending.value).toBeNull();
+    }
+  });
+
+  it('after the rebuild shows the WebID and signs in with it as the hint', async () => {
+    const t = setup({ podWindow: true, issuer: OTHER, fresh: OTHER, pending: { hint: { kind: 'webid', webId: PROFILE } } });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'ready-to-sign-in', issuer: OTHER, webId: PROFILE });
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    expect(t.auth.loginHints).toEqual([{ webId: PROFILE }]);
+    t.auth.finish('https://pod.example/alice/profile/card#me');
+    await started;
+    expect(t.session.getState().kind).toBe('connected');
+    expect(t.pending.value).toBeNull();
+  });
+
+  it('hands pod-auth the gate in explain-first mode and nothing else changes for it', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER, listed: [ISSUER] });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    const options = t.createAuth.mock.calls[0]?.[0];
+    expect(typeof options?.fetch).toBe('function');
+    // An unlisted origin is refused at once, without opening the dialog.
+    await expect(options!.fetch!(`${OTHER}/profile`)).rejects.toMatchObject({ reason: 'needs-approval', origin: OTHER });
+    expect(t.podMode.requested).toEqual([]);
+    t.auth.finish(WEBID);
+    await started;
+  });
+
+  it('passes no fetch where there is no gate', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    expect(t.createAuth.mock.calls[0]?.[0]).toBeUndefined();
+    t.auth.finish(WEBID);
+    await started;
+  });
+
+  it('ignores a pending hint that names another origin, or a record that was not approved now', async () => {
+    const other = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER, pending: { hint: { kind: 'webid', webId: PROFILE } }, auth: fakeAuth({ restored: WEBID }) });
+    await other.session.start();
+    expect(other.session.getState()).toEqual({ kind: 'connected', webId: WEBID });
+    expect(other.pending.value).toBeNull();
+    const stale = setup({ podWindow: true, issuer: ISSUER, pending: { hint: { kind: 'issuer', issuer: ISSUER } }, auth: fakeAuth({ restored: WEBID }) });
+    await stale.session.start();
+    expect(stale.session.getState().kind).toBe('connected');
+    expect(stale.pending.value).toBeNull();
+  });
+
+  it('clears the pending hint on cancel from ready-to-sign-in and on leave', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    t.session.cancel();
+    expect(t.pending.value).toBeNull();
+    expect(t.session.getState()).toEqual({ kind: 'disconnected' });
+    const u = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await u.session.start();
+    await u.session.leave();
+    expect(u.pending.value).toBeNull();
+  });
+});
+
+describe('an origin that needs approval', () => {
+  async function waiting(options: Parameters<typeof setup>[0] = {}) {
+    const t = setup({ podWindow: true, issuer: OTHER, fresh: OTHER, listed: [OTHER], pending: { hint: { kind: 'webid', webId: PROFILE } }, ...options });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.fail(refusal('needs-approval', 'https://id.example'));
+    await started;
+    return t;
+  }
+
+  it('explains first during a sign-in, scrubs, and keeps only the hint and the origin', async () => {
+    const t = await waiting();
+    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: 'https://id.example', phase: 'sign-in' });
+    expect(t.pending.value).toEqual({ hint: { kind: 'webid', webId: PROFILE }, origin: 'https://id.example' });
+    expect(t.podMode.requested).toEqual([]);
+    expect(t.auth.calls).toContain('logout');
+    expect(t.session.getFetch()).toBeNull();
+  });
+
+  it('asks the app when the person allows, and leaves the sign-in to the rebuilt window', async () => {
+    const t = await waiting();
+    await t.session.approveOrigin();
+    expect(t.podMode.requested).toEqual(['https://id.example']);
+    // The app rebuilds the window; a surviving one stays in a closed failure rather than guessing.
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'request-failed' });
+  });
+
+  it('the rebuilt window offers to continue, with the approved origin, and signs in again', async () => {
+    const t = setup({
+      podWindow: true,
+      issuer: 'https://id.example',
+      fresh: 'https://id.example',
+      pending: { hint: { kind: 'webid', webId: 'https://id.example/alice#me' }, origin: 'https://id.example' },
+    });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'ready-to-sign-in', issuer: 'https://id.example', webId: 'https://id.example/alice#me', approved: 'https://id.example' });
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    expect(t.auth.loginHints).toEqual([{ webId: 'https://id.example/alice#me' }]);
+    t.auth.finish('https://id.example/alice#me');
+    await started;
+    expect(t.session.getState().kind).toBe('connected');
+  });
+
+  it.each([
+    ['declined', 'origin-declined'],
+    ['too-fast', 'approval-too-fast'],
+  ] as const)('a %s answer ends in %s', async (answer, error) => {
+    const t = await waiting({ addAnswer: answer });
+    await t.session.approveOrigin();
+    expect(t.session.getState()).toEqual({ kind: 'error', error });
+    expect(t.pending.value).toEqual(answer === 'declined' ? null : expect.anything());
+  });
+
+  it.each([
+    ['refused_origin', 'origin-declined'],
+    ['too_many_prompts', 'origin-limit'],
+    ['too_many_origins', 'origin-limit'],
+    ['busy', 'request-failed'],
+  ] as const)('an app error %s ends in %s', async (word, error) => {
+    const t = await waiting({ addAnswer: new Error(word) });
+    await t.session.approveOrigin();
+    expect(t.session.getState()).toEqual({ kind: 'error', error });
+    expect(t.pending.value).toBeNull();
+  });
+
+  it('approveOrigin does nothing outside needs-approval', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], auth: fakeAuth({ restored: WEBID }) });
+    await t.session.start();
+    await t.session.approveOrigin();
+    expect(t.podMode.requested).toEqual([]);
+    expect(t.session.getState().kind).toBe('connected');
+  });
+
+  it('a restore that needs an origin keeps the stored session: no wipe, no logout, no revocation', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], auth: fakeAuth({ restoreError: refusal('needs-approval', OTHER) }) });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'needs-approval', origin: OTHER, phase: 'restore' });
+    expect(t.wipeStores).not.toHaveBeenCalled();
+    expect(t.auth.calls).not.toContain('logout');
+    expect(t.pending.value).toBeNull();
+  });
+
+  it('allowing a restore origin asks the app, and a window that survives restores again', async () => {
+    const auth = fakeAuth({ restoreError: refusal('needs-approval', OTHER) });
+    const t = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], auth });
+    await t.session.start();
+    await t.session.approveOrigin();
+    expect(t.podMode.requested).toEqual([OTHER]);
+    expect(auth.calls.filter((c) => c === 'restore')).toHaveLength(2);
+    expect(t.wipeStores).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['declined', 'origin-declined'],
+    ['limit', 'origin-limit'],
+    ['unavailable', 'restore-failed'],
+  ] as const)('a restore refused as %s is %s and wipes nothing', async (reason, error) => {
+    const t = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], auth: fakeAuth({ restoreError: refusal(reason) }) });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'error', error });
+    expect(t.wipeStores).not.toHaveBeenCalled();
+  });
+
+  it('a declined restore origin can be retried, or the person can leave', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], auth: fakeAuth({ restoreError: refusal('declined') }) });
+    await t.session.start();
+    await t.session.retry();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'origin-declined' });
+    expect(t.auth.calls.filter((c) => c === 'restore')).toHaveLength(2);
+    await t.session.leave();
+    expect(t.podMode.log).toContain('left');
+  });
+
+  it('retry only applies to errors that left the stored session alone', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, shell: 'window-not-clean' });
+    await t.session.start();
+    await t.session.retry();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'window-not-clean' });
+  });
+
+  it('a refusal during sign-in that is final is reported as such and forgets the hint', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.fail(refusal('declined'));
+    await started;
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'origin-declined' });
+    expect(t.pending.value).toBeNull();
+  });
+});
+
+describe('a response pod-auth cannot accept', () => {
+  const invalid = () => Object.assign(new Error('invalid injected response'), { name: 'InvalidInjectedResponseError' });
+
+  it('is a plain failure during sign-in, however it is wrapped', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.fail(Object.assign(new Error('wrapped'), { cause: invalid() }));
+    await started;
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'invalid-response' });
+    expect(t.pending.value).toBeNull();
+    expect(t.auth.calls).toContain('logout');
+  });
+
+  it('is a plain failure on restore and wipes nothing', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restoreError: invalid() }) });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'invalid-response' });
+    expect(t.wipeStores).not.toHaveBeenCalled();
   });
 });

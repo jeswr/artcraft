@@ -29,7 +29,7 @@ export function readAppIdentifier(scope: object = globalThis): string {
 export function buildPodSession(config: PodSessionConfig, hasShell: boolean): PodSession {
   return createPodSession({
     config,
-    createAuth: () => createDefaultAuth(config, tauriDesktopHost),
+    createAuth: (options) => createDefaultAuth(config, tauriDesktopHost, options),
     wipeStores: () => deletePodAuthDatabases(),
     podMode: realPodModePort(hasShell ? createTauriPodModeRequests() : undefined),
   });

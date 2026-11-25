@@ -25,8 +25,10 @@ export type OriginAdmission = {
  * Why a request to an origin was not sent. Closed set. `declined` and `limit` are final for this
  * window; the rest can succeed later (`too-fast`: press Allow again after the wait; `busy`: the
  * app is showing another dialog or cooling down; `unavailable`: the app could not do it).
+ * `needs-approval`: the origin is not allowed yet and the caller chose not to open the dialog
+ * itself (pod-auth's own reads: the page explains first, then asks).
  */
-export type RefusalReason = 'declined' | 'limit' | 'invalid' | 'too-fast' | 'busy' | 'unavailable';
+export type RefusalReason = 'declined' | 'limit' | 'invalid' | 'too-fast' | 'busy' | 'unavailable' | 'needs-approval';
 
 const MESSAGES: Record<RefusalReason, string> = {
   declined: 'storage origin not allowed',
@@ -35,15 +37,22 @@ const MESSAGES: Record<RefusalReason, string> = {
   'too-fast': 'storage origin answer too fast',
   busy: 'storage origin request busy',
   unavailable: 'storage origin request failed',
+  'needs-approval': 'storage origin needs approval',
 };
 
 /** A fixed message per reason: it never carries the URL that was refused. */
 export class StorageOriginRefused extends Error {
   readonly reason: RefusalReason;
-  constructor(reason: RefusalReason = 'declined') {
+  /**
+   * The bare origin the request named, for the page to show the person. Never in the message,
+   * so a log of the error carries no URL.
+   */
+  readonly origin: string;
+  constructor(reason: RefusalReason = 'declined', origin = '') {
     super(MESSAGES[reason]);
     this.name = 'StorageOriginRefused';
     this.reason = reason;
+    this.origin = origin;
   }
 }
 
@@ -52,7 +61,15 @@ export type OriginGate = {
    * Resolves when requests to `origin` may go out; rejects with `StorageOriginRefused`
    * otherwise, or with the signal's reason when `signal` aborts while it waits.
    */
-  allow(origin: string, signal?: AbortSignal): Promise<void>;
+  allow(origin: string, signal?: AbortSignal, options?: AllowOptions): Promise<void>;
+};
+
+export type AllowOptions = {
+  /**
+   * Default true: an unlisted origin asks the app (native dialog). False: reject at once with
+   * `needs-approval`, so the caller can explain before asking.
+   */
+  prompt?: boolean;
 };
 
 export function createOriginGate(admission: OriginAdmission): OriginGate {
@@ -75,39 +92,40 @@ export function createOriginGate(admission: OriginAdmission): OriginGate {
       admitted.add(origin);
       return;
     }
-    if (answer === 'too-fast') throw new StorageOriginRefused('too-fast');
+    if (answer === 'too-fast') throw new StorageOriginRefused('too-fast', origin);
     declined.add(origin);
-    throw new StorageOriginRefused('declined');
+    throw new StorageOriginRefused('declined', origin);
   };
 
   const refusalFor = (error: unknown, origin: string): StorageOriginRefused => {
     switch (wordOf(error)) {
       case 'refused_origin':
         declined.add(origin);
-        return new StorageOriginRefused('declined');
+        return new StorageOriginRefused('declined', origin);
       case 'too_many_prompts':
       case 'too_many_origins':
         limit = true;
-        return new StorageOriginRefused('limit');
+        return new StorageOriginRefused('limit', origin);
       case 'invalid_origin':
         invalid.add(origin);
-        return new StorageOriginRefused('invalid');
+        return new StorageOriginRefused('invalid', origin);
       case 'busy':
       case 'cooling_down':
-        return new StorageOriginRefused('busy');
+        return new StorageOriginRefused('busy', origin);
       default:
-        return new StorageOriginRefused('unavailable');
+        return new StorageOriginRefused('unavailable', origin);
     }
   };
 
   return {
-    allow(value, signal) {
+    allow(value, signal, options) {
       const origin = parseOrigin(value);
       if (origin === null) return Promise.reject(new StorageOriginRefused('invalid'));
       if (admitted.has(origin) || admission.known().includes(origin)) return Promise.resolve();
-      if (declined.has(origin)) return Promise.reject(new StorageOriginRefused('declined'));
-      if (invalid.has(origin)) return Promise.reject(new StorageOriginRefused('invalid'));
-      if (limit) return Promise.reject(new StorageOriginRefused('limit'));
+      if (declined.has(origin)) return Promise.reject(new StorageOriginRefused('declined', origin));
+      if (invalid.has(origin)) return Promise.reject(new StorageOriginRefused('invalid', origin));
+      if (limit) return Promise.reject(new StorageOriginRefused('limit', origin));
+      if (options?.prompt === false) return Promise.reject(new StorageOriginRefused('needs-approval', origin));
       let request = pending.get(origin);
       if (!request) {
         const turn = queue.then(() => ask(origin));
@@ -120,13 +138,38 @@ export function createOriginGate(admission: OriginAdmission): OriginGate {
   };
 }
 
-/** Wraps the session's authenticated fetch so a request to an unadmitted origin asks first. */
-export function gateFetch(inner: typeof fetch, gate: OriginGate): typeof fetch {
+/**
+ * Wraps a fetch so a request to an unadmitted origin asks first (the default), or is refused at
+ * once with `needs-approval` (`prompt: false`). The request itself goes to `inner` unchanged:
+ * the same `Request` (so its `redirect`, `credentials` and `signal` are kept) or the same
+ * arguments, and the response comes back as it is.
+ */
+export function gateFetch(inner: typeof fetch, gate: OriginGate, options: AllowOptions = {}): typeof fetch {
   return async (input, init) => {
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined) ?? undefined;
-    await gate.allow(originOf(input), signal);
+    await gate.allow(originOf(input), signal, options);
     return inner(input, init);
   };
+}
+
+/** The gate's refusal anywhere in an error's cause chain (pod-auth wraps it as `InjectedFetchError`). */
+export function refusalOf(error: unknown): StorageOriginRefused | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++) {
+    if (current instanceof StorageOriginRefused) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** pod-auth's `InvalidInjectedResponseError` anywhere in the chain: the supplied fetch misbehaved. */
+export function isInvalidInjectedResponse(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++) {
+    if ((current as { name?: unknown }).name === 'InvalidInjectedResponseError') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 function originOf(input: Parameters<typeof fetch>[0]): string {

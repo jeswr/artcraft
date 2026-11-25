@@ -32,4 +32,12 @@ describe('createDefaultAuth', () => {
     createDefaultAuth(config, host);
     await expect(created.options?.['ui'].getWebId()).rejects.toThrow();
   });
+
+  it('passes the supplied fetch to pod-auth, and none when there is none', () => {
+    const injected = (async () => new Response('x')) as typeof fetch;
+    createDefaultAuth(config, host, { fetch: injected });
+    expect(created.options?.['fetch']).toBe(injected);
+    createDefaultAuth(config, host);
+    expect(created.options && 'fetch' in created.options).toBe(false);
+  });
 });

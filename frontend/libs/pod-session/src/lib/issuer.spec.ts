@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseIssuerInput } from './issuer.js';
+import { parseIssuerInput, parseSignInInput } from './issuer.js';
 
 describe('parseIssuerInput', () => {
   it.each([
@@ -44,5 +44,46 @@ describe('parseIssuerInput', () => {
     for (const value of [undefined, null, 5, {}, ['https://login.example']]) {
       expect(parseIssuerInput(value)).toBeNull();
     }
+  });
+});
+
+describe('parseSignInInput', () => {
+  it('treats a bare origin as a provider address', () => {
+    expect(parseSignInInput(' https://login.example/ ')).toEqual({ kind: 'issuer', issuer: 'https://login.example', origin: 'https://login.example' });
+  });
+
+  it.each([
+    ['https://pod.example/alice/profile/card#me', 'https://pod.example'],
+    ['https://pod.example/alice', 'https://pod.example'],
+    ['https://pod.example/#me', 'https://pod.example'],
+    ['https://pod.example:8443/card#me', 'https://pod.example:8443'],
+  ])('treats %j as a WebID on %j', (input, origin) => {
+    expect(parseSignInInput(input)).toEqual({ kind: 'webid', webId: input, origin });
+  });
+
+  it.each([
+    '',
+    '   ',
+    'pod.example/card#me',
+    'javascript:alert(1)',
+    'https://u:p@pod.example/card#me',
+    'https://pod.example/card?x=1',
+    'https://pod.example/card #me',
+    'http://pod.example/card#me',
+    'ftp://pod.example/card',
+    `https://pod.example/${'a'.repeat(2100)}`,
+  ])('refuses %j', (input) => {
+    expect(parseSignInInput(input)).toBeNull();
+  });
+
+  it('refuses what is not text', () => {
+    expect(parseSignInInput(null)).toBeNull();
+    expect(parseSignInInput(42)).toBeNull();
+  });
+
+  it('accepts a loopback http WebID only when the build allows it', () => {
+    expect(parseSignInInput('http://localhost:3000/alice#me')).toBeNull();
+    expect(parseSignInInput('http://localhost:3000/alice#me', true)).toEqual({ kind: 'webid', webId: 'http://localhost:3000/alice#me', origin: 'http://localhost:3000' });
+    expect(parseSignInInput('http://pod.example/alice#me', true)).toBeNull();
   });
 });

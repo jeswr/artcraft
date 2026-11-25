@@ -104,8 +104,29 @@ const StatusText = ({
     case "ready-to-sign-in":
       return (
         <>
-          You confirmed <span className="break-all font-medium">{state.issuer}</span>. Nothing has
-          started yet; continue when you are ready.
+          {state.webId ? (
+            <>
+              You entered the WebID <span className="break-all font-medium">{state.webId}</span>.{" "}
+            </>
+          ) : null}
+          {state.approved ? "You allowed" : "You confirmed"}{" "}
+          <span className="break-all font-medium">{state.issuer}</span>. Nothing has started yet; continue when
+          you are ready.
+        </>
+      );
+    case "needs-approval":
+      return state.phase === "sign-in" ? (
+        <>
+          Signing in needs to read from <span className="break-all font-medium">{state.origin}</span>, which this
+          window is not allowed to contact yet. Nothing was sent there. If you allow it, ArtCraft asks you to confirm
+          in a separate dialog and restarts this window; you then continue the sign-in. Only allow this address if it
+          is where your Solid provider or profile lives.
+        </>
+      ) : (
+        <>
+          Reconnecting to your pod needs to read from <span className="break-all font-medium">{state.origin}</span>,
+          which this window is not allowed to contact yet. Your saved sign-in is kept. If you allow it, ArtCraft asks
+          you to confirm in a separate dialog.
         </>
       );
     case "connecting":
@@ -164,6 +185,13 @@ const PodControls = ({ session, state }: { session: PodSession; state: PodSessio
           <LeaveButton session={session} />
         </div>
       );
+    case "needs-approval":
+      return (
+        <div className="flex gap-2">
+          <Button onClick={() => void session.approveOrigin()}>Allow {state.origin}</Button>
+          <LeaveButton session={session} />
+        </div>
+      );
     case "connecting":
     case "leaving":
       return null;
@@ -183,7 +211,12 @@ const PodControls = ({ session, state }: { session: PodSession; state: PodSessio
       return podWindow ? (
         <div className="flex flex-col gap-2">
           {error && <ErrorText error={error} />}
-          <div>
+          <div className="flex gap-2">
+            {error && RETRYABLE.has(error) && (
+              <Button variant="secondary" onClick={() => void session.retry()}>
+                Try again
+              </Button>
+            )}
             <LeaveButton session={session} />
           </div>
         </div>
@@ -192,6 +225,9 @@ const PodControls = ({ session, state }: { session: PodSession; state: PodSessio
       );
   }
 };
+
+/** Errors that left the stored session alone, so the restore can simply run again. */
+const RETRYABLE: ReadonlySet<PodSessionErrorKind> = new Set(["origin-declined", "restore-failed", "approval-too-fast"]);
 
 const ErrorText = ({ error }: { error: PodSessionErrorKind }) => (
   <p id="pod-error" role="alert" className="text-sm text-red-300">
@@ -213,13 +249,13 @@ const ConnectForm = ({ session, error }: { session: PodSession; error?: PodSessi
     <form className="flex flex-col gap-2" onSubmit={submit} noValidate>
       <Input
         id="pod-issuer"
-        label="Identity provider address"
+        label="WebID or identity provider address"
         type="url"
         inputMode="url"
         autoComplete="off"
         autoCapitalize="off"
         spellCheck={false}
-        placeholder="https://login.example"
+        placeholder="https://login.example or https://pod.example/alice/profile/card#me"
         value={issuer}
         disabled={unavailable}
         isError={error === "invalid-issuer"}

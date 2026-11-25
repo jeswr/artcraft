@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PodSessionConfig } from './config.js';
 import { createPodSession, realPodModePort } from './pod-session.js';
 import type { AddOriginResult } from '@storyteller/pod-mode';
-import { createOriginGate, gateFetch, type OriginAdmission, StorageOriginRefused } from './storage-origins.js';
+import { createOriginGate, gateFetch, isInvalidInjectedResponse, type OriginAdmission, refusalOf, StorageOriginRefused } from './storage-origins.js';
 import { fakeAuth, fakePodMode, memoryMarker } from './testing.js';
 
 const ISSUER = 'https://login.example';
@@ -314,5 +314,85 @@ describe('the app port', () => {
     await gate.allow(POD);
     await gate.allow(ISSUER);
     expect(calls).toEqual([]);
+  });
+});
+
+describe('explain-first mode (prompt: false)', () => {
+  it('refuses an unlisted origin at once with needs-approval and the origin, and never opens the dialog', async () => {
+    const a = admission('requested', [ISSUER]);
+    const gate = createOriginGate(a.port);
+    await expect(gate.allow(POD, undefined, { prompt: false })).rejects.toMatchObject({ reason: 'needs-approval', origin: POD });
+    expect(a.requested).toEqual([]);
+  });
+
+  it('lets listed and already admitted origins through, and keeps final refusals final', async () => {
+    const a = admission('requested', [ISSUER]);
+    const gate = createOriginGate(a.port);
+    await expect(gate.allow(ISSUER, undefined, { prompt: false })).resolves.toBeUndefined();
+    await gate.allow(POD); // admitted by the dialog
+    await expect(gate.allow(POD, undefined, { prompt: false })).resolves.toBeUndefined();
+    const refused = createOriginGate(admission('declined').port);
+    await expect(refused.allow(POD)).rejects.toMatchObject({ reason: 'declined' });
+    await expect(refused.allow(POD, undefined, { prompt: false })).rejects.toMatchObject({ reason: 'declined', origin: POD });
+    const limited = createOriginGate(admission('throws').port);
+    await expect(limited.allow(POD)).rejects.toMatchObject({ reason: 'limit' });
+    await expect(limited.allow('https://other.example', undefined, { prompt: false })).rejects.toMatchObject({ reason: 'limit' });
+  });
+
+  it('passes the very Request it was given, with its redirect mode, and returns the real response', async () => {
+    const a = admission('requested', [ISSUER]);
+    const response = new Response('ok');
+    const seen: unknown[][] = [];
+    const inner = (async (...args: unknown[]) => {
+      seen.push(args);
+      return response;
+    }) as unknown as typeof fetch;
+    const request = new Request(`${ISSUER}/.well-known/openid-configuration`, { redirect: 'manual' });
+    const result = await gateFetch(inner, createOriginGate(a.port), { prompt: false })(request);
+    expect(result).toBe(response);
+    expect(seen).toEqual([[request, undefined]]);
+    expect((seen[0]![0] as Request).redirect).toBe('manual');
+    const init = { redirect: 'error' as const };
+    await gateFetch(inner, createOriginGate(a.port), { prompt: false })(`${ISSUER}/x`, init);
+    expect(seen[1]).toEqual([`${ISSUER}/x`, init]);
+  });
+
+  it('puts the refusal in front of pod-auth before anything is sent', async () => {
+    const inner = vi.fn(async () => new Response('ok')) as unknown as typeof fetch;
+    const fetchGated = gateFetch(inner, createOriginGate(admission().port), { prompt: false });
+    await expect(fetchGated(`${POD}/alice/profile/card`)).rejects.toMatchObject({ reason: 'needs-approval' });
+    expect(inner).not.toHaveBeenCalled();
+  });
+});
+
+describe('recognising the gate through pod-auth’s wrapping', () => {
+  const refusal = new StorageOriginRefused('needs-approval', POD);
+  it('finds the refusal itself, or along the cause chain', () => {
+    expect(refusalOf(refusal)).toBe(refusal);
+    expect(refusalOf(Object.assign(new Error('InjectedFetchError'), { cause: refusal }))).toBe(refusal);
+    expect(refusalOf(Object.assign(new Error('a'), { cause: Object.assign(new Error('b'), { cause: refusal }) }))).toBe(refusal);
+  });
+
+  it('is null for anything else, including a lookalike and a cycle', () => {
+    expect(refusalOf(new Error('x'))).toBeNull();
+    expect(refusalOf(null)).toBeNull();
+    expect(refusalOf('needs-approval')).toBeNull();
+    expect(refusalOf({ name: 'StorageOriginRefused', reason: 'needs-approval' })).toBeNull();
+    const loop: { cause?: unknown } = {};
+    loop.cause = loop;
+    expect(refusalOf(loop)).toBeNull();
+  });
+
+  it('recognises InvalidInjectedResponseError by name along the chain', () => {
+    const invalid = Object.assign(new Error('x'), { name: 'InvalidInjectedResponseError' });
+    expect(isInvalidInjectedResponse(invalid)).toBe(true);
+    expect(isInvalidInjectedResponse(Object.assign(new Error('y'), { cause: invalid }))).toBe(true);
+    expect(isInvalidInjectedResponse(new Error('z'))).toBe(false);
+    expect(isInvalidInjectedResponse(undefined)).toBe(false);
+  });
+
+  it('every refusal carries its origin and none puts it in the message', () => {
+    expect(new StorageOriginRefused('needs-approval', POD).origin).toBe(POD);
+    expect(new StorageOriginRefused('needs-approval', POD).message).not.toMatch(/https?:|example/);
   });
 });

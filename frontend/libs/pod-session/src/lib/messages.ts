@@ -12,7 +12,7 @@ export const UNSUPPORTED_TEXT: Record<UnsupportedReason, string> = {
 
 export const ERROR_TEXT: Record<PodSessionErrorKind, string> = {
   'invalid-issuer':
-    'Enter the address of your identity provider, for example https://login.example, with no path, user name or password.',
+    'Enter your WebID (for example https://id.example/alice/profile/card#me) or the address of your identity provider (for example https://login.example), with no user name, password or query.',
   'invalid-config': 'Solid pod sign-in is set up incorrectly in this build, so it was not started.',
   'not-configured': 'Solid pod sign-in is not set up in this build yet.',
   'policy-not-applied':
@@ -23,6 +23,12 @@ export const ERROR_TEXT: Record<PodSessionErrorKind, string> = {
   'sign-in-timed-out': 'Sign-in took too long and was stopped. Try again.',
   'sign-in-failed': 'Sign-in did not finish. Check the address and try again.',
   'restore-failed': 'ArtCraft could not restore your previous sign-in. You can connect again or leave pod mode.',
+  'origin-declined':
+    'ArtCraft was not allowed to connect to an address your profile needs, so your pod is not connected. Leave pod mode and connect again to be asked again, or try again.',
+  'origin-limit':
+    'ArtCraft has already asked about as many addresses as one pod-mode session allows. Leave pod mode and connect again to start over.',
+  'approval-too-fast': 'That answer came too quickly to be sure it was yours. Wait a few seconds and choose Allow again.',
+  'invalid-response': 'ArtCraft could not read the profile or provider information it needed, so it did not sign in.',
   'wipe-failed':
     'ArtCraft could not finish removing your sign-in data from this computer, so this window stays restricted. Try again; if it keeps failing, quit and reopen ArtCraft first.',
 };

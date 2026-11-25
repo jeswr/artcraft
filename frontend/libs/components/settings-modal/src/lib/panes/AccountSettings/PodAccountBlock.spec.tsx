@@ -32,6 +32,8 @@ function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; c
     beginSignIn: vi.fn(async () => undefined),
     finishing: () => options.finishing ?? false,
     cancel: vi.fn(),
+    approveOrigin: vi.fn(async () => undefined),
+    retry: vi.fn(async () => undefined),
     leave: vi.fn(async () => undefined),
     getFetch: () => null,
     inPodMode: () => options.podWindow ?? false,
@@ -65,7 +67,7 @@ it("connects from the keyboard with the typed address", async () => {
   const user = userEvent.setup();
   const { session } = renderBlock({ kind: "disconnected" });
   await user.tab();
-  expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Identity provider address" }));
+  expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "WebID or identity provider address" }));
   expect((screen.getByRole("button", { name: "Connect" }) as HTMLButtonElement).disabled).toBe(true);
   await user.keyboard("https://login.example{Enter}");
   expect(session.connect).toHaveBeenCalledWith("https://login.example");
@@ -92,7 +94,7 @@ it("shows no copy status or forget button without a mirror, even when connected"
 it("announces an invalid address in text and ties it to the field", () => {
   renderBlock({ kind: "error", error: "invalid-issuer" });
   const alert = screen.getByRole("alert");
-  const field = screen.getByRole("textbox", { name: "Identity provider address" });
+  const field = screen.getByRole("textbox", { name: "WebID or identity provider address" });
   expect(field.getAttribute("aria-invalid")).toBe("true");
   expect(field.getAttribute("aria-describedby")).toBe(alert.id);
   expect(alert.textContent).toBe(ERROR_TEXT["invalid-issuer"]);
@@ -421,4 +423,56 @@ it("moves focus into the import confirmation and back to the status line when it
   expect(document.activeElement).toBe(screen.getByRole("alertdialog"));
   await user.click(screen.getByRole("button", { name: "Not now" }));
   expect(document.activeElement).toBe(screen.getByTestId("pod-import-state"));
+});
+
+it("accepts a WebID as well as a provider address, and passes what was typed", async () => {
+  const user = userEvent.setup();
+  const { session } = renderBlock({ kind: "disconnected" });
+  await user.type(screen.getByRole("textbox", { name: "WebID or identity provider address" }), `${WEBID}{Enter}`);
+  expect(session.connect).toHaveBeenCalledWith(WEBID);
+});
+
+it("shows the typed WebID and the allowed address before a sign-in continues", async () => {
+  const user = userEvent.setup();
+  const { session } = renderBlock(
+    { kind: "ready-to-sign-in", issuer: "https://pod.example", webId: WEBID, approved: "https://pod.example" },
+    { podWindow: true },
+  );
+  expect(document.body.textContent).toMatch(/You entered the WebID https:\/\/pod.example\/alice\/profile\/card#me/);
+  expect(document.body.textContent).toMatch(/You allowed https:\/\/pod.example\./);
+  expect(session.beginSignIn).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Continue sign-in" }));
+  expect(session.beginSignIn).toHaveBeenCalledTimes(1);
+});
+
+it("explains an address that needs approval before a sign-in, names it on the button, and only asks on a click", async () => {
+  const user = userEvent.setup();
+  const { session } = renderBlock({ kind: "needs-approval", origin: "https://id.example", phase: "sign-in" }, { podWindow: true });
+  expect(document.body.textContent).toMatch(/Nothing was sent there/);
+  expect(document.body.textContent).toMatch(/Only allow this address if it is where your Solid provider or profile lives/);
+  expect(session.approveOrigin).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Allow https://id.example" }));
+  expect(session.approveOrigin).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "Leave pod mode" })).toBeTruthy();
+});
+
+it("says the saved sign-in is kept when a reconnect needs an address", () => {
+  renderBlock({ kind: "needs-approval", origin: "https://pod.example", phase: "restore" }, { podWindow: true });
+  expect(document.body.textContent).toMatch(/Your saved sign-in is kept/);
+  expect(screen.getByRole("button", { name: "Allow https://pod.example" })).toBeTruthy();
+});
+
+it.each(["origin-declined", "restore-failed", "approval-too-fast"] as const)("offers Try again next to Leave for %s in a pod window", async (error) => {
+  const user = userEvent.setup();
+  const { session } = renderBlock({ kind: "error", error }, { podWindow: true });
+  expect(screen.getByRole("alert").textContent).toBe(ERROR_TEXT[error]);
+  await user.click(screen.getByRole("button", { name: "Try again" }));
+  expect(session.retry).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "Leave pod mode" })).toBeTruthy();
+});
+
+it.each(["origin-limit", "invalid-response", "sign-in-failed"] as const)("offers only Leave for %s in a pod window", (error) => {
+  renderBlock({ kind: "error", error }, { podWindow: true });
+  expect(screen.getByRole("alert").textContent).toBe(ERROR_TEXT[error]);
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
 });

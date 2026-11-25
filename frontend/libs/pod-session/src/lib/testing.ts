@@ -1,9 +1,11 @@
 import type { PodGate } from '@storyteller/pod-mode';
+import type { PendingSignIn, PendingStore } from './pending.js';
 import type { Marker, MarkerValue, PodAuthPort, PodModePort } from './pod-session.js';
+import type { AddOriginResult } from '@storyteller/pod-mode';
 
 export type FakeAuth = PodAuthPort & {
   calls: string[];
-  loginHints: { issuer: string }[];
+  loginHints: ({ issuer: string } | { webId: string })[];
   /** Resolves a pending login. */
   finish(webId: string | null): void;
   /** Rejects a pending login. */
@@ -13,7 +15,7 @@ export type FakeAuth = PodAuthPort & {
 /** A pod-auth stand-in. `login` stays pending until `finish`, `fail` or the signal aborts. */
 export function fakeAuth(options: { restored?: string | null; restoredWithoutWebId?: boolean; restoreError?: unknown; logoutError?: unknown } = {}): FakeAuth {
   const calls: string[] = [];
-  const loginHints: { issuer: string }[] = [];
+  const loginHints: ({ issuer: string } | { webId: string })[] = [];
   let resolve: (v: { webId: string | null }) => void = () => undefined;
   let reject: (e: unknown) => void = () => undefined;
   const auth: FakeAuth = {
@@ -64,10 +66,14 @@ export type FakePodMode = PodModePort & {
   consumeFails: boolean;
   log: string[];
   entered: string[];
+  /** Origins the window's policy lists, and what the shell answers to a request to add one. */
+  listed: string[];
+  addAnswer: AddOriginResult | Error;
+  requested: string[];
 };
 
 export function fakePodMode(
-  initial: Partial<Pick<FakePodMode, 'podWindow' | 'shell' | 'flagged' | 'issuer' | 'fresh' | 'answer' | 'leaveFails' | 'consumeFails'>> = {},
+  initial: Partial<Pick<FakePodMode, 'podWindow' | 'shell' | 'flagged' | 'issuer' | 'fresh' | 'answer' | 'leaveFails' | 'consumeFails' | 'listed' | 'addAnswer'>> = {},
 ): FakePodMode {
   const mode: FakePodMode = {
     podWindow: false,
@@ -80,7 +86,24 @@ export function fakePodMode(
     consumeFails: false,
     log: [],
     entered: [],
+    listed: [],
+    addAnswer: 'requested',
+    requested: [],
     ...initial,
+    // Present only when a test asks for an origin gate: a plain window has none.
+    ...(initial.listed || initial.addAnswer
+      ? {
+          admission: {
+            known: () => mode.listed,
+            async request(origin: string) {
+              mode.requested.push(origin);
+              mode.log.push('add-origin');
+              if (mode.addAnswer instanceof Error) throw mode.addAnswer;
+              return mode.addAnswer;
+            },
+          },
+        }
+      : {}),
     isPodMode: () => mode.podWindow,
     gate: () => (mode.podWindow ? mode.shell : 'not-pod-window'),
     finishing: () => !mode.podWindow && mode.flagged,
@@ -123,4 +146,15 @@ export function memoryMarker(initial: MarkerValue | null = null): Marker & { val
     },
   };
   return marker;
+}
+
+export function memoryPending(initial: PendingSignIn | null = null): PendingStore & { value: PendingSignIn | null } {
+  const store = {
+    value: initial,
+    get: () => store.value,
+    set: (v: PendingSignIn | null) => {
+      store.value = v;
+    },
+  };
+  return store;
 }

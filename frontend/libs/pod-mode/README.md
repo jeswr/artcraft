@@ -64,14 +64,19 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
   origin, an Allow dialog that reloads the window under someone who is working (the dialog says
   so), and requests a redirect sends to an unadmitted origin (the policy blocks those; the gate
   only sees the first URL).
-  **Known limit: pod-auth's own profile fetch is not covered.** During `login()` and
-  `restore()` the vendored `@jeswr/pod-auth` reads the WebID document itself, with the global
-  fetch fixed at construction, and that request does not pass this gate. A WebID on an origin
-  other than the issuer's (for example issuer `https://login.example`, WebID
-  `https://id.example/...`) is therefore blocked by the window's policy after the token
-  exchange and the sign-in fails with no dialog. Only a WebID on the issuer's origin works
-  today; a storage or Type Index on another origin works through the gate. Fixing this needs a
-  change in the SDK, not in ArtCraft: see "Known limit" in `libs/pod-session/README.md`.
+  **pod-auth's own reads go through the same gate, explained first.** pod-auth's `fetch` option
+  (issuer metadata, the Client Identifier Document, the WebID profile, storage descriptions;
+  body-less GET and HEAD only) receives the gate in a mode that refuses an unlisted origin at
+  once instead of opening the dialog, so a profile on another origin than the provider is not
+  fetched before the person has seen why: the page explains, the person clicks Allow, and only
+  then does the app's dialog appear. A WebID typed in Settings enters pod mode for its own
+  origin. After an accepted add the app leaves the rebuilt window a one-shot fresh grant for the
+  recorded origin, so a sign-in interrupted by an approval can continue with one click; the page
+  only uses it with a pending hint of its own for that exact origin (see `libs/pod-session`).
+  The trade-off: a planted record and hint plus a dialog the person allowed could offer one
+  Continue click, and the page shows the address first. Token, registration and revocation POSTs
+  and redirect hops are not gated and fail untyped under the policy (see `libs/pod-session`,
+  "Remaining limits").
 - **One CSP header, read live.** In pod mode the app sets a single `Content-Security-Policy`
   response header on every response of the main window, **replacing** the static one (macOS
   keeps one header per name, so a second header is not reliable). The pod policy therefore
