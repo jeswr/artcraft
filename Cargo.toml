@@ -34,6 +34,7 @@ members = [
   "crates/lib/files/mimetypes",
   "crates/lib/http_headers",
   "crates/lib/jwt_light",
+  "crates/lib/pod_mode",
   "crates/lib/url_utils",
   "crates/lib/uuid_utils",
   "crates/schema/database/sqlite_tasks",
@@ -75,6 +76,7 @@ memory_store = { path = "crates/lib/caching/memory_store" }
 midjourney_client = { path = "crates/api_clients/midjourney_client" }
 mimetypes = { path = "crates/lib/files/mimetypes" }
 openai_sora_client = { path = "crates/api_clients/openai_sora_client" }
+pod_mode = { path = "crates/lib/pod_mode" }
 primitives = { path = "crates/lib/data/primitives" }
 kinovi_web_client = { path = "crates/api_clients/kinovi_web_client" }
 sqlite_tasks = { path = "crates/schema/database/sqlite_tasks" }
@@ -109,9 +111,11 @@ sha2 = "0.11.0-rc.5"
 sha3 = "0.10.8"
 strum = { version = "0.28.0", features = ["derive"] }
 tauri = { version = "2.11.2", features = ["unstable", "devtools", "protocol-asset"] } # NB: "devtools" prevents App Store distribution; "ubstable" is needed for window access
+tauri-plugin-deep-link = "2.4.10" # NB: 2.5+ needs tauri 2.12
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
 tauri-plugin-log = "2.8.0"
+tauri-plugin-single-instance = { version = "2.4.5", features = ["deep-link"] } # NB: 2.5+ needs tauri 2.12
 tauri-plugin-upload = "2.4.0"
 tempdir = "0.3.7"
 tempfile = "3.27.0"

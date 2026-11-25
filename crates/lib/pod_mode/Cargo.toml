@@ -1,0 +1,18 @@
+[package]
+name = "pod_mode"
+edition = "2024"
+version = "0.0.1"
+publish = false
+description = "Pure logic for ArtCraft's Solid pod mode: origin validation, the persisted record, the narrowed CSP. No Tauri, GTK or webview dependency."
+
+[lib]
+name = "pod_mode"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
