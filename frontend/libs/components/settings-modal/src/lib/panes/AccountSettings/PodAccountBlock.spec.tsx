@@ -331,3 +331,13 @@ it("shows one banner when ArtCraft's media host cannot be reached", () => {
   renderWithMirror({ ...SUMMARY, mediaHostBlocked: true });
   expect(screen.getAllByTestId("pod-mirror-media-host")).toHaveLength(1);
 });
+
+it("explains a pod root that is readable by others or cannot be checked, offers only Check again, and never offers to confirm it", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror({ ...SUMMARY, paused: "storage-unsafe", exposureTarget: "https://pod.example/alice/" });
+  expect(screen.getByTestId("pod-mirror-paused").textContent).toMatch(/top level of your pod can be read by others, or ArtCraft could not check it/);
+  expect(screen.queryByRole("button", { name: "Confirm this container is private" })).toBeNull();
+  expect(screen.queryByTestId("pod-mirror-unverified")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Check again" }));
+  expect(view.recheckExposure).toHaveBeenCalledTimes(1);
+});

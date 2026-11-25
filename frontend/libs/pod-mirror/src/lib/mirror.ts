@@ -38,14 +38,24 @@ export interface PodStorePort {
   attachThumbnail(descriptionUrl: string, input: AttachThumbnailInput): Promise<Result<unknown>>;
   remove(descriptionUrl: string, signal?: AbortSignal): Promise<Result<void>>;
   resumePending(signal?: AbortSignal): Promise<Result<ResumeSummary>>;
-  checkExposure(signal?: AbortSignal): Promise<Result<ExposureState>>;
+  /**
+   * Finds or creates the library and probes it, before anything is written. `url` is null when the
+   * library does not exist and the storage root is not provably private: nothing was created.
+   */
+  ensureLibrary(signal?: AbortSignal): Promise<Result<LibraryReport>>;
   /** The container the exposure check is about: the library, or the storage root before it exists. */
   exposureTarget(): string | null;
-  /** The library container once it exists; null before. Only this, or beneath it, can be confirmed private. */
-  libraryContainer(): string | null;
 }
 
 export type OpenStoreResult = { ok: true; store: PodStorePort } | { ok: false; reason: 'offline' | 'failed' };
+export interface LibraryReport {
+  url: string | null;
+  created: boolean;
+  exposure: ExposureState;
+  /** The container the probe was asked about. */
+  probed: string;
+}
+
 export interface OpenStoreOptions {
   /**
    * Asked by the store, per container, when the probe cannot tell. True only for a container
@@ -204,7 +214,9 @@ export class PodMirror {
   private baseline: Baseline | undefined;
   private store: PodStorePort | null = null;
   private exposureOk = false;
-  private blocked: 'exposed' | 'exposure-unknown' | null = null;
+  private blocked: 'exposed' | 'exposure-unknown' | 'storage-unsafe' | null = null;
+  /** The library container `ensureLibrary` reported; the only container that can be confirmed. */
+  private libraryUrl: string | null = null;
   private target: string | null = null;
   private storeAttempts = 0;
   private resumed = false;
@@ -321,7 +333,7 @@ export class PodMirror {
    */
   async confirmPrivate(): Promise<boolean> {
     // Never the storage root: only the library container the store reports.
-    const library = this.store?.libraryContainer() ?? null;
+    const library = this.libraryUrl;
     if (this.blocked !== 'exposure-unknown' || library === null) return false;
     this.confirmed.add(library);
     await this.o.journal.updateAccountState(this.o.account, { confirmedPrivate: [...this.confirmed] }).catch(() => undefined);
@@ -378,7 +390,7 @@ export class PodMirror {
       version: this.version,
       running: this.running,
       paused,
-      exposureTarget: paused === 'exposed' || paused === 'exposure-unknown' ? this.target : null,
+      exposureTarget: paused === 'exposed' || paused === 'exposure-unknown' || paused === 'storage-unsafe' ? this.target : null,
       counts,
       goneFromArtcraft: gone,
       mediaHostBlocked: this.mediaHostBlocked(),
@@ -1068,24 +1080,21 @@ export class PodMirror {
       this.storeAttempts = 0;
     }
     if (!this.exposureOk && this.blocked === null) {
-      const checked = await this.store.checkExposure(signal).catch(() => undefined);
+      const ensured = await this.store.ensureLibrary(signal).catch(() => undefined);
       if (generation !== this.generation || !this.store) return;
       this.target = this.store.exposureTarget();
-      if (checked?.ok && checked.value === 'private') this.exposureOk = true;
-      else if (checked?.ok && checked.value === 'exposed') this.blocked = 'exposed';
-      else if (checked?.ok) {
-        // The pod cannot say. Only the library container the person confirmed, and what is
-        // beneath it, is written to; the store asks `allowUnknownExposureFor` on every write.
-        const library = this.store.libraryContainer();
-        if (library === null) {
-          // No library yet, so only the storage root could be asked about, and that is never
-          // confirmed. The store creates the library on the first save and then asks about that
-          // URL, which refuses here until the person confirms it.
-          this.exposureOk = true;
-        } else if (this.isConfirmed(library)) this.exposureOk = true;
-        else this.blocked = 'exposure-unknown';
-      } else if (checked && !checked.ok && checked.error.kind === 'exposed') this.blocked = checked.error.reason === 'library-exposed' ? 'exposed' : 'exposure-unknown';
-      else return this.retryPrepareLater(checked && !checked.ok && checked.error.kind === 'offline' ? 'offline' : 'failed');
+      if (!ensured || !ensured.ok) return this.retryPrepareLater(ensured && !ensured.ok && ensured.error.kind === 'offline' ? 'offline' : 'failed');
+      const report = ensured.value;
+      this.libraryUrl = report.url;
+      this.target = report.url ?? report.probed;
+      if (report.url === null) {
+        // No library, and the storage root is exposed or could not be checked: nothing was created
+        // and the root is never offered for confirmation.
+        this.blocked = 'storage-unsafe';
+      } else if (report.exposure === 'private') this.exposureOk = true;
+      else if (report.exposure === 'exposed') this.blocked = 'exposed';
+      else if (this.isConfirmed(report.url)) this.exposureOk = true;
+      else this.blocked = 'exposure-unknown';
     }
     if (this.exposureOk && !this.resumed) {
       this.resumed = true;

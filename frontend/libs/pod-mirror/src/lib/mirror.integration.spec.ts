@@ -201,7 +201,7 @@ describe('the mirror against the real store, model and a memory pod', () => {
   });
 
   it('refuses to write when the real store is told the library is exposed', async () => {
-    const h = await harness(async () => 'exposed');
+    const h = await harness(async (url) => (url === ROOT ? 'private' : 'exposed'));
     const file = hostedFile(1);
     h.hosted.files.set(file.token, file);
     h.bytes.bodies.set(file.media_links.cdn_url, fakeBytes(h.hosted).bodies.get(file.media_links.cdn_url)!);
@@ -212,8 +212,21 @@ describe('the mirror against the real store, model and a memory pod', () => {
     expect(await everythingOnThePod(h.storage)).not.toMatch(/\.png/);
   });
 
+  it.each(['exposed', 'unknown'] as const)('creates nothing and pauses when the storage root is %s and no library exists', async (answer) => {
+    const h = await harness(async () => answer);
+    const file = hostedFile(1);
+    h.hosted.files.set(file.token, file);
+    h.bytes.bodies.set(file.media_links.cdn_url, fakeBytes(h.hosted).bodies.get(file.media_links.cdn_url)!);
+    await h.mirror.start();
+    await h.mirror.enqueue(file.token);
+    await settle(h.mirror);
+    expect(h.mirror.summary()).toMatchObject({ paused: 'storage-unsafe', exposureTarget: ROOT });
+    expect(await h.mirror.confirmPrivate()).toBe(false);
+    expect(await everythingOnThePod(h.storage)).not.toMatch(/creative-assets/);
+  });
+
   it('writes to a server that cannot say only after the person confirms the container, and remembers it', async () => {
-    const h = await harness(async () => 'unknown');
+    const h = await harness(async (url) => (url === ROOT ? 'private' : 'unknown'));
     const file = hostedFile(1);
     h.hosted.files.set(file.token, file);
     h.bytes.bodies.set(file.media_links.cdn_url, fakeBytes(h.hosted).bodies.get(file.media_links.cdn_url)!);
@@ -243,7 +256,7 @@ describe('the mirror against the real store, model and a memory pod', () => {
           storage: h.storage,
           features: h.storage.features,
           typeIndex: createTypeIndex({ storage: h.storage, features: h.storage.features, profile: WEB_ID }),
-          exposure: async () => 'unknown',
+          exposure: async (url) => (url === ROOT ? 'private' : 'unknown'),
           journal: h.journal.deletesFor(WEB_ID, ROOT),
           allowUnknownExposureFor: options.allowUnknownExposureFor,
           signal,

@@ -1,6 +1,6 @@
 import type { MediaStoreError, PutInput, PutOutcome, Result } from '@jeswr/pod-media-store';
 import { BytesError, type FetchPublicBytes } from './bytes.js';
-import { journalAccount, type OpenStore, type PodStorePort } from './mirror.js';
+import { journalAccount, type LibraryReport, type OpenStore, type PodStorePort } from './mirror.js';
 import type {
   HostedClient,
   HostedMediaFile,
@@ -174,8 +174,9 @@ export interface FakeStore extends PodStorePort {
   fixedUrl: string | null;
   /** What `exposureTarget()` says. */
   target: string | null;
-  /** What `libraryContainer()` says: the library, or null while it does not exist yet. Defaults to the target. */
+  /** What `ensureLibrary` reports as the library; null is "none, and the storage root is not safe". Defaults to the target. */
   library: string | null | undefined;
+  ensured: number;
   gate: Promise<void> | null;
 }
 
@@ -197,6 +198,7 @@ export function fakeStore(): FakeStore {
     target: 'https://pod.example/alice/creative-assets/',
     gate: null,
     library: undefined,
+    ensured: 0,
     async put(input) {
       const { bytes, signal: _signal, ...rest } = input as PutInput<unknown> & { bytes: Blob | Uint8Array };
       store.puts.push(input as PutInput<unknown>);
@@ -231,14 +233,15 @@ export function fakeStore(): FakeStore {
       return { ok: true, value: undefined };
     },
     exposureTarget: () => store.target,
-    libraryContainer: () => (store.library === undefined ? store.target : store.library),
     async resumePending() {
       store.resumed++;
       return { ok: true, value: { completed: 0, failed: 0, rejected: 0 } };
     },
-    async checkExposure(): Promise<Result<'private' | 'exposed' | 'unknown'>> {
+    async ensureLibrary(): Promise<Result<LibraryReport>> {
+      store.ensured++;
       if (store.exposure === 'offline') return { ok: false, error: { kind: 'offline', reason: 'storage' } };
-      return { ok: true, value: store.exposure };
+      const url = store.library === undefined ? store.target : store.library;
+      return { ok: true, value: { url, created: false, exposure: store.exposure, probed: url ?? 'https://pod.example/alice/' } };
     },
   };
   return store;

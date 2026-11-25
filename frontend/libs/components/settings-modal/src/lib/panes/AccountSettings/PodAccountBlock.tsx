@@ -284,7 +284,7 @@ const PodMirrorStatus = () => {
     );
   }
   const { saved, pending, failed, skipped, removing } = summary.counts;
-  const exposurePause = summary.paused === "exposed" || summary.paused === "exposure-unknown";
+  const exposurePause = summary.paused === "exposed" || summary.paused === "exposure-unknown" || summary.paused === "storage-unsafe";
   const forget = async () => {
     setBusy(true);
     try {
@@ -308,7 +308,7 @@ const PodMirrorStatus = () => {
             that only you can read it, confirm it below and ArtCraft will save copies there. It will not change any access rules.
           </span>
         )}
-        {summary.paused === "exposed" && summary.exposureTarget && <span>Checked: {summary.exposureTarget}</span>}
+        {(summary.paused === "exposed" || summary.paused === "storage-unsafe") && summary.exposureTarget && <span>Checked: {summary.exposureTarget}</span>}
         {failed > 0 && <span data-testid="pod-mirror-failed">{failed} {failed === 1 ? "item was" : "items were"} not saved or removed.</span>}
       </div>
       <div className="flex flex-wrap gap-2">

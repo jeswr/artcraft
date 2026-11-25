@@ -118,7 +118,7 @@ export type ItemState =
   /** The hosted copy is deleted but the pod copy could not be removed yet. */
   | { kind: 'remove-failed'; reason: FailureReason; attempts: number };
 
-export type PauseReason = 'offline' | 'session' | 'exposed' | 'exposure-unknown' | 'store-unavailable' | 'stopped';
+export type PauseReason = 'offline' | 'session' | 'exposed' | 'exposure-unknown' | 'storage-unsafe' | 'store-unavailable' | 'stopped';
 
 export interface MirrorStatus {
   running: boolean;

@@ -40,6 +40,7 @@ const PAUSES: Record<PauseReason, string> = {
   session: 'waiting for the pod to reconnect',
   exposed: 'your pod library can be read by others',
   'exposure-unknown': 'ArtCraft could not confirm that your pod library is private',
+  'storage-unsafe': 'your pod is not set up for private copies',
   'store-unavailable': 'waiting for your pod',
   stopped: 'copying is not running',
 };
@@ -75,6 +76,8 @@ export function describePause(reason: PauseReason): string {
       return 'Paused: your pod library can be read by others. Make it private, then check again.';
     case 'exposure-unknown':
       return 'Paused: ArtCraft could not confirm that your pod library is private.';
+    case 'storage-unsafe':
+      return "Paused: the top level of your pod can be read by others, or ArtCraft could not check it, so no library was created. Nothing was saved. Check again once that is fixed.";
     case 'stopped':
       return 'Not running.';
     default:

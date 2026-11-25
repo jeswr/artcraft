@@ -1550,47 +1550,72 @@ describe('exposure pauses the person can act on', () => {
     expect(again.store.puts).toEqual([]);
   });
 
-  it('never offers or honours a confirmation for the storage root: the library is created first and that URL is asked about', async () => {
-    const ROOT = 'https://pod.example/alice/';
+  it('asks about the library the store reports before the first save, and confirms exactly that URL', async () => {
     const LIBRARY = 'https://pod.example/alice/creative-assets/';
     const t = setup([hostedFile(1)]);
     t.store.exposure = 'unknown';
-    t.store.target = ROOT;
-    t.store.library = null; // nothing exists yet
+    t.store.target = LIBRARY;
     await t.mirror.start();
     await t.mirror.enqueue(token(1));
-    // The first save creates the library; the store then refuses it because its privacy is unknown.
-    t.store.putFailures.push({ kind: 'exposed', reason: 'exposure-unknown' });
-    const original = t.store.put.bind(t.store);
-    t.store.put = async (input) => {
-      const result = await original(input);
-      if (!result.ok) {
-        t.store.target = LIBRARY;
-        t.store.library = LIBRARY;
-      }
-      return result;
-    };
     await settle(t.mirror);
-    expect(await t.mirror.confirmPrivate()).toBe(true); // only now, and for the library
+    expect(t.store.ensured).toBeGreaterThan(0);
+    expect(t.store.puts).toEqual([]);
+    expect(t.mirror.summary()).toMatchObject({ paused: 'exposure-unknown', exposureTarget: LIBRARY });
+    expect(await t.mirror.confirmPrivate()).toBe(true);
     expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.confirmedPrivate).toEqual([LIBRARY]);
     const allowed = t.open.allowed[0];
-    expect(allowed(ROOT)).toBe(false);
+    expect(allowed('https://pod.example/alice/')).toBe(false);
     expect(allowed('https://pod.example/alice/public/')).toBe(false);
     expect(allowed(`${LIBRARY}2026/06/`)).toBe(true);
     await settle(t.mirror);
     expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
   });
 
-  it('does not offer to confirm the storage root while no library exists', async () => {
+  it('proceeds without asking when the library is reported private, and writes nothing before that answer', async () => {
+    const t = setup([hostedFile(1)]);
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary().paused).toBeNull();
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('pauses with a "check again" state when no library exists and the storage root is not safe, and never offers the root', async () => {
+    const ROOT = 'https://pod.example/alice/';
     const t = setup([hostedFile(1)]);
     t.store.exposure = 'unknown';
-    t.store.target = 'https://pod.example/alice/';
+    t.store.target = ROOT;
+    t.store.library = null;
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary()).toMatchObject({ paused: 'storage-unsafe', exposureTarget: ROOT });
+    expect(t.store.puts).toEqual([]);
+    expect(await t.mirror.confirmPrivate()).toBe(false);
+    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.confirmedPrivate).toBeUndefined();
+    expect(t.open.allowed[0](ROOT)).toBe(false);
+    // Fixed on the pod: checking again finds a private library and the queue goes on.
+    t.store.library = undefined;
+    t.store.target = 'https://pod.example/alice/creative-assets/';
+    t.store.exposure = 'private';
+    t.mirror.recheckExposure();
+    await settle(t.mirror);
+    expect(t.mirror.summary().paused).toBeNull();
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
+  it('treats an exposed storage root the same way, and an exposed library as exposed', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.exposure = 'exposed';
     t.store.library = null;
     await t.mirror.start();
     await settle(t.mirror);
-    expect(t.mirror.summary().paused).toBeNull(); // nothing to confirm yet, so no pause with a button
+    expect(t.mirror.summary().paused).toBe('storage-unsafe');
+    t.store.library = undefined;
+    t.mirror.recheckExposure();
+    await settle(t.mirror);
+    expect(t.mirror.summary().paused).toBe('exposed');
     expect(await t.mirror.confirmPrivate()).toBe(false);
-    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.confirmedPrivate).toBeUndefined();
   });
 
   it('honours a confirmed library and what is beneath it, never a container that only shares its start', async () => {

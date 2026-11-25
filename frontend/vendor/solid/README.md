@@ -147,4 +147,9 @@ lifted by `allowUnknownExposureFor`; HTTP 413 and 507 are reported as `too-large
 `0e04678aa9bc81059adaf825b1a6892a6708405530ac81f5f2dbcd94cec5c7e4`; the hash in the list above is the
 older one. Every other tarball is unchanged.
 
+It was packed a third time from `origin/feat/pod-media-store` at `fa9889c` (adds `ensureLibrary({ signal })`, which
+finds or creates the library and reports its exposure before the first `put`, and an `update` that never
+resurrects a concurrently deleted description). SHA-256 now
+`dddf848335bf654db3e5b57b7aa74f5d6cd01ac330213f8ae0c92ba766761b61`.
+
 These packages are experimental and security critical; they are unreleased and unaudited.

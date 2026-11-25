@@ -123,8 +123,7 @@ export function asPodStorePort(store: CreativeAssetStore, storageRoot: string): 
     attachThumbnail: (url, input) => store.attachThumbnail(url, input),
     remove: (url, signal) => store.remove(url, signal),
     resumePending: (signal) => store.resumePending(signal),
-    checkExposure: (signal) => store.checkExposure(signal),
+    ensureLibrary: (signal) => store.ensureLibrary(signal ? { signal } : {}),
     exposureTarget: () => store.library ?? storageRoot,
-    libraryContainer: () => store.library,
   };
 }
