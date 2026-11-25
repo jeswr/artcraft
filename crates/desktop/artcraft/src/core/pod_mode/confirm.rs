@@ -1,32 +1,57 @@
-use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use crate::core::windows::main_window::constants::MAIN_WINDOW_NAME;
+use pod_mode::controller::{Answer, Dialog, Prompt};
+use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 
-/// A native, blocking confirmation. It runs in the app's own dialog, outside the page, so page
-/// script can neither click it nor draw over it. Call from a blocking-capable thread.
-pub fn confirm_blocking(app: &AppHandle, title: &str, message: String, accept: &str) -> bool {
-  app
-    .dialog()
-    .message(message)
-    .title(title)
-    .kind(MessageDialogKind::Warning)
-    .buttons(MessageDialogButtons::OkCancelCustom(accept.to_string(), "Cancel".to_string()))
-    .blocking_show()
+/// The native confirmation. The NON-consenting button comes first, which is the default one where
+/// the dialog API makes the first button the default (macOS and Windows); only a press of the
+/// consenting button by its exact label counts, so Enter, Escape and closing the window all
+/// refuse. The dialog is modal to the main window.
+pub struct TauriDialog {
+  app: AppHandle,
 }
 
-pub fn enter_message(origin: &str) -> String {
-  format!(
-    "ArtCraft will restart this window in Solid pod mode for the sign-in server:\n\n{origin}\n\n\
-In pod mode ArtCraft loads no analytics and may only contact that server, the servers you add \
-later, and ArtCraft's own services. Only continue if you started this and trust that server."
-  )
+impl TauriDialog {
+  pub fn new(app: AppHandle) -> Self {
+    Self { app }
+  }
 }
 
-pub fn add_storage_message(origin: &str) -> String {
-  format!(
-    "Allow this window to contact the Solid storage server:\n\n{origin}\n\n\
-Your pod's pages will be able to receive your requests there. Only continue if you started this \
-and trust that server."
-  )
+pub const REFUSE_LABEL: &str = "Cancel";
+
+/// Maps the dialog's result to an answer: only the consenting label consents.
+pub fn answer_from(result: &MessageDialogResult, accept: &str) -> Answer {
+  match result {
+    MessageDialogResult::Custom(label) if label == accept => Answer::Accepted,
+    _ => Answer::Declined,
+  }
+}
+
+impl Dialog for TauriDialog {
+  async fn confirm(&self, prompt: &Prompt) -> Answer {
+    let app = self.app.clone();
+    let title = prompt.title.to_string();
+    let message = prompt.message.clone();
+    let accept = prompt.accept;
+    let shown = tauri::async_runtime::spawn_blocking(move || {
+      let builder = app
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(REFUSE_LABEL.to_string(), accept.to_string()));
+      let builder = match app.get_webview_window(MAIN_WINDOW_NAME) {
+        Some(window) => builder.parent(&window),
+        None => builder,
+      };
+      builder.blocking_show_with_result()
+    })
+    .await;
+    match shown {
+      Ok(result) => answer_from(&result, accept),
+      Err(_) => Answer::Declined,
+    }
+  }
 }
 
 #[cfg(test)]
@@ -34,8 +59,17 @@ mod tests {
   use super::*;
 
   #[test]
-  fn messages_name_the_origin() {
-    assert!(enter_message("https://login.example").contains("https://login.example"));
-    assert!(add_storage_message("https://pod.example").contains("https://pod.example"));
+  fn only_the_consenting_label_consents() {
+    assert_eq!(answer_from(&MessageDialogResult::Custom("Enter pod mode".into()), "Enter pod mode"), Answer::Accepted);
+    for result in [
+      MessageDialogResult::Custom(REFUSE_LABEL.into()),
+      MessageDialogResult::Custom("enter pod mode".into()),
+      MessageDialogResult::Ok,
+      MessageDialogResult::Yes,
+      MessageDialogResult::Cancel,
+      MessageDialogResult::No,
+    ] {
+      assert_eq!(answer_from(&result, "Enter pod mode"), Answer::Declined, "{result:?}");
+    }
   }
 }

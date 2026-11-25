@@ -1,8 +1,10 @@
 use crate::core::windows::main_window::constants::MAIN_WINDOW_NAME;
-use crate::core::pod_mode::header::{append_pod_csp, header_route_active};
-use crate::core::pod_mode::state::PodModeState;
+use crate::core::pod_mode::header::{header_claim, pod_csp_value, set_pod_csp};
+use crate::core::pod_mode::state::{PodModeState, SharedPodModeState};
 use errors::AnyhowResult;
+use pod_mode::controller::Store;
 use pod_mode::host_script::host_init_script;
+use std::sync::Arc;
 use tauri::Manager;
 use tauri::window::Color;
 use tauri::{AppHandle, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
@@ -11,19 +13,30 @@ pub async fn setup_main_window(
   app: &AppHandle,
 ) -> AnyhowResult<()> {
 
-  // The app, not the page, decides the mode. The record is read once here; the window is
-  // rebuilt when it changes. The script runs before any page script and defines a read-only
-  // global; in pod mode the narrowed policy is also added as a response header.
-  let record = app.state::<PodModeState>().record();
-  let init_script = host_init_script(&record, header_route_active(), &app.config().identifier);
+  // The app, not the page, decides the mode. One snapshot of the record serves both the
+  // initialization script and the response header, so they cannot disagree. The script runs
+  // before any page script and defines a read-only global; a restricted window also gets the
+  // policy as the one Content-Security-Policy header of every response.
+  let state = app.state::<Arc<PodModeState>>();
+  let shared = SharedPodModeState(state.inner().clone());
+  let record = shared.record();
+  let policy = pod_csp_value(&record);
+  state.set_policy(policy.clone());
   let header_app = app.clone();
+  let init_script = host_init_script(
+    &record,
+    header_claim(tauri::is_dev(), &policy),
+    &app.config().identifier,
+    state.fresh_connect().as_deref(),
+  );
 
   let win_builder =
       WebviewWindowBuilder::new(app, MAIN_WINDOW_NAME, WebviewUrl::default())
           .initialization_script(init_script)
           .on_web_resource_request(move |_request, response| {
-            let record = header_app.state::<PodModeState>().record();
-            append_pod_csp(&record, response);
+            // Read live: the handler of the first window stays registered for later ones.
+            let policy = header_app.state::<Arc<PodModeState>>().policy();
+            set_pod_csp(&policy, response);
           })
           .title("ArtCraft")
           .resizable(true)

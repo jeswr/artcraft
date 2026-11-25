@@ -5,6 +5,7 @@ use crate::record::{MAX_STORAGE_ORIGINS, PodModeRecord};
 pub enum TransitionError {
   InvalidOrigin,
   NotInPodMode,
+  InPodMode,
   TooManyStorageOrigins,
 }
 
@@ -12,7 +13,12 @@ pub enum TransitionError {
 /// shows the native confirmation first; this only validates and builds the new record.
 pub fn enter(issuer: &str, loopback: Loopback) -> Result<PodModeRecord, TransitionError> {
   let issuer = parse_origin(issuer, loopback).ok_or(TransitionError::InvalidOrigin)?;
-  Ok(PodModeRecord { enabled: true, issuer: Some(issuer), storage_origins: Vec::new() })
+  Ok(PodModeRecord {
+    enabled: true,
+    issuer: Some(issuer),
+    storage_origins: Vec::new(),
+    credentials_may_exist: true,
+  })
 }
 
 /// Adds a storage origin to a record that is already in pod mode. Adding one that is present
@@ -22,7 +28,7 @@ pub fn add_storage_origin(
   origin: &str,
   loopback: Loopback,
 ) -> Result<PodModeRecord, TransitionError> {
-  if !record.enabled {
+  if !record.enabled || record.issuer.is_none() {
     return Err(TransitionError::NotInPodMode);
   }
   let origin = parse_origin(origin, loopback).ok_or(TransitionError::InvalidOrigin)?;
@@ -37,9 +43,19 @@ pub fn add_storage_origin(
   Ok(next)
 }
 
-/// Back to ordinary mode.
+/// Back to ordinary mode, credentials flag cleared. The window asks for this only after its
+/// wipe reported success; the app cannot check, so the window's flow enforces the order.
 pub fn leave() -> PodModeRecord {
   PodModeRecord::default()
+}
+
+/// A successful wipe in a window that is not in pod mode clears the flag. Pod mode itself is
+/// never ended this way.
+pub fn credentials_cleared(record: &PodModeRecord) -> Result<PodModeRecord, TransitionError> {
+  if record.enabled {
+    return Err(TransitionError::InPodMode);
+  }
+  Ok(PodModeRecord { credentials_may_exist: false, ..record.clone() })
 }
 
 #[cfg(test)]
@@ -71,6 +87,25 @@ mod tests {
       add_storage_origin(&record, "https://one-more.example", HttpRefused),
       Err(TransitionError::TooManyStorageOrigins),
     );
+  }
+
+  #[test]
+  fn entering_sets_the_credentials_flag_and_a_corrupt_record_takes_no_origins() {
+    assert!(enter("https://login.example", HttpRefused).unwrap().credentials_may_exist);
+    let corrupt = pod_mode_corrupt();
+    assert_eq!(add_storage_origin(&corrupt, "https://pod.example", HttpRefused), Err(TransitionError::NotInPodMode));
+  }
+
+  fn pod_mode_corrupt() -> PodModeRecord {
+    crate::record::Loaded::Corrupt.effective()
+  }
+
+  #[test]
+  fn a_wipe_clears_the_flag_only_outside_pod_mode() {
+    let flagged = PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() };
+    assert_eq!(credentials_cleared(&flagged), Ok(PodModeRecord::default()));
+    let pod = enter("https://login.example", HttpRefused).unwrap();
+    assert_eq!(credentials_cleared(&pod), Err(TransitionError::InPodMode));
   }
 
   #[test]

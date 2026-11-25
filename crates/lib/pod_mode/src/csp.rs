@@ -15,11 +15,22 @@ pub const HOSTED_CONNECT_SOURCES: &[&str] = &[
   "tauri://localhost",
 ];
 
-// default-src, img-src and media-src: the static default-src without analytics and without
-// 'unsafe-eval'/'unsafe-inline', plus the asset protocol. Deliberately not `*`.
+// default-src and media-src: the static default-src without analytics and without
+// 'unsafe-eval'/'unsafe-inline'. Deliberately not `*`, and nothing the static default-src
+// lacks: the policy is sent alone, so it must never admit more than the static one.
 const HOSTED_CONTENT_SOURCES: &[&str] = &[
   "'self'",
-  "asset:",
+  "blob:",
+  "data:",
+  "https://*.fakeyou.com",
+  "https://*.storyteller.ai",
+  "ipc://localhost",
+  "tauri://localhost",
+];
+
+// img-src: the same, plus the asset host, which the static `img-src *` also covers.
+const HOSTED_IMAGE_SOURCES: &[&str] = &[
+  "'self'",
   "blob:",
   "data:",
   "https://*.fakeyou.com",
@@ -35,9 +46,11 @@ pub enum CspError {
   InvalidStorageOrigin,
 }
 
-/// The narrowing policy for pod mode, as the value of a `Content-Security-Policy` header or
-/// meta element. Added next to the static policy it can only restrict. Every fetch-type
-/// directive is explicit, and the issuer and storage origins appear only in `connect-src`.
+/// The policy for a restricted window, as the value of the one `Content-Security-Policy` header
+/// the app sends (or of a meta element, as defence in depth). It is sent alone, never next to
+/// the static policy, because engines differ on repeated headers; the tests prove it admits
+/// nothing the static policy does not, except the origins the person approved, which appear
+/// only in `connect-src`. Every fetch-type directive is explicit.
 /// Origins are re-validated here, so a value that is not exactly an origin cannot reach the
 /// policy text.
 pub fn build_pod_mode_csp(
@@ -56,14 +69,15 @@ pub fn build_pod_mode_csp(
     push_unique(&mut connect, origin);
   }
   let content = HOSTED_CONTENT_SOURCES.join(" ");
+  let images = HOSTED_IMAGE_SOURCES.join(" ");
   Ok(
     [
       format!("default-src {content}"),
       "script-src 'self' 'wasm-unsafe-eval'".to_string(),
       "worker-src 'self' blob:".to_string(),
       "style-src 'self' 'unsafe-inline'".to_string(),
-      "font-src 'self' data:".to_string(),
-      format!("img-src {content}"),
+      "font-src 'self'".to_string(),
+      format!("img-src {images}"),
       format!("media-src {content}"),
       "object-src 'none'".to_string(),
       "base-uri 'self'".to_string(),
@@ -87,10 +101,10 @@ mod tests {
   use Loopback::{HttpAllowed, HttpRefused};
 
   // The one exact snapshot, identical to the TypeScript builder's: a security policy.
-  const EXACT: &str = "default-src 'self' asset: blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; \
-script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; \
-img-src 'self' asset: blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; \
-media-src 'self' asset: blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; \
+  const EXACT: &str = "default-src 'self' blob: data: https://*.fakeyou.com https://*.storyteller.ai ipc://localhost tauri://localhost; \
+script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; \
+img-src 'self' blob: data: https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost ipc://localhost tauri://localhost; \
+media-src 'self' blob: data: https://*.fakeyou.com https://*.storyteller.ai ipc://localhost tauri://localhost; \
 object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; \
 connect-src 'self' asset: blob: data: http://ipc.localhost https://*.fakeyou.com https://*.storyteller.ai https://asset.localhost \
 https://unpkg.com/detect-gpu@5.0.70/ ipc://localhost tauri://localhost https://id.example https://pod.example";
@@ -166,6 +180,60 @@ https://unpkg.com/detect-gpu@5.0.70/ ipc://localhost tauri://localhost https://i
   fn loopback_http_follows_the_build_flag() {
     assert!(build_pod_mode_csp(Some("http://localhost:3000"), &[], HttpAllowed).is_ok());
     assert!(build_pod_mode_csp(Some("http://localhost:3000"), &[], HttpRefused).is_err());
+  }
+
+  /// The policy is sent alone, so it must admit nothing the static policy of any build does not,
+  /// for every fetch directive, apart from the origins the person approved in `connect-src`.
+  #[test]
+  fn admits_nothing_the_static_policy_does_not() {
+    let approved = vec!["https://pod1.example".to_string(), "https://pod2.example:8443".to_string()];
+    let csp = build_pod_mode_csp(Some("https://id.example"), &approved, HttpRefused).unwrap();
+    let pod = directives(&csp);
+    let extras = ["https://id.example", "https://pod1.example", "https://pod2.example:8443"];
+    let mut checked = 0;
+    for conf in ["tauri.conf.json", "tauri-mac.conf.json", "tauri-dev-hot-reload.conf.json"] {
+      let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/artcraft").join(conf);
+      let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+      let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+      let Some(static_csp) = value.pointer("/app/security/csp").and_then(|v| v.as_object()) else { continue };
+      checked += 1;
+      let static_sources = |name: &str| -> Option<Vec<String>> {
+        let v = static_csp.get(name)?;
+        Some(match v {
+          serde_json::Value::String(s) => s.split(' ').map(str::to_string).collect(),
+          serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+          _ => return None,
+        })
+      };
+      let effective = |name: &str| -> Vec<String> {
+        let chain: &[&str] = match name {
+          "worker-src" => &["worker-src", "child-src", "script-src", "default-src"],
+          "frame-src" => &["frame-src", "child-src", "default-src"],
+          other => &[other, "default-src"],
+        };
+        chain.iter().find_map(|n| static_sources(n)).unwrap_or_default()
+      };
+      for name in FETCH_DIRECTIVES {
+        let (_, sources) = pod.iter().find(|(n, _)| n == name).unwrap();
+        let allowed = effective(name);
+        for token in sources {
+          if token == "'none'" || (*name == "connect-src" && extras.contains(&token.as_str())) {
+            continue;
+          }
+          assert!(covered(token, &allowed), "{conf}: {name} admits {token}, the static policy does not");
+        }
+      }
+    }
+    assert_eq!(checked, 3, "expected three configs with a static policy");
+  }
+
+  /// CSP3 matching for the token kinds these policies use.
+  fn covered(token: &str, allowed: &[String]) -> bool {
+    if allowed.iter().any(|a| a == token) {
+      return true;
+    }
+    let wildcard = allowed.iter().any(|a| a == "*");
+    wildcard && (token == "'self'" || token.starts_with("https://") || token.starts_with("http://"))
   }
 
   fn directives(csp: &str) -> Vec<(String, Vec<String>)> {

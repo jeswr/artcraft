@@ -1,14 +1,14 @@
-use crate::core::pod_mode::state::PodModeState;
 use pod_mode::csp::build_pod_mode_csp;
 use pod_mode::origin::Loopback;
 use pod_mode::record::PodModeRecord;
 use std::borrow::Cow;
-use tauri::http::header::{CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderValue};
+use tauri::http::header::{CONTENT_SECURITY_POLICY, HeaderValue};
 
-/// The narrowed policy for `record`, or `None` outside pod mode. A record whose origins no
-/// longer validate yields the policy with no origins rather than none (fail closed).
+/// The policy for a restricted window (pod mode, or credentials not yet confirmed wiped), or
+/// `None` for an ordinary one. A record whose origins no longer validate gets the policy with no
+/// origins rather than none (fail closed).
 pub fn pod_csp_value(record: &PodModeRecord) -> Option<String> {
-  if !record.enabled {
+  if !record.restricted() {
     return None;
   }
   let loopback = Loopback::for_this_build();
@@ -17,78 +17,87 @@ pub fn pod_csp_value(record: &PodModeRecord) -> Option<String> {
     .ok()
 }
 
-/// Whether the header route is in effect. In a dev build the dev server serves the page, not the
-/// app protocol, so `on_web_resource_request` does not cover it and the page falls back to the
-/// meta policy.
-pub fn header_route_active() -> bool {
-  !tauri::is_dev()
+/// Whether the page may be told the header policy is in force: only when there is a policy, and
+/// the page is served by the app protocol. In a dev run the dev server serves it, no response of
+/// ours is touched, and the page falls back to the meta policy.
+pub fn header_claim(is_dev: bool, policy: &Option<String>) -> bool {
+  !is_dev && policy.is_some()
 }
 
-/// Adds the narrowed policy as a second `Content-Security-Policy` header on HTML responses.
-/// Browsers enforce every policy they are given, so this can only restrict the static one.
-pub fn append_pod_csp(record: &PodModeRecord, response: &mut tauri::http::Response<Cow<'static, [u8]>>) {
-  let Some(value) = pod_csp_value(record) else { return };
-  let is_html = response
-    .headers()
-    .get(CONTENT_TYPE)
-    .and_then(|v| v.to_str().ok())
-    .is_some_and(|v| v.to_ascii_lowercase().starts_with("text/html"));
-  if !is_html {
-    return;
+/// Sets the policy as the ONE `Content-Security-Policy` header of a response, replacing whatever
+/// was there. Every response of the main window gets it (documents, scripts, workers), and no
+/// engine ever has two to reconcile. The policy admits nothing the static one does not (tested
+/// in the `pod_mode` crate).
+pub fn set_pod_csp(policy: &Option<String>, response: &mut tauri::http::Response<Cow<'static, [u8]>>) {
+  let Some(value) = policy else { return };
+  if let Ok(value) = HeaderValue::from_str(value) {
+    response.headers_mut().insert(CONTENT_SECURITY_POLICY, value);
   }
-  if let Ok(value) = HeaderValue::from_str(&value) {
-    response.headers_mut().append(CONTENT_SECURITY_POLICY, value);
-  }
-}
-
-pub fn current_csp(state: &PodModeState) -> Option<String> {
-  pod_csp_value(&state.record())
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tauri::http::header::CONTENT_TYPE;
 
-  fn html_response() -> tauri::http::Response<Cow<'static, [u8]>> {
+  fn response(content_type: &str) -> tauri::http::Response<Cow<'static, [u8]>> {
     tauri::http::Response::builder()
-      .header(CONTENT_TYPE, "text/html; charset=utf-8")
-      .header(CONTENT_SECURITY_POLICY, "default-src 'self'")
+      .header(CONTENT_TYPE, content_type)
+      .header(CONTENT_SECURITY_POLICY, "default-src 'self' 'unsafe-eval'")
       .body(Cow::Borrowed(&b""[..]))
       .unwrap()
   }
 
-  #[test]
-  fn ordinary_mode_changes_nothing() {
-    let mut response = html_response();
-    append_pod_csp(&PodModeRecord::default(), &mut response);
-    assert_eq!(response.headers().get_all(CONTENT_SECURITY_POLICY).iter().count(), 1);
+  fn pod() -> PodModeRecord {
+    PodModeRecord {
+      enabled: true,
+      issuer: Some("https://login.example".into()),
+      storage_origins: vec![],
+      credentials_may_exist: true,
+    }
   }
 
   #[test]
-  fn pod_mode_appends_beside_the_static_policy() {
-    let mut response = html_response();
-    let record = PodModeRecord { enabled: true, issuer: Some("https://login.example".into()), storage_origins: vec![] };
-    append_pod_csp(&record, &mut response);
-    let all: Vec<_> = response.headers().get_all(CONTENT_SECURITY_POLICY).iter().collect();
-    assert_eq!(all.len(), 2);
-    assert!(all[1].to_str().unwrap().contains("https://login.example"));
+  fn an_ordinary_window_gets_no_policy_and_its_responses_are_untouched() {
+    let policy = pod_csp_value(&PodModeRecord::default());
+    assert_eq!(policy, None);
+    let mut r = response("text/html");
+    set_pod_csp(&policy, &mut r);
+    assert_eq!(r.headers().get_all(CONTENT_SECURITY_POLICY).iter().count(), 1);
+    assert!(r.headers().get(CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap().contains("unsafe-eval"));
   }
 
   #[test]
-  fn non_html_is_untouched() {
-    let mut response = tauri::http::Response::builder()
-      .header(CONTENT_TYPE, "application/javascript")
-      .body(Cow::Borrowed(&b""[..]))
-      .unwrap();
-    let record = PodModeRecord { enabled: true, issuer: None, storage_origins: vec![] };
-    append_pod_csp(&record, &mut response);
-    assert!(response.headers().get(CONTENT_SECURITY_POLICY).is_none());
+  fn every_kind_of_response_gets_exactly_one_policy_which_replaces_the_static_one() {
+    let policy = pod_csp_value(&pod());
+    for content_type in ["text/html; charset=utf-8", "text/javascript", "application/wasm", "image/png", ""] {
+      let mut r = response(content_type);
+      set_pod_csp(&policy, &mut r);
+      let all: Vec<_> = r.headers().get_all(CONTENT_SECURITY_POLICY).iter().collect();
+      assert_eq!(all.len(), 1, "{content_type}");
+      assert!(all[0].to_str().unwrap().contains("https://login.example"));
+      assert!(!all[0].to_str().unwrap().contains("'unsafe-eval'"));
+    }
+  }
+
+  #[test]
+  fn an_ordinary_window_that_may_still_hold_credentials_is_restricted_too() {
+    let flagged = PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() };
+    assert!(pod_csp_value(&flagged).is_some());
   }
 
   #[test]
   fn a_corrupt_record_still_gets_a_policy_with_no_origins() {
-    let record = PodModeRecord { enabled: true, issuer: Some("not an origin".into()), storage_origins: vec![] };
+    let record = PodModeRecord { issuer: Some("not an origin".into()), ..pod() };
     let csp = pod_csp_value(&record).unwrap();
     assert!(!csp.contains("not an origin"));
+  }
+
+  #[test]
+  fn the_header_claim_needs_a_policy_and_the_app_protocol() {
+    let policy = pod_csp_value(&pod());
+    assert!(header_claim(false, &policy));
+    assert!(!header_claim(true, &policy));
+    assert!(!header_claim(false, &None));
   }
 }

@@ -36,11 +36,12 @@ use crate::core::commands::get_app_info_command::get_app_info_command;
 use crate::core::commands::load_without_cors_command::load_without_cors_command;
 use crate::core::commands::media_files::media_file_delete_command::media_file_delete_command;
 use crate::core::commands::platform_info_command::platform_info_command;
-use crate::core::commands::pod_mode::pod_mode_add_storage_origin_command::pod_mode_add_storage_origin_command;
-use crate::core::commands::pod_mode::pod_mode_enter_command::pod_mode_enter_command;
-use crate::core::commands::pod_mode::pod_mode_leave_command::pod_mode_leave_command;
-use crate::core::commands::pod_mode::pod_mode_reload_command::pod_mode_reload_command;
-use crate::core::pod_mode::state::PodModeState;
+use crate::core::commands::pod_mode::pod_mode_commands::{
+  pod_mode_add_storage_origin_command, pod_mode_consume_fresh_command, pod_mode_credentials_cleared_command,
+  pod_mode_enter_command, pod_mode_leave_command, pod_mode_reload_command,
+};
+use crate::core::pod_mode::new_controller;
+use crate::core::pod_mode::state::{PodModeState, SharedPodModeState};
 use crate::core::commands::providers::deprecated::get_provider_order_command::get_provider_order_command;
 use crate::core::commands::providers::deprecated::set_provider_order_command::set_provider_order_command;
 use crate::core::commands::providers::provider_clear_command::provider_clear_command;
@@ -172,7 +173,12 @@ pub fn run() {
   let artcraft_usage_tracker = ArtcraftUsageTracker::new();
   let artcraft_usage_tracker_2 = artcraft_usage_tracker.clone();
 
-  let pod_mode_state = PodModeState::load(app_data_root.settings_dir().path().to_path_buf());
+  let context = tauri::generate_context!("tauri.conf.json");
+  let pod_mode_state = Arc::new(PodModeState::load(
+    app_data_root.settings_dir().path().to_path_buf(),
+    &context.config().identifier,
+  ));
+  let pod_mode_shared = SharedPodModeState(pod_mode_state.clone());
 
   println!("Initializing backend runtime...");
 
@@ -198,6 +204,8 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_upload::init())
     .setup(move |app| {
+      // The controller needs the app handle, and the main window below needs the controller's state.
+      app.manage(new_controller(app.handle().clone(), pod_mode_shared.clone()));
       updates::show_previous_outcome(app.handle());
       // TODO(bt): This is broken on windows
       // log_environment_details();
@@ -307,6 +315,8 @@ pub fn run() {
     open_sora_login_command,
     platform_info_command,
     pod_mode_add_storage_origin_command,
+    pod_mode_consume_fresh_command,
+    pod_mode_credentials_cleared_command,
     pod_mode_enter_command,
     pod_mode_leave_command,
     pod_mode_reload_command,
@@ -336,13 +346,20 @@ pub fn run() {
     worldlabs_receive_bearer_command,
   ]);
 
-  let app = builder.build(tauri::generate_context!("tauri.conf.json"))
+  let app = builder.build(context)
     .expect("error while building tauri application");
   app.run(|handle, event| {
     let updates = handle.state::<Arc<updates::Updates>>();
     match event {
-      tauri::RunEvent::ExitRequested { api, .. }
-        if updates.prevents_exit() || handle.state::<PodModeState>().rebuilding() => api.prevent_exit(),
+      tauri::RunEvent::ExitRequested { api, code, .. }
+        if pod_mode::should_prevent_exit(
+          handle.state::<Arc<PodModeState>>().rebuilding(),
+          updates.prevents_exit(),
+          code,
+        ) =>
+      {
+        api.prevent_exit()
+      }
       tauri::RunEvent::Exit => updates.finish(),
       _ => {}
     }
