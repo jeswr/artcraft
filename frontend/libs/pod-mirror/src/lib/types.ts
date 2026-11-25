@@ -200,5 +200,8 @@ export interface VerifyResult {
   checked: number;
   /** Items the hosted side says it no longer has. Their pod copies are kept and only marked. */
   flagged: number;
-  stoppedBy: 'done' | 'too-soon' | 'hosted-unavailable' | 'not-running';
+  /** Saved items whose pod copy the pod said is gone, queued to be copied again (hosted item still there). */
+  requeued: number;
+  /** `pod-unavailable`: the hosted side was checked but the pod could not be asked, so the pass is not recorded as done. */
+  stoppedBy: 'done' | 'too-soon' | 'hosted-unavailable' | 'pod-unavailable' | 'not-running';
 }

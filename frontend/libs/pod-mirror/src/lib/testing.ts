@@ -159,6 +159,10 @@ export interface FakeStore extends PodStorePort {
   /** Everything handed to the store, serialisable, for leak checks. */
   seen: string[];
   removed: string[];
+  /** Description URLs whose copy the pod no longer has (404/410), or how a lookup fails otherwise. */
+  missing: Set<string>;
+  getFailure: MediaStoreError | null;
+  gets: string[];
   attached: { url: string }[];
   exposure: 'private' | 'exposed' | 'unknown' | 'offline';
   /** Failures to hand out for the next puts, in order. */
@@ -186,6 +190,9 @@ export function fakeStore(): FakeStore {
     puts: [],
     seen: [],
     removed: [],
+    missing: new Set(),
+    getFailure: null,
+    gets: [],
     attached: [],
     exposure: 'private',
     putFailures: [],
@@ -216,6 +223,7 @@ export function fakeStore(): FakeStore {
         sha256: 'ab'.repeat(32),
         existed: store.existed,
       };
+      store.missing.delete(outcome.descriptionUrl);
       return { ok: true, value: outcome };
     },
     async attachThumbnail(url, input) {
@@ -230,7 +238,14 @@ export function fakeStore(): FakeStore {
       const failure = store.removeFailures.shift();
       if (failure) return { ok: false, error: failure };
       store.removed.push(url);
+      store.missing.add(url);
       return { ok: true, value: undefined };
+    },
+    async get(url) {
+      store.gets.push(url);
+      if (store.getFailure) return { ok: false, error: store.getFailure };
+      if (store.missing.has(url)) return { ok: false, error: { kind: 'not-found', reason: 'storage' } };
+      return { ok: true, value: {} };
     },
     exposureTarget: () => store.target,
     async resumePending() {

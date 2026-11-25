@@ -91,6 +91,13 @@ export interface MirrorJournal {
   update(account: MirrorAccount, token: string, patch: RecordPatch, now: number): Promise<JournalRecord | undefined>;
   remove(account: MirrorAccount, token: string): Promise<void>;
   list(account: MirrorAccount): Promise<JournalRecord[]>;
+  /**
+   * True when any record on this device, of ANY WebID and hosted account, other than `except`,
+   * still pairs with this pod description and is not itself on its way out (`removing` or
+   * `remove-failed`). Content-hash naming makes several hosted tokens share one pod copy; this is
+   * the check a delete needs before it may take the copy with it. It cannot see other devices.
+   */
+  isPairedElsewhere(descriptionUrl: string, except: MirrorAccount & { token: string }): Promise<boolean>;
   getAccountState(account: MirrorAccount): Promise<AccountState | undefined>;
   /** Sets the baseline once per account; returns the stored one. */
   ensureBaseline(account: MirrorAccount, baseline: Baseline): Promise<Baseline>;
@@ -114,7 +121,10 @@ export class JournalError extends Error {
 }
 
 export const DB_NAME = 'artcraft-pod-mirror';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
+const BY_DESCRIPTION = 'descriptionUrl';
+/** States that no longer hold a pod copy up: the hosted item is gone and the copy is going. */
+const LEAVING: ReadonlySet<string> = new Set(['removing', 'remove-failed']);
 const ITEMS = 'items';
 const ACCOUNTS = 'accounts';
 const DELETES = 'deletes';
@@ -144,7 +154,7 @@ function done(tx: IDBTransaction): Promise<void> {
 }
 
 /** Creates the stores a version needs; safe to run again over an existing database. */
-export function upgradeJournal(db: IDBDatabase, oldVersion: number): void {
+export function upgradeJournal(db: IDBDatabase, oldVersion: number, tx?: IDBTransaction): void {
   if (oldVersion < 1) {
     if (!db.objectStoreNames.contains(ITEMS)) db.createObjectStore(ITEMS, { keyPath: ['webId', 'username', 'token'] });
   }
@@ -153,6 +163,12 @@ export function upgradeJournal(db: IDBDatabase, oldVersion: number): void {
     for (const name of ['watermarks', DELETES]) if (db.objectStoreNames.contains(name)) db.deleteObjectStore(name);
     db.createObjectStore(ACCOUNTS, { keyPath: ['webId', 'username'] });
     db.createObjectStore(DELETES, { keyPath: ['scope', 'descriptionUrl'] });
+  }
+  if (oldVersion < 3 && tx) {
+    // Looks up "who else pairs with this pod copy" without reading every row. Records without a
+    // descriptionUrl are simply not in the index.
+    const items = tx.objectStore(ITEMS);
+    if (!items.indexNames.contains(BY_DESCRIPTION)) items.createIndex(BY_DESCRIPTION, 'descriptionUrl');
   }
 }
 
@@ -177,7 +193,7 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       reject(new JournalError('unavailable'));
       return;
     }
-    open.onupgradeneeded = (event) => upgradeJournal(open.result, event.oldVersion);
+    open.onupgradeneeded = (event) => upgradeJournal(open.result, event.oldVersion, open.transaction ?? undefined);
     open.onsuccess = () => resolve(open.result);
     open.onblocked = () => reject(new JournalError('blocked'));
     open.onerror = () => reject(new JournalError(open.error?.name === 'VersionError' ? 'newer-version' : 'unavailable'));
@@ -251,6 +267,15 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       const tx = db.transaction(ITEMS, 'readonly');
       return (await request(tx.objectStore(ITEMS).getAll(accountRange(KR, account)))) as JournalRecord[];
     },
+    async isPairedElsewhere(descriptionUrl, except) {
+      const tx = db.transaction(ITEMS, 'readonly');
+      const items = tx.objectStore(ITEMS);
+      // A database upgraded without the index (it should not be) is scanned instead.
+      const rows = (await request(
+        items.indexNames.contains(BY_DESCRIPTION) ? items.index(BY_DESCRIPTION).getAll(KR.only(descriptionUrl)) : items.getAll(),
+      )) as JournalRecord[];
+      return rows.some((row) => pairsWith(row, descriptionUrl, except));
+    },
     getAccountState: readState,
     async ensureBaseline(account, baseline) {
       const tx = db.transaction(ACCOUNTS, 'readwrite');
@@ -288,6 +313,11 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
       db.close();
     },
   };
+}
+
+function pairsWith(row: JournalRecord, descriptionUrl: string, except: MirrorAccount & { token: string }): boolean {
+  if (row.descriptionUrl !== descriptionUrl || LEAVING.has(row.state)) return false;
+  return !(row.webId === except.webId && row.username === except.username && row.token === except.token);
 }
 
 /** An in-memory journal with the same behaviour, for the engine's tests. Keeps nothing. */
@@ -336,6 +366,9 @@ export function createMemoryMirrorJournal(): MirrorJournal {
     },
     async list(a) {
       return [...items.values()].filter((r) => r.webId === a.webId && r.username === a.username).map((r) => ({ ...r }));
+    },
+    async isPairedElsewhere(descriptionUrl, except) {
+      return [...items.values()].some((row) => pairsWith(row, descriptionUrl, except));
     },
     async getAccountState(a) {
       const found = states.get(accountKey(a));

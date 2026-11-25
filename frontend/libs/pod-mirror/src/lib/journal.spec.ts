@@ -1,6 +1,6 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DB_NAME, JournalError, upgradeJournal, type JournalRecord, type MirrorJournal, openMirrorJournal, createMemoryMirrorJournal } from './journal.js';
+import { DB_NAME, DB_VERSION, JournalError, upgradeJournal, type JournalRecord, type MirrorJournal, openMirrorJournal, createMemoryMirrorJournal } from './journal.js';
 const ACCOUNT = { webId: 'https://alice.example/profile/card#me', username: 'alice_hosted' };
 
 const OTHER_USER = { webId: ACCOUNT.webId, username: 'someone_else' };
@@ -42,6 +42,27 @@ describe.each([
     expect((await journal.get(OTHER_USER, 'm_1'))?.attempts).toBe(2);
     expect((await journal.get(OTHER_POD, 'm_1'))?.attempts).toBe(3);
     expect(await journal.list(ACCOUNT)).toHaveLength(1);
+  });
+
+  it('says whether another record, of any hosted account or WebID, pairs with a pod copy', async () => {
+    const journal = await fresh();
+    const url = 'https://pod/lib/2026/06/hash';
+    await journal.create(record(ACCOUNT, 'm_1', { state: 'saved', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(false);
+    // The same account, another token: same bytes held twice.
+    await journal.create(record(ACCOUNT, 'm_2', { state: 'saved', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(true);
+    await journal.remove(ACCOUNT, 'm_2');
+    // Another hosted account on the same pod, and another WebID.
+    await journal.create(record(OTHER_USER, 'm_1', { state: 'saved', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(true);
+    await journal.remove(OTHER_USER, 'm_1');
+    await journal.create(record(OTHER_POD, 'm_1', { state: 'pending', descriptionUrl: url }));
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(true);
+    // A different copy, and a record that is itself being removed, do not count.
+    expect(await journal.isPairedElsewhere('https://pod/lib/2026/06/other', { ...ACCOUNT, token: 'm_1' })).toBe(false);
+    await journal.update(OTHER_POD, 'm_1', { state: 'removing' }, 5);
+    expect(await journal.isPairedElsewhere(url, { ...ACCOUNT, token: 'm_1' })).toBe(false);
   });
 
   it('creates only when absent and never overwrites', async () => {
@@ -155,6 +176,21 @@ describe('indexeddb journal durability', () => {
     upgraded.close();
   });
 
+  it('adds the pod-copy index to a version 2 database and keeps its rows', async () => {
+    const factory = new IDBFactory();
+    const prior = await openRaw(factory, 2, (db) => upgradeJournal(db, 0));
+    await new Promise<void>((resolve) => {
+      const tx = prior.transaction('items', 'readwrite');
+      tx.objectStore('items').put(record(ACCOUNT, 'm_old', { state: 'saved', descriptionUrl: 'https://p/d' }));
+      tx.oncomplete = () => resolve();
+    });
+    prior.close();
+    const journal = await open(factory);
+    open1.push(journal);
+    expect((await journal.get(ACCOUNT, 'm_old'))?.descriptionUrl).toBe('https://p/d');
+    expect(await journal.isPairedElsewhere('https://p/d', { ...ACCOUNT, token: 'other' })).toBe(true);
+  });
+
   it('refuses a database written by a newer version, with a closed error', async () => {
     const factory = new IDBFactory();
     await new Promise<void>((resolve) => {
@@ -177,7 +213,7 @@ describe('indexeddb journal durability', () => {
     await journal.create(record());
     // A newer window upgrading must not be blocked by this one.
     await new Promise<void>((resolve, reject) => {
-      const req = factory.open(DB_NAME, 3);
+      const req = factory.open(DB_NAME, DB_VERSION + 1);
       req.onsuccess = () => {
         req.result.close();
         resolve();
