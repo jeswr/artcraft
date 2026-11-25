@@ -3,11 +3,14 @@ import {
   defaultSniff,
   type ExposureState,
   type MediaStoreError,
+  type PendingDelete,
   type PutInput,
   type PutOutcome,
   type ResumeSummary,
   type Result,
+  type ShouldResume,
   type Sniffer,
+  type WithdrawResult,
 } from '@jeswr/pod-media-store';
 import { thumbnailMutation } from './assets-store.js';
 import { BytesError, blobHead, ByteBudget, type FetchPublicBytes } from './bytes.js';
@@ -39,11 +42,12 @@ export interface PodStorePort {
   attachThumbnail(descriptionUrl: string, input: AttachThumbnailInput): Promise<Result<unknown>>;
   remove(descriptionUrl: string, signal?: AbortSignal): Promise<Result<void>>;
   /**
-   * Forgets a delete the store recorded for this copy and has not finished (the store's durable
-   * delete journal), so a later `resumePending` cannot carry it out. Called when a record pairs
-   * with the copy.
+   * Forgets a delete the store recorded for this copy and has not finished, so a later
+   * `resumePending` cannot carry it out: `withdrawn`, `none` (nothing was pending) or `incomplete`
+   * (the description is already gone, so nothing can save the copy: whoever pairs with it must be
+   * copied again). It deletes nothing in the pod.
    */
-  withdrawDelete(descriptionUrl: string): Promise<void>;
+  withdrawPending(descriptionUrl: string, signal?: AbortSignal): Promise<Result<WithdrawResult>>;
   /**
    * Whether the library container answers, with the current session: `ok`, `missing` (the pod says
    * there is no library to read) or `unknown` (offline, refused, a server error). Reads only.
@@ -54,7 +58,12 @@ export interface PodStorePort {
    * journal calls `saved` is still there. Nothing is written.
    */
   get(descriptionUrl: string, signal?: AbortSignal): Promise<Result<unknown>>;
-  resumePending(signal?: AbortSignal): Promise<Result<ResumeSummary>>;
+  /**
+   * Finishes the deletes the store journalled. `shouldResume` is asked immediately before each
+   * destructive request; while it runs, any other store call on that copy fails `conflict` /
+   * `reentrant`.
+   */
+  resumePending(options?: { signal?: AbortSignal; shouldResume?: ShouldResume }): Promise<Result<ResumeSummary>>;
   /**
    * Finds or creates the library and probes it, before anything is written. `url` is null when the
    * library does not exist and the storage root is not provably private: nothing was created.
@@ -1431,9 +1440,8 @@ export class PodMirror {
       });
       if (attached.ok) thumbnail = 'attached';
     }
-    // A delete of this copy that was interrupted earlier is withdrawn once this record pairs with it
-    // (the store's pending-delete list is also filtered by pairings: see `guardDeletes`).
-    const withdraw = () => store.withdrawDelete(value.descriptionUrl).catch(() => undefined);
+    // A delete of this copy that was interrupted earlier was withdrawn by the store's put; if it
+    // could not be (a journal that was down), the veto of the next `resumePending` stops it.
     await this.patch(
       token,
       {
@@ -1452,7 +1460,6 @@ export class PodMirror {
       },
       true,
     );
-    await withdraw();
   }
 
   /** A paused import starts no copy: this item waits, `pending`, until the run resumes. */
@@ -1501,7 +1508,8 @@ export class PodMirror {
     // The pod copy is named by content hash, so other records (another hosted account on this pod,
     // or this account holding the same bytes twice) may share it. Decide and delete under the
     // copy's lock, so a concurrent copy or delete of the same bytes cannot interleave.
-    return withCopyLock(url, async () => {
+    let repair: string[] = [];
+    await withCopyLock(url, async () => {
       const record = this.records.get(token);
       if (!record || record.descriptionUrl !== url || record.state !== 'removing') return;
       if (signal.aborted) return;
@@ -1517,7 +1525,10 @@ export class PodMirror {
       // Another record still pairs with it: only this token's pairing goes, and a delete the
       // store has pending for the copy is withdrawn so a later start cannot finish it.
       if (shared) {
-        await store.withdrawDelete(url).catch(() => undefined);
+        const withdrawn = await store.withdrawPending(url, signal).catch(() => undefined);
+        // `incomplete`: an earlier delete already took the description, so the records that still
+        // pair with the copy point at nothing. They are copied again once this lock is released.
+        if (withdrawn?.ok && withdrawn.value === 'incomplete') repair = this.pairedTokens(url, token);
         return this.dropRecord(token);
       }
       let removed: Result<void>;
@@ -1533,6 +1544,12 @@ export class PodMirror {
       if (removed.ok || (removed.error.kind === 'not-found' && removed.error.reason === 'storage')) return this.dropRecord(token);
       return this.storeFailure(token, 'remove', removed.error, signal);
     });
+    for (const other of repair) await this.requeueMissing(other, signal);
+  }
+
+  /** The records of this account, other than `except`, that are saved on the copy. */
+  private pairedTokens(url: string, except: string): string[] {
+    return [...(this.pairings.get(url) ?? [])].filter((other) => other !== except && this.records.get(other)?.state === 'saved');
   }
 
   /** Another record of this account, other than `except`, pairs with the copy and is not itself leaving. */
@@ -1625,6 +1642,8 @@ export class PodMirror {
   private classifyStoreError(error: MediaStoreError): { reason: FailureReason; policy: Policy } {
     switch (error.kind) {
       case 'conflict':
+        // `reentrant`: the copy was busy answering a veto. Not the item's fault; try again.
+        if (error.reason === 'reentrant') return { reason: 'store', policy: 'transient' };
         return { reason: 'conflict', policy: DETERMINISTIC_REPEATS };
       case 'forbidden':
         return { reason: 'forbidden', policy: this.o.blockedAttempts };
@@ -1737,8 +1756,32 @@ export class PodMirror {
     }
     if (this.exposureOk && !this.resumed) {
       this.resumed = true;
-      await this.store.resumePending(signal).catch(() => undefined);
+      await this.resumeDeletes(this.store, signal);
     }
+  }
+
+  /**
+   * Finishes the deletes the store journalled earlier, except for a copy a record still pairs
+   * with. The store asks just before each destructive request. The answer comes from this
+   * account's records and the journal (never from the store: a call into it for that copy fails
+   * `reentrant` while the question is open): `"withdraw"` if any record of any hosted account
+   * pairs with the copy, `false` if the journal cannot say. A copy whose description is already
+   * gone but that a record pairs with is copied again, for the hosted item that still exists.
+   */
+  private async resumeDeletes(store: PodStorePort, signal: AbortSignal): Promise<void> {
+    const damaged = new Set<string>();
+    const shouldResume = async (entry: PendingDelete): Promise<boolean | 'withdraw'> => {
+      try {
+        const paired = this.pairedHere(entry.descriptionUrl, '') || (await this.o.journal.isPairedElsewhere(entry.descriptionUrl));
+        if (!paired) return true;
+        if (entry.phase === 'deleted') damaged.add(entry.descriptionUrl);
+        return 'withdraw';
+      } catch {
+        return false;
+      }
+    };
+    await store.resumePending({ signal, shouldResume }).catch(() => undefined);
+    for (const url of damaged) for (const token of this.pairedTokens(url, '')) await this.requeueMissing(token, signal);
   }
 
   /** Bumped whenever the session or network changes what an in-flight store open would mean. */

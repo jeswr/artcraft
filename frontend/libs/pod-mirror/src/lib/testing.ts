@@ -1,4 +1,4 @@
-import type { MediaStoreError, PutInput, PutOutcome, Result } from '@jeswr/pod-media-store';
+import type { MediaStoreError, PendingDelete, PutInput, PutOutcome, ResumeEntryResult, Result } from '@jeswr/pod-media-store';
 import { BytesError, type FetchPublicBytes } from './bytes.js';
 import { journalAccount, type LibraryReport, type OpenStore, type PodStorePort } from './mirror.js';
 import type {
@@ -160,6 +160,11 @@ export interface FakeStore extends PodStorePort {
   seen: string[];
   removed: string[];
   withdrawn: string[];
+  /** What `withdrawPending` answers. */
+  withdrawResult: 'withdrawn' | 'none' | 'incomplete';
+  /** What the store's `resumePending` asks the veto about, in order (the vetoes' answers are kept). */
+  pendingDeletes: PendingDelete[];
+  vetoes: (boolean | 'withdraw')[];
   /** Description URLs whose copy the pod no longer has (404/410), or how a lookup fails otherwise. */
   missing: Set<string>;
   getFailure: MediaStoreError | null;
@@ -194,6 +199,9 @@ export function fakeStore(): FakeStore {
     seen: [],
     removed: [],
     withdrawn: [],
+    withdrawResult: 'withdrawn',
+    pendingDeletes: [],
+    vetoes: [],
     missing: new Set(),
     getFailure: null,
     gets: [],
@@ -247,8 +255,9 @@ export function fakeStore(): FakeStore {
       store.missing.add(url);
       return { ok: true, value: undefined };
     },
-    async withdrawDelete(url) {
+    async withdrawPending(url) {
       store.withdrawn.push(url);
+      return { ok: true, value: store.withdrawResult };
     },
     async probeLibrary() {
       return store.libraryProbe;
@@ -260,9 +269,17 @@ export function fakeStore(): FakeStore {
       return { ok: true, value: {} };
     },
     exposureTarget: () => store.target,
-    async resumePending() {
+    async resumePending(options) {
       store.resumed++;
-      return { ok: true, value: { completed: 0, failed: 0, rejected: 0 } };
+      const entries: ResumeEntryResult[] = [];
+      for (const entry of store.pendingDeletes) {
+        const answer = (await options?.shouldResume?.(entry)) ?? true;
+        store.vetoes.push(answer);
+        entries.push({ descriptionUrl: entry.descriptionUrl, outcome: answer === true ? 'completed' : 'skipped', ...(answer === true ? {} : { reason: answer === 'withdraw' ? 'withdrawn' : 'vetoed' }) } as ResumeEntryResult);
+        if (answer === true) store.removed.push(entry.descriptionUrl), store.missing.add(entry.descriptionUrl);
+      }
+      const completed = entries.filter((e) => e.outcome === 'completed').length;
+      return { ok: true, value: { completed, failed: 0, rejected: 0, skipped: entries.length - completed, entries } };
     },
     async ensureLibrary(): Promise<Result<LibraryReport>> {
       store.ensured++;

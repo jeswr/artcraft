@@ -276,6 +276,25 @@ describe('failures at each point', () => {
     expect(t.bytes.urls.filter((u) => u === hostedFile(1).media_links.cdn_url)).toHaveLength(3);
   });
 
+  it.each([
+    ['reentrant (the copy was answering a veto)', { kind: 'conflict', reason: 'reentrant' }],
+    ['journal (an adopting put whose delete journal cannot answer)', { kind: 'failed', reason: 'journal' }],
+  ] as const)('a store %s is transient: never final, never saved, and the item is copied once it clears', async (_n, error) => {
+    const t = setup([hostedFile(1)]);
+    for (let i = 0; i < 8; i++) t.store.putFailures.push({ ...error });
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    for (let i = 0; i < 8; i++) {
+      await settle(t.mirror);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(t.mirror.stateOf(token(1))?.kind).not.toBe('failed');
+      expect(t.mirror.stateOf(token(1))?.kind).not.toBe('saved');
+    }
+    await vi.advanceTimersByTimeAsync(24 * 3_600_000);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
   it('a deterministic store failure that changes kind is not counted as a repeat', async () => {
     const t = setup([hostedFile(1)]);
     t.store.putFailures.push({ kind: 'conflict', reason: 'hash-mismatch' }, { kind: 'failed', reason: 'invalid-input' }, { kind: 'conflict', reason: 'hash-mismatch' });
@@ -1154,6 +1173,29 @@ describe('one pod copy for several hosted items', () => {
     t.events.emit({ type: 'deleted', token: token(2) });
     await settle(t.mirror);
     expect(t.store.removed).toEqual(['https://pod.example/alice/creative-assets/2026/06/shared']);
+  });
+
+  it('copies the twin again when the store says the pending delete it withdrew was already past the description (incomplete)', async () => {
+    const t = await twins();
+    t.store.withdrawResult = 'incomplete';
+    t.store.puts.length = 0;
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.store.removed).toEqual([]);
+    expect(t.mirror.stateOf(token(1))).toBeUndefined();
+    // Token 2 still pairs with a copy that has no description: it is queued again, from the hosted item.
+    expect(t.store.puts).toHaveLength(1);
+    expect(t.mirror.stateOf(token(2))).toMatchObject({ kind: 'saved' });
+  });
+
+  it('does not copy the twin again when nothing was pending (none) or the delete was withdrawn', async () => {
+    const t = await twins();
+    t.store.puts.length = 0;
+    t.store.withdrawResult = 'none';
+    t.events.emit({ type: 'deleted', token: token(1) });
+    await settle(t.mirror);
+    expect(t.store.puts).toHaveLength(0);
+    expect(t.mirror.stateOf(token(2))).toMatchObject({ kind: 'saved' });
   });
 
   it('does not count a twin that is no longer a saved copy as a reason to keep the copy', async () => {
@@ -2530,5 +2572,55 @@ describe('bytes in flight', () => {
     await settle(t.mirror);
     expect(t.store.puts).toHaveLength(2);
     expect(t.mirror.summary().counts.saved).toBe(2);
+  });
+});
+
+describe('the veto for the store\'s pending deletes', () => {
+  const URL_A = 'https://pod.example/alice/creative-assets/2026/06/aaa';
+  const pending = (descriptionUrl: string, phase: 'intent' | 'deleted' = 'intent') => ({ descriptionUrl, shardUrl: 'https://pod.example/alice/creative-assets/2026/06/', phase });
+
+  it('proceeds for a copy nothing pairs with, and withdraws one a record of any account pairs with', async () => {
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
+    await journal.create({ webId: JOURNAL_ACCOUNT.webId, username: 'other_account', token: 'm_x', state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: URL_A });
+    const t = setup([], {}, journal);
+    t.store.pendingDeletes.push(pending(URL_A), pending('https://pod.example/alice/creative-assets/2026/06/bbb'));
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.store.vetoes).toEqual(['withdraw', true]);
+  });
+
+  it('says no when the journal cannot answer, and never calls the store for the copy while asked', async () => {
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
+    journal.isPairedElsewhere = async () => {
+      throw new Error('closed');
+    };
+    const t = setup([], {}, journal);
+    t.store.pendingDeletes.push(pending(URL_A));
+    const calls: string[] = [];
+    for (const name of ['get', 'remove', 'put', 'withdrawPending', 'attachThumbnail'] as const) {
+      const original = t.store[name] as (...args: unknown[]) => unknown;
+      (t.store as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => (calls.push(name), original(...args));
+    }
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.store.vetoes).toEqual([false]);
+    expect(calls).toEqual([]);
+  });
+
+  it('copies again a record whose copy was already past its description', async () => {
+    const journal = createMemoryMirrorJournal();
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
+    await journal.create({ ...JOURNAL_ACCOUNT, token: token(1), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: URL_A, sha256: 'x', thumbnail: 'none' });
+    const t = setup([hostedFile(1)], {}, journal);
+    t.store.pendingDeletes.push(pending(URL_A, 'deleted'));
+    t.store.missing.add(URL_A);
+    await t.mirror.start();
+    await settle(t.mirror);
+    expect(t.store.vetoes).toEqual(['withdraw']);
+    expect(t.store.puts).toHaveLength(1);
+    expect(t.mirror.stateOf(token(1))).toMatchObject({ kind: 'saved' });
+    expect(t.store.resumed).toBe(1);
   });
 });

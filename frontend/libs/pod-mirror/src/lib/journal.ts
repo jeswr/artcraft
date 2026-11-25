@@ -355,35 +355,6 @@ function pairsWith(row: JournalRecord, descriptionUrl: string, except: (MirrorAc
   return !except || !(row.webId === except.webId && row.username === except.username && row.token === except.token);
 }
 
-/**
- * The store's durable delete journal, as the store sees it: `list()` (what `resumePending`
- * executes) leaves out every pending delete whose pod copy a journal record still pairs with.
- * A pairing made after a delete was interrupted (the same bytes arriving under another token,
- * in any hosted account) must never be undone by a later start. The entries are kept, not
- * dropped: they run (or are replaced by a fresh delete) once nothing pairs with the copy. When
- * the journal cannot say, nothing is listed: a leaked orphan is preferred to a lost copy.
- */
-export function guardDeletes(deletes: DeleteJournal, journal: Pick<MirrorJournal, 'isPairedElsewhere'>): DeleteJournal {
-  return {
-    put: (entry) => deletes.put(entry),
-    delete: (descriptionUrl) => deletes.delete(descriptionUrl),
-    async list() {
-      const entries = await deletes.list();
-      const allowed: DeleteJournalEntry[] = [];
-      for (const entry of entries) {
-        let paired = true;
-        try {
-          paired = await journal.isPairedElsewhere(entry.descriptionUrl);
-        } catch {
-          // cannot tell: not listed
-        }
-        if (!paired) allowed.push(entry);
-      }
-      return allowed;
-    },
-  };
-}
-
 /** An in-memory journal with the same behaviour, for the engine's tests. Keeps nothing. */
 export function createMemoryMirrorJournal(): MirrorJournal {
   const items = new Map<string, JournalRecord>();

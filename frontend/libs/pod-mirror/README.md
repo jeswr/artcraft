@@ -33,11 +33,25 @@ itself being removed); otherwise only that token's pairing is dropped. The check
 under a per-copy lock: a queue within this running app, and, where the browser has the Web Locks API
 (`navigator.locks`), a lock named by the copy's address, so two windows of the app on one database
 are covered too. A copy that a delete took while another item was writing the same bytes is written
-again rather than left as a dead link (an adopting put asks the pod before it is called saved). A
-delete the store recorded and did not finish (the store's durable delete journal) is withdrawn when a
-record comes to pair with the copy, is never listed to `resumePending` while any record pairs with
-it (`guardDeletes`), and nothing is deleted while the journal cannot be read or written. The
-description of a kept copy stays the first writer's (its prompt and provenance), including after
+again rather than left as a dead link (an adopting put asks the pod before it is called saved).
+
+A delete the store recorded and did not finish (its durable delete journal) is guarded in layers, from
+the store outwards (`@jeswr/pod-media-store` at `690ecee7c`). The store withdraws the pending delete as
+a put adopts the copy, takes a lock per copy for put, remove, update, resume and withdraw, and re-reads
+its journal before each destructive request. On top of that the mirror gives `resumePending` a
+`shouldResume` veto, asked just before each destructive request: it answers `"withdraw"` when a
+journal record of any hosted account or WebID pairs with the copy, `false` (the delete stays journalled)
+when the journal cannot say, and `true` otherwise. It answers from the journal and this app's records,
+never from the store, because a store call on that copy fails `conflict` / `reentrant` while the
+question is open. This closes what was a residual window: an interrupted delete, the same bytes saved
+again as a fresh copy while the store's journal was unreachable (so the pending delete could not be
+withdrawn; an adopting put fails closed instead), then a restart. A copy whose
+description an earlier delete had already taken, but that a record pairs with, is copied again from
+the hosted item if it still exists (the store's `withdrawPending` answering `incomplete`, or a
+resumed entry past its description). `failed` / `journal` from an adopting put and `conflict` /
+`reentrant` are transient: the item stays pending and is tried again. Nothing is deleted while the
+journal cannot be read or written. Two stores with separate journals, or two devices, remain
+unprotected (see below). The description of a kept copy stays the first writer's (its prompt and provenance), including after
 that hosted item is deleted.
 
 Limits that cannot be fixed from here: the guarantee is per running app (one browser profile on one
