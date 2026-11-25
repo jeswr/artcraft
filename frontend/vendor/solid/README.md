@@ -6,6 +6,13 @@ workspace packages of the Solid SDK monorepo (four are private there; `guarded-f
 `225a553` ("fix(desktop-auth): address review findings M1-M3, L1-L7"). Replace them with a
 registry dependency, or remove them, when that decision is made.
 
+**`jeswr-pod-auth-0.1.0.tgz` is the exception to the branch above: it was packed from the
+unmerged draft PR #677 of the Solid SDK (`feat/pod-auth-identity-hook` at `b58caad`), which adds
+`PodAuthOptions.fetch`. Its SHA-256 is `b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e`; the hash
+in the list below for that file is the older one. Pinned code is normally merged upstream first
+(AGENTS rule 10); this one is not yet, and ArtCraft's cross-origin WebID sign-in depends on it.
+Replace it with the merged build when #677 lands.**
+
 | Tarball | Role | Licence |
 | --- | --- | --- |
 | `jeswr-desktop-auth-0.1.0.tgz` | desktop (system browser plus private-use scheme) sign-in | MIT |
@@ -59,7 +66,7 @@ SHA-256 of the tarballs as committed:
 ```
 75f91bdc463a3a3d0ca96f5dd6e406364dbb71299dd4ed2528a099a6bee070ea  jeswr-desktop-auth-0.1.0.tgz
 198d0b6b78381df298071345d87d7769888ab467140d94b2ea11417e812d4f97  jeswr-guarded-fetch-0.1.0.tgz
-349742b51085983059f54d37caa3a6b360c28de710b49c60ee8cbfb429ac04ef  jeswr-pod-auth-0.1.0.tgz
+b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e  jeswr-pod-auth-0.1.0.tgz
 5acce3f79351b6e7efb69f5e5d1c214fe4ae03f4d35d2bf5d4be9f533e43a0a2  jeswr-reactive-authentication-0.1.5.tgz
 89d27479963625ada5355a62d9a277d18a9f08ebd63948039fe11d3bcd4229a0  jeswr-suite-native-0.1.0.tgz
 ```
@@ -156,7 +163,7 @@ resurrects a concurrently deleted description). SHA-256 now
 (draft PR #677; adds `PodAuthOptions.fetch`, `InjectedFetchError` and `InvalidInjectedResponseError`: pod-auth's own
 body-less GET and HEAD reads go through an injected fetch). Its `package.json` is the old one apart from
 dependency key order, and it works with the vendored reactive-authentication 0.1.5. SHA-256 now
-`b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e`; the pod-auth hash in the list above
-(`349742b5...`) is the older one. Every other tarball is unchanged.
+`b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e`; the list above carries it now (the earlier
+`349742b5...` is gone). Every other tarball is unchanged.
 
 These packages are experimental and security critical; they are unreleased and unaudited.

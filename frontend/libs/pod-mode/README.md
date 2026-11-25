@@ -7,7 +7,8 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
 ## Who decides
 
 - The Rust app keeps the pod-mode record (flag, issuer origin, storage origins,
-  `credentials_may_exist`) in the app's settings directory, one file per app identifier
+  `credentials_may_exist`, and the dialog budget: `storage_prompts`, `refused_origins`,
+  `enter_prompts`, `declined_issuers`, `backoff_until_ms`) in the app's settings directory, one file per app identifier
   (`<settings>/pod_mode/<identifier>/pod_mode.json`, so a dev overlay never reads a release
   record). The logic is in `crates/lib/pod_mode` (controller, record, CSP, window rebuild) behind
   traits, and is tested without a webview; `crates/desktop/artcraft/src/core/pod_mode` holds the
@@ -18,8 +19,12 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
 - To enter pod mode the page calls `enterPodMode({ issuer })`, which invokes
   `pod_mode_enter_command`. The app validates the origin, shows a **native confirmation dialog
   that names the origin** (the non-consenting button is first and default, it stays up at least
-  800 ms, and a refusal starts a 5 s cool-down), persists the record, remembers the approval in
-  process memory as a one-shot "fresh connect" and rebuilds the main window. Adding a storage
+  800 ms, and a refusal starts a wait that grows with every refusal), persists the record,
+  remembers the approval in process memory as a one-shot "fresh connect" and rebuilds the main
+  window. The dialog says only what the app knows: it was asked to enter pod mode for this
+  address, which should be the person's provider or the site of their WebID (it cannot check
+  that), and to continue only if they just entered it. The `enter` dialogs are bounded in the
+  app, like the storage ones (see below). Adding a storage
   origin works the same way (`addStorageOrigin`). Leaving is `pod_mode_leave_command`; the app
   cannot verify the page wiped first, so `leavePodMode(wipe)` enforces the order, but leaving
   **never clears `credentials_may_exist`**: it records "not in pod mode, credentials may still
@@ -38,25 +43,61 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
   - The app validates the origin: https only (`localhost` and `127.0.0.1`, http or https, only
     in a debug build); a public DNS host of at least two labels of `[a-z0-9-]`, no trailing dot,
     empty label, `xn--` label, IP literal or all-digit last label; no path, wildcard, userinfo,
-    explicit default port or list separator. The Rust and TypeScript validators are tested
+    explicit default port, port 0 or list separator. **Special-use names are refused:**
+    `localhost` and `*.localhost` (except exactly `localhost`, in a debug build), `.local`,
+    `.lan`, `.internal`, `.home.arpa`, `.onion`, `.test` and `.invalid`. `.example` is allowed
+    because every test and the shared vectors use it; it can never be delegated. A name that
+    resolves to a private address on a public suffix is not caught (hardening, not a boundary).
+    **Internationalised host names are not supported yet** (the validators refuse every Unicode
+    and `xn--` form); the sign-in message says so. The TypeScript twin defaults to refusing
+    loopback, and every page caller passes the build's real flag (`buildAllowsLoopback`). The Rust and TypeScript validators are tested
     against one table of vectors (`crates/lib/pod_mode/testdata/origin-vectors.json`).
   - The issuer's own origin and an origin already saved need no dialog. Anything else shows a
-    native dialog that names the origin and says only what the app knows: "ArtCraft is asking
-    to connect to <origin>. Only allow this if it is where your Solid pod or profile lives",
-    that it cannot check why it is being asked, and that the window reloads. Cancel is the
+    native dialog that names the origin and says only what the app knows. The command takes a
+    closed `purpose` (`profile`, `storage`, `sign-in`, `app-identity`): the page's own statement
+    of why it asks, which the app cannot check and which only changes the wording (an unknown
+    word is `invalid_purpose`):
+    - `storage`: "ArtCraft is asking to connect to <origin>. Only allow this if it is where your
+      Solid pod or profile lives."
+    - `profile`: "ArtCraft's window says it needs to read your Solid profile from <origin>."
+    - `sign-in`: "ArtCraft's window says your Solid profile named this address as the place you
+      sign in. If you allow it, your browser will open this address and ask you to sign in
+      there, perhaps with your password ... Only allow it if you recognise it as your Solid
+      provider." A profile is data a third party may control, so this is the dialog that matters.
+    - `app-identity`: "this address publishes ArtCraft's own identity document ... It is not
+      where your pod or profile lives, and allowing it is normal when you sign in", so the person
+      is not told to refuse it.
+    Every wording says the app cannot check the reason and that the window reloads. Cancel is the
     default button; an Allow that comes back in under 800 ms is reported as `too_fast` (nothing
     changes, the origin is not recorded as refused, ask again after the wait).
-  - The record persists a count of dialogs shown (counted and saved **before** the dialog
-    opens): at most 6 in a pod-mode session, however they were answered. It also persists the
-    origins the person declined; a declined origin is never asked about again until pod mode is
-    left and entered anew (a Settings action to forget refusals is not built). Each refusal
-    doubles the wait before the next dialog (5 s, 10 s, 20 s, up to 5 min). At most 8 origins
-    are saved. Entering pod mode again starts a new budget.
+  - **The dialog budget is the app's and outlives leaving pod mode.** The record persists, and
+    leave and enter both carry: `storage_prompts` (at most 12), `enter_prompts` (at most 6),
+    `declined_issuers` and the wait deadline; each count is saved **before** its dialog opens,
+    however it is answered. Declined storage origins (`refused_origins`) are never asked about
+    again in a pod-mode session and are cleared by entering anew; a declined issuer is never
+    asked about again until the app is restarted. Leaving and `credentials_cleared` need no
+    dialog but cannot reset any of this, and entering needs an accepted dialog that is itself
+    counted, so a page cannot loop its way to more dialogs. The budget starts again when the app
+    starts outside pod mode: **quitting and reopening ArtCraft is the documented reset** (there
+    is no Settings action). At most 8 origins are saved.
+  - **The wait after a refusal is persisted as a wall-clock deadline** (`backoff_until_ms`, and in
+    memory at once, so a failed write still starts it). Each refusal since the app started doubles
+    it (5 s, 10 s, 20 s, ... up to 5 min; the cap is reached at the seventh refusal and up to 18
+    can happen, so it is reachable). It is read back clamped to five minutes from now, so a clock
+    set back, or a record edited to hold a far-future time, cannot lock the dialogs out for longer.
+    A clock set forward ends a wait early; that costs one dialog the budget already counts.
+  - **Why 12 and 6.** The worst honest sign-in, with a profile on one origin, a provider on
+    another, ArtCraft's identity document on a third, and the pod's storage and a Type Index on
+    two more, needs one `enter` dialog and four of these (provider, identity document, storage,
+    Type Index; the profile's own origin is the entered one). Twelve storage dialogs allow three
+    such sign-ins, or two with a refusal each, in one run of the app; six `enter` dialogs allow a
+    few typing mistakes. These are not exhausted by an honest flow; a hostile page gets at most
+    these per run of the app, and each needs a click on a dialog that names the address.
   - Only a considered "Allow" persists the origin and rebuilds the window; the rebuilt window
     restores the session with the origin already in its header policy, and so does every later
     launch.
   **A hostile profile cannot put an origin into `connect-src` silently:** it can only cause a
-  dialog, at most 6 per session and never twice for an origin the person declined. The page-side
+  dialog, at most 12 per run of the app and never twice for an origin the person declined. The page-side
   gate is a convenience over this: one ask per origin, in turn, remembers a decline per origin
   (a limit from the app for the window), treats `busy` / `cooling_down` / `too_fast` as "try
   later", honours the caller's `AbortSignal`, and rejects with `StorageOriginRefused` (a closed
@@ -70,9 +111,12 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
   once instead of opening the dialog, so a profile on another origin than the provider is not
   fetched before the person has seen why: the page explains, the person clicks Allow, and only
   then does the app's dialog appear. A WebID typed in Settings enters pod mode for its own
-  origin. After an accepted add the app leaves the rebuilt window a one-shot fresh grant for the
-  recorded origin, so a sign-in interrupted by an approval can continue with one click; the page
-  only uses it with a pending hint of its own for that exact origin (see `libs/pod-session`).
+  origin. After an accepted add the app leaves the rebuilt window a one-shot fresh grant for **the
+  origin that was just allowed**, so a sign-in interrupted by an approval can continue with one
+  click; the page only uses it with a pending hint of its own for that exact origin, which the
+  window's policy must list (see `libs/pod-session`). The window script carries it only while it is
+  the recorded issuer or one of the saved origins, and a later decline or too-fast answer clears
+  it.
   The trade-off: a planted record and hint plus a dialog the person allowed could offer one
   Continue click, and the page shows the address first. Token, registration and revocation POSTs
   and redirect hops are not gated and fail untyped under the policy (see `libs/pod-session`,
@@ -130,7 +174,8 @@ What remains:
   over the record, because the key would have to live where the page cannot reach and this app
   has no such place. Mitigations in place: a planted record does not start a sign-in (a
   record loaded from disk only restores; a sign-in needs the in-process "fresh connect" that a
-  dialog produced, and the record's issuer must equal it); the sign-in window shows the
+  dialog in this process produced, which the page also needs a hint of its own for; the dialog
+  that produced it named the entered issuer or an origin the person then allowed); the sign-in window shows the
   connected WebID prominently with a prompt to leave if it is not recognised. Residual, stated
   plainly: a planted record together with planted pod-auth stores could restore a session that
   belongs to the attacker (a WebID the person did not choose). The WebID display is the only

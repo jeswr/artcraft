@@ -30,14 +30,17 @@ await session.leave();           // from any state: revoke, wipe locally, ask th
 
 ## Flow and rules
 
-- `connect` validates the typed issuer (a bare https origin; `http://localhost` only in a dev
-  build with `VITE_SOLID_ALLOW_LOOPBACK=true`) and asks the app to enter pod mode. The app shows
-  a native dialog naming the origin; on approval it records the issuer, remembers the approval
-  in memory and rebuilds the window. There is no "connect" marker: the rebuilt window starts in
-  `ready-to-sign-in` only when the app reports a fresh approval whose issuer equals the
-  recorded one, and `beginSignIn()` (the Continue button, no autofocus) consumes that approval
-  once and then wipes pod-auth's stores and signs in. A record merely loaded from disk only
-  restores a session and never starts a sign-in. A declined dialog is shown as such.
+- `connect` validates what was typed, a WebID or a provider address (a bare https origin or an
+  https URL; `http://localhost` only in a dev build with `VITE_SOLID_ALLOW_LOOPBACK=true`; see
+  "A WebID on another origin" below), and asks the app to enter pod mode for its origin. The app
+  shows a native dialog naming the origin; on approval it records it, remembers the approval in
+  memory and rebuilds the window. There is no "connect" marker: the rebuilt window starts in
+  `ready-to-sign-in` only when the app reports a fresh approval for the origin the page's own
+  pending hint names and the window's policy lists, and `beginSignIn()` (the Continue button, no
+  autofocus) consumes that approval once, using the hint it displayed, and then wipes pod-auth's
+  stores and signs in. A record merely loaded from disk only restores a session and never starts
+  a sign-in. A declined dialog is shown as such; an answer that came too fast is reported as a
+  too-fast answer, not as a decline.
 - pod-auth is built only in a pod window, only when `sessionRestoreAllowed()`, only when a
   narrowing policy is confirmed (`podPolicyApplied()`), and only when the config is valid.
   Otherwise the state is a closed error. Building it happens inside the guarded section, so a
@@ -134,18 +137,43 @@ the request through unchanged (so `redirect` is honoured) and returns the real r
   `needs-approval`: the page says which address and that nothing was sent there, and **Allow**
   calls `approveOrigin()` (native dialog, rebuild). The rebuilt window offers Continue again with
   what was typed.
+- **The profile chooses the provider, so the person is shown it before the browser opens.** With a
+  typed WebID, the provider is whatever the profile names, and a profile can be written by someone
+  else. pod-auth's discovery read to that provider is refused until the person allows it with
+  purpose `sign-in` (the native dialog says this is where they will be asked to sign in, that
+  their profile named it, and to allow it only if they recognise it). After the rebuild
+  `ready-to-sign-in` says "You allowed <that address> as the place you sign in", never the
+  recorded one. Then, before the system browser opens, the session holds pod-auth at the point of
+  `openUrl` (`confirmOpen`), reads the origin of the authorization address it is about to open,
+  and shows `confirm-provider`: "Your profile is at <profile origin>. It says you sign in at
+  <provider origin>." with a button "Sign in at <provider origin>". Only that click opens the
+  browser (`openBrowser()`); Cancel and Leave abort. The two origins are separate values in the
+  state (`webId`, `provider`), and the signing-in text names only the provider, only once it is
+  open. An address that is not an origin the app would allow is not opened.
+- **Purposes.** The page tells the app why it asks, from a closed set it cannot be trusted on:
+  `app-identity` for the host of the Client Identifier Document (ArtCraft's own identity
+  document; the dialog says so, so the person is not told to refuse it), `sign-in` for another
+  address while a WebID is signed in with, `profile` for another address while a provider is,
+  `storage` for the pod's own files and a restore.
 - **Restore.** A refusal while restoring keeps the stored session: nothing is wiped, logged out
-  or revoked. `needs-approval` offers Allow (and Leave); a declined or too-fast answer is an
-  error that `retry()` runs again.
+  or revoked. `needs-approval` offers Allow (and Leave); a declined answer is an error that
+  `retry()` runs again.
+- **A too-fast Allow, or `busy` / `cooling_down` from the app, is not a dead end.** Nothing
+  changed, so the state goes back to `needs-approval` for the same address, purpose and phase with
+  `wait` set (`too-fast`, or `busy`), what was typed is kept, and the page says what to do:
+  press Allow again (after a moment, for `busy`). Only a decline, the allowance running out, or an
+  app failure ends the sign-in.
 - `InvalidInjectedResponseError` (the supplied fetch returned something pod-auth cannot accept)
   is the fixed plain failure `invalid-response`.
 
 What survives the rebuild is a `localStorage` entry (`artcraft.podSession.pending`) holding only
-the hint the person typed and the origin awaiting approval: never a token, code, verifier or
-callback URL. It is read back through the same validators as fresh input, and used only when the
-app also reports a fresh approval for that exact origin. It is cleared on success, decline,
-cancel and leave. The app sets that fresh approval after an accepted add as well; without a
-pending hint (a connected session's later approvals) the window just restores. The trade-off: a
+the hint the person typed, the origin awaiting approval and its purpose word: never a token,
+code, verifier or callback URL. It is read back through the same validators as fresh input (with
+the build's loopback flag), and used only when the app also reports a fresh approval for that
+exact origin, which the window's policy must list. It is cleared on success, decline, cancel and
+leave. The app sets that fresh approval (the origin just allowed) after an accepted add as well,
+and clears it on a later decline or too-fast answer; without a pending hint (a connected
+session's later approvals) the window just restores. The trade-off: a
 planted hint plus a planted record plus an Allow the person clicked could offer one Continue click,
 and the page shows the address (and WebID) before it.
 
@@ -159,14 +187,22 @@ and the page shows the address (and WebID) before it.
   through the gate. Under the window's policy they fail untyped, and a provider whose token
   endpoint is on another origin than the issuer is not supported.
 - The first sign-in may ask about the Client Identifier Document host (it is another origin than
-  the provider).
+  the provider). The dialog says it is ArtCraft's own identity document. The app does not know
+  that host; putting it in the policy at entry would save the dialog but needs the host as a
+  build constant in Rust, which is not done.
+- A host name outside the validators (an internationalised name, a special-use name such as
+  `.local` or `.lan`, port 0) cannot be a provider or a profile address; the sign-in message says
+  internationalised names are not supported yet.
 
 ## Deep links (the sign-in callback)
 
 The callback is `<identifier>:/oauth/callback`. On Linux and Windows the OS starts a new instance
 with the URL as its argument and learns the scheme from the installer. A dev run is not
-installed, so a debug build whose identifier ends in `.dev` (the two dev overlays) registers its
-own scheme at start (`register_dev_deep_links`; `is_registered` first; never the release scheme,
+installed, so a build whose identifier ends in `.dev` (the two dev overlays; the code checks the
+identifier, not whether it is a debug build) registers its own scheme at start
+(`register_dev_deep_links`; on Linux it registers again unless the `.desktop` file already names
+this very binary, because every checkout's dev binary has the same file name and `is_registered`
+alone would keep another build's registration; never the release scheme,
 so a debug binary built from the base config does not take over an installed release's
 callback). It writes a `.desktop` file or a registry key naming the current binary and nothing
 removes it: delete `~/.local/share/applications/<binary>-handler.desktop` (Linux) or
