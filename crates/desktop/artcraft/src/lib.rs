@@ -13,6 +13,7 @@ use crate::core::commands::updates::check_for_updates_command::check_for_updates
 use crate::core::commands::updates::install_update_command::install_update_command;
 
 use tauri::Manager;
+use crate::core::windows::main_window::constants::MAIN_WINDOW_NAME;
 
 use crate::core::commands::app_preferences::get_app_preferences_command::get_app_preferences_command;
 use crate::core::commands::app_preferences::update_app_preference_command::update_app_preferences_command;
@@ -35,6 +36,11 @@ use crate::core::commands::get_app_info_command::get_app_info_command;
 use crate::core::commands::load_without_cors_command::load_without_cors_command;
 use crate::core::commands::media_files::media_file_delete_command::media_file_delete_command;
 use crate::core::commands::platform_info_command::platform_info_command;
+use crate::core::commands::pod_mode::pod_mode_add_storage_origin_command::pod_mode_add_storage_origin_command;
+use crate::core::commands::pod_mode::pod_mode_enter_command::pod_mode_enter_command;
+use crate::core::commands::pod_mode::pod_mode_leave_command::pod_mode_leave_command;
+use crate::core::commands::pod_mode::pod_mode_reload_command::pod_mode_reload_command;
+use crate::core::pod_mode::state::PodModeState;
 use crate::core::commands::providers::deprecated::get_provider_order_command::get_provider_order_command;
 use crate::core::commands::providers::deprecated::set_provider_order_command::set_provider_order_command;
 use crate::core::commands::providers::provider_clear_command::provider_clear_command;
@@ -49,6 +55,7 @@ use crate::core::state::app_env_configs::app_env_configs::AppEnvConfigs;
 use crate::core::state::app_preferences::app_preferences_manager::load_app_preferences_or_default;
 use crate::core::state::artcraft_platform_info::ArtcraftPlatformInfo;
 use crate::core::state::data_dir::app_data_root::AppDataRoot;
+use crate::core::state::data_dir::trait_data_subdir::DataSubdir;
 use crate::core::state::provider_priority::ProviderPriorityStore;
 use crate::core::threads::discord_presence_thread::discord_presence_thread;
 use crate::core::threads::main_window_thread::main_window_thread::main_window_thread;
@@ -98,6 +105,14 @@ use tauri_plugin_dialog;
 use tauri_plugin_http;
 use tauri_plugin_log::Target;
 use tauri_plugin_log::TargetKind;
+
+/// Brings the existing window forward when a second launch (or a deep link) arrives.
+fn focus_main_window(app: &tauri::AppHandle) {
+  if let Some(window) = app.get_webview_window(MAIN_WINDOW_NAME) {
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+  }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -157,9 +172,19 @@ pub fn run() {
   let artcraft_usage_tracker = ArtcraftUsageTracker::new();
   let artcraft_usage_tracker_2 = artcraft_usage_tracker.clone();
 
+  let pod_mode_state = PodModeState::load(app_data_root.settings_dir().path().to_path_buf());
+
   println!("Initializing backend runtime...");
 
   let builder = tauri::Builder::default()
+    // NB: The single-instance plugin must be registered first. With its `deep-link` feature it
+    // hands the URL of a second launch to the deep-link plugin's `onOpenUrl` listeners in the
+    // running window. The callback must never log or forward its arguments: they carry the
+    // Solid sign-in callback URL (authorization code and state).
+    .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+      focus_main_window(app);
+    }))
+    .plugin(tauri_plugin_deep_link::init())
     .manage(Arc::new(updates::Updates::default()))
     .on_window_event(|window, event| {
       if window.try_state::<Arc<updates::Updates>>().is_some_and(|updates| updates.prevents_exit()) {
@@ -220,6 +245,7 @@ pub fn run() {
 
       Ok(())
     })
+    .manage(pod_mode_state)
     .manage(app_data_root)
     .manage(app_env_configs)
     .manage(DesktopLoginBridgeState::default())
@@ -280,6 +306,10 @@ pub fn run() {
     midjourney_open_login_command,
     open_sora_login_command,
     platform_info_command,
+    pod_mode_add_storage_origin_command,
+    pod_mode_enter_command,
+    pod_mode_leave_command,
+    pod_mode_reload_command,
     set_provider_order_command,
     sora_get_credential_info_command,
     sora_logout_command,
@@ -311,7 +341,8 @@ pub fn run() {
   app.run(|handle, event| {
     let updates = handle.state::<Arc<updates::Updates>>();
     match event {
-      tauri::RunEvent::ExitRequested { api, .. } if updates.prevents_exit() => api.prevent_exit(),
+      tauri::RunEvent::ExitRequested { api, .. }
+        if updates.prevents_exit() || handle.state::<PodModeState>().rebuilding() => api.prevent_exit(),
       tauri::RunEvent::Exit => updates.finish(),
       _ => {}
     }

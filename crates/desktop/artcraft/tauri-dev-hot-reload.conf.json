@@ -1,9 +1,17 @@
 {
+  "identifier": "ai.artcraft.app.dev",
   "build": {
     "frontendDist": "../../../frontend/apps/artcraft/dist",
     "beforeDevCommand": "echo 'no dev'",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npx nx run artcraft:build"
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["ai.artcraft.app.dev"]
+      }
+    }
   },
   "app": {
     "withGlobalTauri": true,

@@ -1,5 +1,9 @@
 use crate::core::windows::main_window::constants::MAIN_WINDOW_NAME;
+use crate::core::pod_mode::header::{append_pod_csp, header_route_active};
+use crate::core::pod_mode::state::PodModeState;
 use errors::AnyhowResult;
+use pod_mode::host_script::host_init_script;
+use tauri::Manager;
 use tauri::window::Color;
 use tauri::{AppHandle, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
@@ -7,8 +11,20 @@ pub async fn setup_main_window(
   app: &AppHandle,
 ) -> AnyhowResult<()> {
 
+  // The app, not the page, decides the mode. The record is read once here; the window is
+  // rebuilt when it changes. The script runs before any page script and defines a read-only
+  // global; in pod mode the narrowed policy is also added as a response header.
+  let record = app.state::<PodModeState>().record();
+  let init_script = host_init_script(&record, header_route_active(), &app.config().identifier);
+  let header_app = app.clone();
+
   let win_builder =
       WebviewWindowBuilder::new(app, MAIN_WINDOW_NAME, WebviewUrl::default())
+          .initialization_script(init_script)
+          .on_web_resource_request(move |_request, response| {
+            let record = header_app.state::<PodModeState>().record();
+            append_pod_csp(&record, response);
+          })
           .title("ArtCraft")
           .resizable(true)
           .fullscreen(false)

@@ -1,9 +1,17 @@
 {
+  "identifier": "ai.artcraft.app.dev",
   "build": {
     "frontendDist": "../../../frontend/apps/artcraft/dist",
     "beforeDevCommand": "echo 'this is static development; no live reload'",
     "beforeBuildCommand": "echo 'this is static development; no live reload'",
     "devUrl": null
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["ai.artcraft.app.dev"]
+      }
+    }
   },
   "app": {
     "withGlobalTauri": true,

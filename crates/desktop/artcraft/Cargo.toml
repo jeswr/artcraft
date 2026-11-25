@@ -23,6 +23,7 @@ tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
 craft-image-codecs.workspace = true
+pod_mode.workspace = true
 craft-update = { git = "https://github.com/storytold/craft-libs", rev = "2a24c10817173d26d0ea4689acbbade36f91b5dc" }
 toml.workspace = true
 browser_emulation.workspace = true
@@ -71,9 +72,11 @@ reqwest = { workspace = true, features = ["multipart", "stream"], default-featur
 serde.workspace = true
 serde_derive.workspace = true
 serde_json.workspace = true
+tauri-plugin-deep-link.workspace = true
 tauri-plugin-dialog.workspace = true
 tauri-plugin-log.workspace = true
 tauri-plugin-upload.workspace = true
+tauri-plugin-single-instance.workspace = true
 tauri.workspace = true
 tempdir.workspace = true
 tempfile.workspace = true

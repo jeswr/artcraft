@@ -9,6 +9,13 @@
     "beforeDevCommand": "nx run artcraft:dev",
     "beforeBuildCommand": "nx run artcraft:build"
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["ai.artcraft.app"]
+      }
+    }
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [
