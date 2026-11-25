@@ -157,7 +157,10 @@ later, and ArtCraft's own services. Only continue if you started this and trust 
     Ok(Reply::Applied)
   }
 
-  /// Admit one more storage origin: same pattern. An origin already admitted needs no dialog.
+  /// Admit one more storage origin: same pattern, so the origin is only ever added after a
+  /// native dialog that names it. An origin already admitted, or the issuer's own, needs no
+  /// dialog. The page asks for an origin because the sign-in's profile points at it, so the
+  /// dialog says where the address came from instead of presenting it as the person's own.
   pub async fn add_storage_origin(&self, caller: &str, origin: &str) -> Result<Reply, CommandError> {
     self.only_main(caller)?;
     let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
@@ -170,9 +173,10 @@ later, and ArtCraft's own services. Only continue if you started this and trust 
     let prompt = Prompt {
       title: "Allow a Solid storage server",
       message: format!(
-        "Allow this window to contact the Solid storage server:\n\n{shown}\n\n\
-Your pod's pages will be able to receive your requests there. Only continue if you started this \
-and trust that server."
+        "Your Solid profile points to a storage server that is not the sign-in server. Allow this \
+window to contact it?\n\n{shown}\n\n\
+Your pod requests, including your sign-in proof for that server, will be sent there. The address \
+comes from your profile, not from ArtCraft. Only continue if you recognise it and trust it."
       ),
       accept: "Allow",
     };
@@ -454,6 +458,42 @@ mod tests {
     let prompts = w.prompts.lock().unwrap().len();
     assert_eq!(c.add_storage_origin(MAIN, "https://pod.example").await, Ok(Reply::Applied));
     assert_eq!(w.prompts.lock().unwrap().len(), prompts);
+  }
+
+  #[tokio::test]
+  async fn the_issuer_origin_needs_no_dialog_and_no_rebuild() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    assert_eq!(c.add_storage_origin(MAIN, ISSUER).await, Ok(Reply::Applied));
+    assert!(w.prompts.lock().unwrap().is_empty());
+    assert!(w.persisted.lock().unwrap().is_empty());
+    assert_eq!(w.rebuilds.load(SeqCst), 0);
+  }
+
+  #[tokio::test]
+  async fn a_declined_storage_origin_is_not_added_and_the_next_ask_is_turned_away_for_a_while() {
+    let (w, c) = world();
+    in_pod_mode(&w);
+    *w.answer.lock().unwrap() = Some((Answer::Declined, 3_000));
+    assert_eq!(c.add_storage_origin(MAIN, "https://evil.example").await, Ok(Reply::Declined));
+    assert!(w.record.lock().unwrap().storage_origins.is_empty());
+    assert_eq!(w.rebuilds.load(SeqCst), 0);
+    assert_eq!(c.add_storage_origin(MAIN, "https://other.example").await, Err(CommandError::CoolingDown));
+    assert_eq!(w.prompts.lock().unwrap().len(), 1);
+  }
+
+  #[tokio::test]
+  async fn the_number_of_storage_origins_is_capped_and_the_dialog_is_not_shown_past_the_cap() {
+    use crate::record::MAX_STORAGE_ORIGINS;
+    let (w, c) = world();
+    in_pod_mode(&w);
+    for i in 0..MAX_STORAGE_ORIGINS {
+      assert_eq!(c.add_storage_origin(MAIN, &format!("https://pod{i}.example")).await, Ok(Reply::Applied));
+    }
+    let prompts = w.prompts.lock().unwrap().len();
+    assert_eq!(c.add_storage_origin(MAIN, "https://one-more.example").await, Err(CommandError::TooManyOrigins));
+    assert_eq!(w.prompts.lock().unwrap().len(), prompts);
+    assert_eq!(w.record.lock().unwrap().storage_origins.len(), MAX_STORAGE_ORIGINS);
   }
 
   #[tokio::test]

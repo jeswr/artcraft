@@ -21,8 +21,10 @@ pub fn enter(issuer: &str, loopback: Loopback) -> Result<PodModeRecord, Transiti
   })
 }
 
-/// Adds a storage origin to a record that is already in pod mode. Adding one that is present
-/// changes nothing.
+/// Adds a storage origin to a record that is already in pod mode. Adding one that is present,
+/// or the issuer's own origin (always allowed), changes nothing. The origin is validated here
+/// (https, or the explicit loopback allowance; a bare origin with no path, wildcard or
+/// separator) and the list is capped; the caller shows the native confirmation first.
 pub fn add_storage_origin(
   record: &PodModeRecord,
   origin: &str,
@@ -33,7 +35,7 @@ pub fn add_storage_origin(
   }
   let origin = parse_origin(origin, loopback).ok_or(TransitionError::InvalidOrigin)?;
   let mut next = record.clone();
-  if next.storage_origins.contains(&origin) {
+  if next.issuer.as_deref() == Some(origin.as_str()) || next.storage_origins.contains(&origin) {
     return Ok(next);
   }
   if next.storage_origins.len() >= MAX_STORAGE_ORIGINS {
@@ -94,6 +96,32 @@ mod tests {
       add_storage_origin(&record, "https://one-more.example", HttpRefused),
       Err(TransitionError::TooManyStorageOrigins),
     );
+  }
+
+  #[test]
+  fn the_issuers_own_origin_is_never_added_as_a_storage_origin() {
+    let record = enter("https://login.example", HttpRefused).unwrap();
+    assert_eq!(add_storage_origin(&record, "https://login.example", HttpRefused).unwrap(), record);
+  }
+
+  #[test]
+  fn hostile_shaped_origins_are_refused_before_they_reach_the_list() {
+    let record = enter("https://login.example", HttpRefused).unwrap();
+    for origin in [
+      "*",
+      "https://*.example",
+      "http://pod.example",
+      "https://pod.example/path",
+      "https://pod.example?x=1",
+      "https://pod.example#frag",
+      "https://user@pod.example",
+      "https://pod.example; script-src *",
+      "https://pod.example https://other.example",
+      "data:text/plain,x",
+      "",
+    ] {
+      assert_eq!(add_storage_origin(&record, origin, HttpRefused), Err(TransitionError::InvalidOrigin), "{origin:?}");
+    }
   }
 
   #[test]
