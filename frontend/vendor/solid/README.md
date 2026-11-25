@@ -174,3 +174,66 @@ adopts, and the `reentrant` reason). It was built in a scratch git worktree of t
 tarball's SHA-512 (`sha512-qdXo998c...`).
 
 These packages are experimental and security critical; they are unreleased and unaudited.
+
+## Pod media loader (added with the "My pod" gallery source)
+
+`jeswr-pod-media-loader-0.1.0-fdf084a.tgz` is the packed `@jeswr/pod-media-loader` (MIT, `securityCritical`,
+private in the SDK, experimental and unaudited). It reads authenticated pod media through the storage
+client, sniffs the bytes against a passive-media allowlist and hands out reference-counted `blob:` URLs typed by
+the sniffed type only, inside a hard memory budget. It was packed from `origin/feat/pod-media-loader` of the SDK
+at commit `fdf084ab4029a2d2cf8cd4ac2cacdf2f8be48a68` ("fix(pod-media-loader): reserve declared length at header
+time, wait for room, retryable over-budget"). An earlier build (5810c65) was replaced: it had no hard memory bound
+and a pixel-limit bypass for GIF.
+
+`jeswr-storage-client-0.1.0-fdf084a.tgz` was re-packed from the same commit, because the loader reads the new
+optional `ReadResult.contentLength` that the storage client gained there. Against the previous tarball the
+built output differs only by that field (`http.js`, `memory.js`, `types.d.ts`, `http.d.ts`); its manifest and
+dependencies are unchanged, so every vendored package that depends on it (`pod-media-store`, `pod-type-index`,
+`pod-access`, `solid-creative-assets` through them) still resolves to it. The file names carry the short SDK
+commit so a re-vendor is visible in the name.
+
+```sh
+pnpm install --frozen-lockfile --filter "@jeswr/pod-media-loader..." --filter "@jeswr/solid-sdk-workspace"
+pnpm exec turbo run build --filter "@jeswr/pod-media-loader..."
+(cd packages/pod-media-loader && pnpm pack --pack-destination <this directory>)
+(cd packages/storage-client && pnpm pack --pack-destination <this directory>)
+# then rename each to <name>-0.1.0-fdf084a.tgz
+```
+
+Nothing else is added: the loader's dependencies are `@jeswr/storage-client` and `@jeswr/guarded-fetch`, both
+vendored; its only peer, `react`, is optional and already present. No new third-party package enters the
+production closure; the licence (MIT) is on the allowlist. The lockfile integrity values are the real sha512 of
+these files.
+
+```
+b69d680862d923516b339df849693303ca7b73416f4f3feca8079e9163b3e9fc  jeswr-pod-media-loader-0.1.0-fdf084a.tgz
+a72b3814f2769d25916e6e273f9c7395465a5e8b8129f1c5e3f39cd86c6f87bf  jeswr-storage-client-0.1.0-fdf084a.tgz
+```
+
+The hash listed for `jeswr-storage-client-0.1.0.tgz` in the older section above is the previous tarball, which
+this file replaces.
+
+## Current vendored set (integration of sign-in-fixes, pod-mirror-fixes and pod-gallery)
+
+One tarball per package. Where a package was re-packed several times in the sections above, only the newest SDK commit is kept. This table is the authority; earlier hash lists in this file describe tarballs that were replaced.
+
+| Tarball | SDK source | SHA-256 |
+| --- | --- | --- |
+| `jeswr-desktop-auth-0.1.0.tgz` | feat/desktop-auth 225a553 | `75f91bdc463a3a3d0ca96f5dd6e406364dbb71299dd4ed2528a099a6bee070ea` |
+| `jeswr-fetch-rdf-0.1.0.tgz` | feat/creative-assets d6dcc9a (main d20ddf6) | `0dbcc9440b342e6dea45a7e29fe47918e417b300abce592ee0318c4faaf9af63` |
+| `jeswr-guarded-fetch-0.1.0.tgz` | feat/desktop-auth 225a553 (dist identical at d20ddf6) | `198d0b6b78381df298071345d87d7769888ab467140d94b2ea11417e812d4f97` |
+| `jeswr-model-runtime-0.2.0.tgz` | feat/creative-assets d6dcc9a (main d20ddf6) | `cf164e21246efe5c8ef3455df3f604592bf39eaaa8e7e457e27e48d852f71351` |
+| `jeswr-pod-access-0.1.0.tgz` | feat/pod-media-store ce7d766 | `9295bc1f24ddcaf7dd0e4be2860ebf0a5e1057a533e614de30126f1e1819220c` |
+| `jeswr-pod-auth-0.1.0.tgz` | feat/pod-auth-identity-hook b58caad (draft PR #677) | `b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e` |
+| `jeswr-pod-media-loader-0.1.0-fdf084a.tgz` | feat/pod-media-loader fdf084a | `b69d680862d923516b339df849693303ca7b73416f4f3feca8079e9163b3e9fc` |
+| `jeswr-pod-media-store-0.1.0.tgz` | feat/pod-media-store 690ecee7c | `2814fa93aee8e4edb1bf2f986d97b96cd0dbe27c4435ff2dbd39ef2b8032a998` |
+| `jeswr-pod-type-index-0.1.0.tgz` | fix/pod-type-index-vite-regex 2f1ece2 | `ecc187de5fc5bfd202da239ada0a957ce69b067cda31b7deec670d833039d3cf` |
+| `jeswr-rdf-serialize-0.1.0.tgz` | feat/pod-media-store ce7d766 | `f99e60e4b33c8bd66232680f1782f305a3af6a623b7451fd88c00a637e2f3a74` |
+| `jeswr-reactive-authentication-0.1.5.tgz` | feat/desktop-auth 225a553 | `5acce3f79351b6e7efb69f5e5d1c214fe4ae03f4d35d2bf5d4be9f533e43a0a2` |
+| `jeswr-solid-creative-assets-0.1.0.tgz` | feat/creative-assets d6dcc9a | `228dc2a65acbbde1db2f7ab45484c1ca8c6be8a4bab0690e628e0ed5e3b46e34` |
+| `jeswr-solid-odrl-0.1.0.tgz` | feat/pod-media-store ce7d766 | `1165f1d01c8b021471c374fb446bead14d76a030c6183f74f81f175e5244cea4` |
+| `jeswr-storage-capabilities-0.1.0.tgz` | feat/pod-media-store ce7d766 | `5bea6ce143ea34ad9c5428d08a29dd42908a1ed18caf81ef24f3ec9bea596b72` |
+| `jeswr-storage-client-0.1.0-fdf084a.tgz` | feat/pod-media-loader fdf084a | `a72b3814f2769d25916e6e273f9c7395465a5e8b8129f1c5e3f39cd86c6f87bf` |
+| `jeswr-suite-native-0.1.0.tgz` | feat/desktop-auth 225a553 | `89d27479963625ada5355a62d9a277d18a9f08ebd63948039fe11d3bcd4229a0` |
+| `jeswr-suite-vocab-0.1.0.tgz` | feat/creative-assets d6dcc9a (main d20ddf6) | `f4ed44e367e4344b5bfa97674c6d5cc1fa3dee7c6a9c3711f1a3b345dbc3b4a6` |
+| `solid-agent-notify-0.1.0.tgz` | feat/pod-media-store ce7d766 | `3ed8c7e94a5c0463e166889b43a6b49f0983db18ed43c2ef543f24ce037bb933` |

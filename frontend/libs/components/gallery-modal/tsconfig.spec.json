@@ -24,6 +24,8 @@
     "src/**/*.spec.js",
     "src/**/*.test.jsx",
     "src/**/*.spec.jsx",
+    "src/lib/pod/podTestKit.tsx",
+    "src/lib/pod/podMount.tsx",
     "src/**/*.d.ts"
   ],
   "references": [

@@ -82,6 +82,9 @@
       "path": "../../libs/pod-mirror"
     },
     {
+      "path": "../../libs/pod-gallery"
+    },
+    {
       "path": "../../libs/pod-mirror-ui"
     },
     {

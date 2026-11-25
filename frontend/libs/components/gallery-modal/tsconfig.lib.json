@@ -23,6 +23,8 @@
     "**/*.test.js",
     "**/*.spec.jsx",
     "**/*.test.jsx",
+    "src/lib/pod/podTestKit.tsx",
+    "src/lib/pod/podMount.tsx",
     "vite.config.ts",
     "vite.config.mts",
     "vitest.config.ts",
@@ -43,6 +45,9 @@
     "src/**/*.tsx"
   ],
   "references": [
+    {
+      "path": "../../pod-gallery/tsconfig.lib.json"
+    },
     {
       "path": "../../pod-mirror-ui/tsconfig.lib.json"
     },
