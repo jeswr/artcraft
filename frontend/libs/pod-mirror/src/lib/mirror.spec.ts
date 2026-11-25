@@ -1146,6 +1146,8 @@ describe('one pod copy for several hosted items', () => {
     t.events.emit({ type: 'deleted', token: token(1) });
     await settle(t.mirror);
     expect(t.store.removed).toEqual([]);
+    // A delete the store had pending for the shared copy is withdrawn, not left for a later start.
+    expect(t.store.withdrawn).toContain('https://pod.example/alice/creative-assets/2026/06/shared');
     expect(t.mirror.stateOf(token(1))).toBeUndefined();
     expect(t.mirror.stateOf(token(2))).toMatchObject({ kind: 'saved', descriptionUrl: 'https://pod.example/alice/creative-assets/2026/06/shared' });
     expect(await t.journal.get(JOURNAL_ACCOUNT, token(2))).toMatchObject({ state: 'saved' });

@@ -159,6 +159,7 @@ export interface FakeStore extends PodStorePort {
   /** Everything handed to the store, serialisable, for leak checks. */
   seen: string[];
   removed: string[];
+  withdrawn: string[];
   /** Description URLs whose copy the pod no longer has (404/410), or how a lookup fails otherwise. */
   missing: Set<string>;
   getFailure: MediaStoreError | null;
@@ -190,6 +191,7 @@ export function fakeStore(): FakeStore {
     puts: [],
     seen: [],
     removed: [],
+    withdrawn: [],
     missing: new Set(),
     getFailure: null,
     gets: [],
@@ -240,6 +242,9 @@ export function fakeStore(): FakeStore {
       store.removed.push(url);
       store.missing.add(url);
       return { ok: true, value: undefined };
+    },
+    async withdrawDelete(url) {
+      store.withdrawn.push(url);
     },
     async get(url) {
       store.gets.push(url);

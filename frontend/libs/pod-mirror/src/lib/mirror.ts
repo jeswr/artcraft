@@ -39,6 +39,12 @@ export interface PodStorePort {
   attachThumbnail(descriptionUrl: string, input: AttachThumbnailInput): Promise<Result<unknown>>;
   remove(descriptionUrl: string, signal?: AbortSignal): Promise<Result<void>>;
   /**
+   * Forgets a delete the store recorded for this copy and has not finished (the store's durable
+   * delete journal), so a later `resumePending` cannot carry it out. Called when a record pairs
+   * with the copy.
+   */
+  withdrawDelete(descriptionUrl: string): Promise<void>;
+  /**
    * Reads one description. Used only by the verification pass, to ask whether a pod copy the
    * journal calls `saved` is still there. Nothing is written.
    */
@@ -1284,6 +1290,9 @@ export class PodMirror {
       });
       if (attached.ok) thumbnail = 'attached';
     }
+    // A delete of this copy that was interrupted earlier is withdrawn once this record pairs with it
+    // (the store's pending-delete list is also filtered by pairings: see `guardDeletes`).
+    const withdraw = () => store.withdrawDelete(value.descriptionUrl).catch(() => undefined);
     await this.patch(token, {
       state: 'saved',
       descriptionUrl: value.descriptionUrl,
@@ -1297,6 +1306,7 @@ export class PodMirror {
       repeats: undefined,
       nextAttemptAt: undefined,
     });
+    await withdraw();
   }
 
   /** A paused import starts no copy: this item waits, `pending`, until the run resumes. */
@@ -1356,13 +1366,21 @@ export class PodMirror {
         // The journal cannot say who else pairs with this copy: weak evidence never deletes.
         return this.failTask(token, 'remove', 'unexpected', signal, 'transient');
       }
-      // Another record still pairs with it: only this token's pairing goes.
-      if (shared) return this.dropRecord(token);
-      const removed = await store.remove(url, signal);
-      if (removed.ok || removed.error.kind === 'not-found') {
-        noteRemoved(url);
+      // Another record still pairs with it: only this token's pairing goes, and a delete the
+      // store has pending for the copy is withdrawn so a later start cannot finish it.
+      if (shared) {
+        await store.withdrawDelete(url).catch(() => undefined);
         return this.dropRecord(token);
       }
+      let removed: Result<void>;
+      try {
+        removed = await store.remove(url, signal);
+      } finally {
+        // Whatever it answered, a delete that started may have taken the description, and a put
+        // that adopted the copy meanwhile must be repeated, not recorded on a dead link.
+        noteRemoved(url);
+      }
+      if (removed.ok || removed.error.kind === 'not-found') return this.dropRecord(token);
       return this.storeFailure(token, 'remove', removed.error, signal);
     });
   }

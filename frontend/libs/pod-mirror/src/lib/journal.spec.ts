@@ -1,6 +1,6 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DB_NAME, DB_VERSION, JournalError, upgradeJournal, type JournalRecord, type MirrorJournal, openMirrorJournal, createMemoryMirrorJournal } from './journal.js';
+import { DB_NAME, DB_VERSION, guardDeletes, JournalError, upgradeJournal, type JournalRecord, type MirrorJournal, openMirrorJournal, createMemoryMirrorJournal } from './journal.js';
 const ACCOUNT = { webId: 'https://alice.example/profile/card#me', username: 'alice_hosted' };
 
 const OTHER_USER = { webId: ACCOUNT.webId, username: 'someone_else' };
@@ -21,6 +21,22 @@ const open = (factory: IDBFactory) => openMirrorJournal({ indexedDB: factory, ke
 const open1: MirrorJournal[] = [];
 afterEach(() => {
   for (const j of open1.splice(0)) j.close();
+});
+
+describe('guardDeletes', () => {
+  const entry = (name: string) => ({ descriptionUrl: `https://p/${name}`, shardUrl: 'https://p/', phase: 'intent' as const });
+  it('lists only pending deletes of copies nothing pairs with, keeps the others, and lists nothing when the journal cannot say', async () => {
+    const journal = createMemoryMirrorJournal();
+    const deletes = journal.deletesFor(ACCOUNT.webId, 'https://p/');
+    await deletes.put(entry('paired'));
+    await deletes.put(entry('free'));
+    await journal.create(record(ACCOUNT, 'm_1', { state: 'saved', descriptionUrl: 'https://p/paired' }));
+    const guarded = guardDeletes(deletes, journal);
+    expect((await guarded.list()).map((e) => e.descriptionUrl)).toEqual(['https://p/free']);
+    expect(await deletes.list()).toHaveLength(2);
+    const broken = guardDeletes(deletes, { isPairedElsewhere: async () => { throw new Error('closed'); } });
+    expect(await broken.list()).toEqual([]);
+  });
 });
 
 describe.each([

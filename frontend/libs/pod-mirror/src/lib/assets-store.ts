@@ -115,13 +115,15 @@ export function openCreativeAssetStore(deps: OpenCreativeAssetStoreDeps) {
 
 /**
  * The mirror's view of an opened store. The exposure target is the library once it exists, and
- * the storage root before that (the store probes the root then).
+ * the storage root before that (the store probes the root then). `deletes` is the delete journal the
+ * store was opened with, so a pending delete can be withdrawn.
  */
-export function asPodStorePort(store: CreativeAssetStore, storageRoot: string): PodStorePort {
+export function asPodStorePort(store: CreativeAssetStore, storageRoot: string, deletes?: DeleteJournal): PodStorePort {
   return {
     put: (input) => store.put(input),
     attachThumbnail: (url, input) => store.attachThumbnail(url, input),
     remove: (url, signal) => store.remove(url, signal),
+    withdrawDelete: async (url) => deletes?.delete(url),
     get: (url, signal) => store.get(url, signal),
     resumePending: (signal) => store.resumePending(signal),
     ensureLibrary: (signal) => store.ensureLibrary(signal ? { signal } : {}),

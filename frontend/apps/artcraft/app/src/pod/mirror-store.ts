@@ -3,7 +3,7 @@ import { accessModel } from "@jeswr/pod-access/requests-solid";
 import { exposureFromOwnerOnly } from "@jeswr/pod-media-store";
 import { createTypeIndex } from "@jeswr/pod-type-index";
 import { createPodClient } from "@jeswr/storage-client";
-import { asPodStorePort, type MirrorJournal, type OpenStore, openCreativeAssetStore } from "@storyteller/pod-mirror";
+import { asPodStorePort, guardDeletes, type MirrorJournal, type OpenStore, openCreativeAssetStore } from "@storyteller/pod-mirror";
 
 /** The WebID's profile document: any URL inside the storage will do for discovery. */
 export function profileDocumentOf(webId: string): string {
@@ -56,6 +56,8 @@ export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; w
     try {
       const { storage, features } = await createPodClient({ fetch: podFetch, storage: profileDocumentOf(deps.webId), signal });
       const modelled = withDetectedAccessModel(storage, podFetch);
+      // The store's pending deletes, minus any whose copy a journal record pairs with.
+      const deletes = guardDeletes(deps.journal.deletesFor(deps.webId, storage.root), deps.journal);
       const opened = await openCreativeAssetStore({
         storage,
         features,
@@ -63,11 +65,11 @@ export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; w
         exposure: exposureFromOwnerOnly(async (url, probeSignal) =>
           checkOwnerOnly({ storage: await modelled(probeSignal ?? signal), url, ownerWebId: deps.webId }),
         ),
-        journal: deps.journal.deletesFor(deps.webId, storage.root),
+        journal: deletes,
         allowUnknownExposureFor,
         signal,
       });
-      if (opened.ok) return { ok: true, store: asPodStorePort(opened.value, storage.root) };
+      if (opened.ok) return { ok: true, store: asPodStorePort(opened.value, storage.root, deletes) };
       return { ok: false, reason: opened.error.kind === "offline" ? "offline" : "failed" };
     } catch {
       return { ok: false, reason: signal.aborted ? "failed" : "offline" };

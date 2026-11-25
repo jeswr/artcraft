@@ -97,9 +97,10 @@ export interface MirrorJournal {
    * True when any record on this device, of ANY WebID and hosted account, other than `except`,
    * still pairs with this pod description and is not itself on its way out (`removing` or
    * `remove-failed`). Content-hash naming makes several hosted tokens share one pod copy; this is
-   * the check a delete needs before it may take the copy with it. It cannot see other devices.
+   * the check a delete needs before it may take the copy with it. Without `except` it asks whether
+   * anything at all pairs with the copy. It cannot see other devices.
    */
-  isPairedElsewhere(descriptionUrl: string, except: MirrorAccount & { token: string }): Promise<boolean>;
+  isPairedElsewhere(descriptionUrl: string, except?: MirrorAccount & { token: string }): Promise<boolean>;
   getAccountState(account: MirrorAccount): Promise<AccountState | undefined>;
   /** Sets the baseline once per account; returns the stored one. */
   ensureBaseline(account: MirrorAccount, baseline: Baseline): Promise<Baseline>;
@@ -317,9 +318,38 @@ export async function openMirrorJournal(options: OpenJournalOptions = {}): Promi
   };
 }
 
-function pairsWith(row: JournalRecord, descriptionUrl: string, except: MirrorAccount & { token: string }): boolean {
+function pairsWith(row: JournalRecord, descriptionUrl: string, except: (MirrorAccount & { token: string }) | undefined): boolean {
   if (row.descriptionUrl !== descriptionUrl || LEAVING.has(row.state)) return false;
-  return !(row.webId === except.webId && row.username === except.username && row.token === except.token);
+  return !except || !(row.webId === except.webId && row.username === except.username && row.token === except.token);
+}
+
+/**
+ * The store's durable delete journal, as the store sees it: `list()` (what `resumePending`
+ * executes) leaves out every pending delete whose pod copy a journal record still pairs with.
+ * A pairing made after a delete was interrupted (the same bytes arriving under another token,
+ * in any hosted account) must never be undone by a later start. The entries are kept, not
+ * dropped: they run (or are replaced by a fresh delete) once nothing pairs with the copy. When
+ * the journal cannot say, nothing is listed: a leaked orphan is preferred to a lost copy.
+ */
+export function guardDeletes(deletes: DeleteJournal, journal: Pick<MirrorJournal, 'isPairedElsewhere'>): DeleteJournal {
+  return {
+    put: (entry) => deletes.put(entry),
+    delete: (descriptionUrl) => deletes.delete(descriptionUrl),
+    async list() {
+      const entries = await deletes.list();
+      const allowed: DeleteJournalEntry[] = [];
+      for (const entry of entries) {
+        let paired = true;
+        try {
+          paired = await journal.isPairedElsewhere(entry.descriptionUrl);
+        } catch {
+          // cannot tell: not listed
+        }
+        if (!paired) allowed.push(entry);
+      }
+      return allowed;
+    },
+  };
 }
 
 /** An in-memory journal with the same behaviour, for the engine's tests. Keeps nothing. */

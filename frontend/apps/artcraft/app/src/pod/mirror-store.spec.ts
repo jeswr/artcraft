@@ -55,6 +55,17 @@ describe("opening the pod store", () => {
     expect(spy).toHaveBeenCalledWith(WEB_ID, ROOT);
   });
 
+  it("hands the store a delete journal that never lists a pending delete of a copy a journal record pairs with", async () => {
+    const journal = createMemoryMirrorJournal();
+    const deletes = journal.deletesFor(WEB_ID, ROOT);
+    await deletes.put({ descriptionUrl: `${ROOT}creative-assets/2026/06/paired`, shardUrl: `${ROOT}creative-assets/2026/06/`, phase: "intent" });
+    await deletes.put({ descriptionUrl: `${ROOT}creative-assets/2026/06/free`, shardUrl: `${ROOT}creative-assets/2026/06/`, phase: "intent" });
+    await journal.create({ webId: WEB_ID, username: "alice", token: "m_1", state: "saved", attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: `${ROOT}creative-assets/2026/06/paired` });
+    await createStoreOpener({ podFetch: () => vi.fn() as unknown as typeof fetch, webId: WEB_ID, journal })(signal, { allowUnknownExposureFor: () => false });
+    const handed = sdk.openCreativeAssetStore.mock.calls[0][0].journal;
+    expect((await handed.list()).map((entry: { descriptionUrl: string }) => entry.descriptionUrl)).toEqual([`${ROOT}creative-assets/2026/06/free`]);
+  });
+
   it("passes the 'allow unknown exposure' choice through, and only that", async () => {
     const open = createStoreOpener({ podFetch: () => vi.fn() as unknown as typeof fetch, webId: WEB_ID, journal: createMemoryMirrorJournal() });
     const allow = (url: string) => url.startsWith("https://pod.example/confirmed/");
