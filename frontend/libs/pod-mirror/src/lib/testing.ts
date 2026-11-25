@@ -164,6 +164,8 @@ export interface FakeStore extends PodStorePort {
   missing: Set<string>;
   getFailure: MediaStoreError | null;
   gets: string[];
+  /** What `probeLibrary` answers. */
+  libraryProbe: 'ok' | 'missing' | 'unknown';
   attached: { url: string }[];
   exposure: 'private' | 'exposed' | 'unknown' | 'offline';
   /** Failures to hand out for the next puts, in order. */
@@ -195,6 +197,7 @@ export function fakeStore(): FakeStore {
     missing: new Set(),
     getFailure: null,
     gets: [],
+    libraryProbe: 'ok',
     attached: [],
     exposure: 'private',
     putFailures: [],
@@ -245,6 +248,9 @@ export function fakeStore(): FakeStore {
     },
     async withdrawDelete(url) {
       store.withdrawn.push(url);
+    },
+    async probeLibrary() {
+      return store.libraryProbe;
     },
     async get(url) {
       store.gets.push(url);

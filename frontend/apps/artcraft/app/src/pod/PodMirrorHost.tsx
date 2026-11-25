@@ -60,6 +60,7 @@ export function PodMirrorHost({ session, children }: { session: PodSession; chil
         retryAllFailed: () => mirror.retryAllFailed(),
         recheckExposure: () => mirror.recheckExposure(),
         removeGoneFromPod: () => mirror.removeGoneFromPod(),
+        copyAgain: () => mirror.copyAgain(),
         confirmPrivate: () => mirror.confirmPrivate(),
         import: {
           estimate: () => mirror.estimateImport(),

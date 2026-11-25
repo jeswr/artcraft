@@ -124,6 +124,11 @@ export function asPodStorePort(store: CreativeAssetStore, storageRoot: string, d
     attachThumbnail: (url, input) => store.attachThumbnail(url, input),
     remove: (url, signal) => store.remove(url, signal),
     withdrawDelete: async (url) => deletes?.delete(url),
+    probeLibrary: async (signal) => {
+      const listed = await store.list({ limit: 1, ...(signal ? { signal } : {}) });
+      if (listed.ok) return 'ok';
+      return listed.error.kind === 'not-found' ? 'missing' : 'unknown';
+    },
     get: (url, signal) => store.get(url, signal),
     resumePending: (signal) => store.resumePending(signal),
     ensureLibrary: (signal) => store.ensureLibrary(signal ? { signal } : {}),

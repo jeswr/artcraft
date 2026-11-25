@@ -5,6 +5,9 @@ import { createTauriMirrorEvents } from "./mirror-events";
 import { browserNetworkPort, sessionPortFor } from "./mirror-ports";
 import { createStoreOpener } from "./mirror-store";
 
+/** Wait between two pod lookups when the pod copies are checked, so a large library is asked gently. */
+export const POD_CHECK_PACE_MS = 25;
+
 /** How often the library is walked again while the app runs (new items also trigger a walk). */
 export const RECONCILE_INTERVAL_MS = 10 * 60_000;
 
@@ -42,6 +45,7 @@ export async function startPodMirror({ session, webId, username, currentUsername
     network: browserNetworkPort(),
     events: createTauriMirrorEvents(),
     reconcileIntervalMs: RECONCILE_INTERVAL_MS,
+    podCheckPaceMs: POD_CHECK_PACE_MS,
   });
   try {
     await mirror.start();

@@ -45,6 +45,11 @@ export interface PodStorePort {
    */
   withdrawDelete(descriptionUrl: string): Promise<void>;
   /**
+   * Whether the library container answers, with the current session: `ok`, `missing` (the pod says
+   * there is no library to read) or `unknown` (offline, refused, a server error). Reads only.
+   */
+  probeLibrary(signal?: AbortSignal): Promise<'ok' | 'missing' | 'unknown'>;
+  /**
    * Reads one description. Used only by the verification pass, to ask whether a pod copy the
    * journal calls `saved` is still there. Nothing is written.
    */
@@ -107,6 +112,8 @@ export interface PodMirrorOptions {
   verifyOnStartAfterMs?: number;
   /** Items looked up in one hosted batch call during verification. */
   verifyChunk?: number;
+  /** Wait between two pod lookups in the verification pass, so a large library is asked gently (0: none; the app sets it). */
+  podCheckPaceMs?: number;
   baseDelayMs?: number;
   maxDelayMs?: number;
   thumbnailDelaysMs?: readonly number[];
@@ -142,6 +149,7 @@ const DEFAULTS = {
   verifyIntervalMs: 24 * 60 * 60_000,
   verifyOnStartAfterMs: 60 * 60_000,
   verifyChunk: 50,
+  podCheckPaceMs: 0,
   baseDelayMs: 5_000,
   maxDelayMs: 15 * 60_000,
   thumbnailDelaysMs: [30_000, 120_000, 600_000, 3_600_000, 21_600_000] as readonly number[],
@@ -228,6 +236,13 @@ function noteRemoved(url: string): void {
 /** Times a put is repeated because a delete took the same copy while it was being written. */
 const MAX_PUT_REPEATS = 3;
 
+/** The most items the pod check may call missing before it stops and asks the person: max(5, 10% of those asked). */
+function requeueCeiling(asked: number): number {
+  return Math.max(5, Math.floor(asked * 0.1));
+}
+/** The pod check saves its place this often. */
+const POD_CHECK_SAVE_EVERY = 25;
+
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** How a failure is handled: wait and retry for ever, stop at once, or stop after this many attempts. */
@@ -291,6 +306,7 @@ export class PodMirror {
   /** Downloads that have failed in a row, with none ever having worked on this install. */
   private byteFailures = 0;
   private importRun: ImportRun = { state: 'idle', walked: 0 };
+  private libraryMissing: { at: number; checked: number; tokens: string[] } | null = null;
   private importWalker: Promise<void> | null = null;
   private importTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly importWaiters: (() => void)[] = [];
@@ -323,6 +339,7 @@ export class PodMirror {
     this.bytesEverOk = state?.bytesEverOk === true;
     this.byteFailures = 0;
     this.importRun = state?.import ? { ...state.import } : { state: 'idle', walked: 0 };
+    this.libraryMissing = state?.libraryMissing ? { ...state.libraryMissing } : null;
     this.confirmed.clear();
     for (const url of state?.confirmedPrivate ?? []) this.confirmed.add(url);
     this.records.clear();
@@ -468,6 +485,7 @@ export class PodMirror {
       counts,
       import: this.importStatus(),
       goneFromArtcraft: gone,
+      libraryMissing: this.libraryMissing ? { missing: this.libraryMissing.tokens.length, checked: this.libraryMissing.checked } : null,
       mediaHostBlocked: this.mediaHostBlocked(),
     };
     return this.cachedSummary;
@@ -485,6 +503,7 @@ export class PodMirror {
     this.hints.clear();
     this.deleted.clear();
     this.importRun = { state: 'idle', walked: 0 };
+    this.libraryMissing = null;
     this.changed();
   }
 
@@ -1007,53 +1026,118 @@ export class PodMirror {
   }
 
   /**
-   * Asks the pod about every saved item. Returns why it stopped early, if it did: a pass that
-   * could not ask the pod is not recorded as done, so the next opportunity tries again.
+   * Asks the pod about every saved item, and queues the ones whose copy it says is gone to be
+   * copied again. Returns why it stopped early, if it did: such a pass is not recorded as done.
+   *
+   * A 404 is believed only with a second opinion and under a ceiling:
+   * - the library container itself must answer, with this session, in the same pass (a pod, proxy
+   *   or expired session that hides everything with 404 stops the pass as "cannot tell");
+   * - if more than max(5, 10%) of the items checked are missing, nothing is requeued: the pass stops
+   *   and raises `libraryMissing`, and only the person's "Copy again" goes on.
+   * The pass keeps a cursor (the last token asked, and who was missing) in the journal, so one that
+   * is interrupted (a stop, going offline, a restart) continues instead of starting again, and it
+   * checks that it is still wanted between every two items.
    */
   private async podPass(result: VerifyResult): Promise<VerifyResult['stoppedBy'] | undefined> {
+    const { journal, account } = this.o;
     const signal = this.lifecycle?.signal;
+    const store = this.store;
+    if (!store) return 'pod-unavailable';
+    const state = await journal.getAccountState(account);
+    if (state?.libraryMissing) return 'library-missing';
+    const probe = await store.probeLibrary(signal).catch(() => 'unknown' as const);
+    if (probe === 'unknown') return 'pod-unavailable';
+    const saved = [...this.records.values()].filter((record) => record.state === 'saved').map((record) => record.token).sort();
+    const resumed = state?.podCheck;
+    const missing = new Set<string>(resumed?.missing ?? []);
+    let checked = resumed?.checked ?? 0;
     const check = { halted: false, answers: new Map<string, 'present' | 'missing'>() };
-    if (!this.store) return 'pod-unavailable';
-    for (const token of [...this.records.keys()]) {
-      if (!this.canTalk() || !this.sameIdentity()) return this.running ? 'pod-unavailable' : 'not-running';
-      if (check.halted) return 'pod-unavailable';
-      if (await this.verifyPodCopy(token, check, signal)) result.requeued++;
+    const save = () => journal.updateAccountState(account, { podCheck: { after: last, checked, missing: [...missing] } }).catch(() => undefined);
+    let last = resumed?.after ?? '';
+    for (const token of saved) {
+      if (token <= last) continue;
+      if (!this.canTalk() || !this.sameIdentity()) {
+        await save();
+        return this.running ? 'pod-unavailable' : 'not-running';
+      }
+      const record = this.records.get(token);
+      const url = record?.state === 'saved' ? record.descriptionUrl : undefined;
+      if (url) {
+        // A library the probe could not find makes every copy in it "missing" without a request each.
+        const answer = probe === 'missing' ? 'missing' : await this.askPod(url, check, signal);
+        if (answer === 'missing') missing.add(token);
+        else if (!answer) {
+          await save();
+          return 'pod-unavailable';
+        }
+      }
+      checked++;
+      last = token;
+      if (missing.size > requeueCeiling(saved.length)) return this.raiseLibraryMissing(missing, checked);
+      if (checked % POD_CHECK_SAVE_EVERY === 0) await save();
+      if (this.o.podCheckPaceMs > 0) await this.sleep(this.o.podCheckPaceMs);
     }
-    return check.halted ? 'pod-unavailable' : undefined;
+    if (missing.size > requeueCeiling(checked)) return this.raiseLibraryMissing(missing, checked);
+    for (const token of missing) if (await this.requeueMissing(token, signal)) result.requeued++;
+    await journal.updateAccountState(account, { podCheck: undefined }).catch(() => undefined);
+    return undefined;
   }
 
-  /** True when the pod copy of a saved item is definitively gone and the item was queued to be copied again. */
-  private async verifyPodCopy(
-    token: string,
-    check: { halted: boolean; answers: Map<string, 'present' | 'missing'> },
-    signal: AbortSignal | undefined,
-  ): Promise<boolean> {
-    const record = this.records.get(token);
-    const url = record?.descriptionUrl;
+  /** Asks the pod once per copy. `undefined`: it could not tell and the pass should stop. */
+  private async askPod(url: string, check: { halted: boolean; answers: Map<string, 'present' | 'missing'> }, signal: AbortSignal | undefined): Promise<'present' | 'missing' | undefined> {
+    const known = check.answers.get(url);
+    if (known) return known;
     const store = this.store;
-    if (check.halted || !store || record?.state !== 'saved' || !url) return false;
-    let answer = check.answers.get(url);
+    if (!store || check.halted) return undefined;
+    const got = await store.get(url, signal).catch(() => undefined);
+    let answer: 'present' | 'missing' | undefined;
+    if (got?.ok) answer = 'present';
+    // `not-found` with the reason `storage` is the pod's own 404 or 410. `out-of-scope` is the
+    // store saying the address is not in its library, which is not the same as the copy being gone.
+    else if (got && got.error.kind === 'not-found' && got.error.reason === 'storage') answer = 'missing';
+    else if (got && (got.error.kind === 'failed' || got.error.kind === 'not-found')) return 'present'; // not gone as far as anyone can tell
     if (!answer) {
-      const got = await store.get(url, signal).catch(() => undefined);
-      if (got?.ok) answer = 'present';
-      // `not-found` with the reason `storage` is the pod's own 404 or 410. `out-of-scope` is the
-      // store saying the address is not in its library, which is not the same as the copy being gone.
-      else if (got && got.error.kind === 'not-found' && got.error.reason === 'storage') answer = 'missing';
-      else {
-        // Offline or refused (the pod, the session): stop asking this pass rather than hammer it.
-        if (!got || got.error.kind === 'offline' || got.error.kind === 'forbidden') check.halted = true;
-        return false;
-      }
-      check.answers.set(url, answer);
+      // Offline or refused (the pod, the session): stop asking this pass rather than hammer it.
+      check.halted = true;
+      return undefined;
     }
-    if (answer !== 'missing') return false;
+    check.answers.set(url, answer);
+    return answer;
+  }
+
+  private async raiseLibraryMissing(missing: Set<string>, checked: number): Promise<VerifyResult['stoppedBy']> {
+    this.libraryMissing = { at: this.o.now(), checked, tokens: [...missing] };
+    await this.o.journal.updateAccountState(this.o.account, { libraryMissing: this.libraryMissing, podCheck: undefined }).catch(() => undefined);
+    this.changed();
+    return 'library-missing';
+  }
+
+  /**
+   * The person's "Copy again" after the pod check found a large share of the library missing:
+   * queues those items to be copied again (the ones the hosted side still has), then lets the
+   * pod check run again. Resolves with how many were queued.
+   */
+  async copyAgain(): Promise<number> {
+    const info = this.libraryMissing;
+    if (!this.running || !info || !this.sameIdentity()) return 0;
+    let count = 0;
+    for (const token of info.tokens) if (await this.requeueMissing(token, this.lifecycle?.signal)) count++;
+    this.libraryMissing = null;
+    await this.o.journal.updateAccountState(this.o.account, { libraryMissing: undefined, podCheck: undefined, podVerifiedAt: undefined }).catch(() => undefined);
+    this.changed();
+    return count;
+  }
+
+  /** Queues one saved item whose copy is gone to be copied again, if the hosted side still has it. */
+  private async requeueMissing(token: string, signal: AbortSignal | undefined): Promise<boolean> {
+    const url = this.records.get(token)?.descriptionUrl;
+    if (!url || this.records.get(token)?.state !== 'saved') return false;
     // Only an item the hosted side still has is copied again; one it no longer lists is left to the hosted pass's mark.
     const own = await this.o.hosted.getMediaFile(token, signal).catch(() => ({ ok: false as const, kind: 'unavailable' as const }));
     if (!own.ok || !this.sameIdentity()) return false;
     return withCopyLock(url, async () => {
       const current = this.records.get(token);
       if (current?.state !== 'saved' || current.descriptionUrl !== url) return false;
-      // The hosted item is still there: copy it again from the start.
       await this.patch(token, {
         state: 'pending',
         // Not the import run's any more (cancelling or pausing it must not drop or hold this one),
@@ -1074,6 +1158,14 @@ export class PodMirror {
       });
       this.pump();
       return true;
+    });
+  }
+
+  /** A pause between two pod lookups that a stop ends at once. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      this.lifecycle?.signal.addEventListener('abort', () => (clearTimeout(timer), resolve()), { once: true });
     });
   }
 

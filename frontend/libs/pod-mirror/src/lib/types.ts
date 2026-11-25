@@ -162,6 +162,11 @@ export interface MirrorSummary extends MirrorStatus {
   import: ImportStatus;
   /** Saved items ArtCraft no longer lists. Their pod copies stay until the person asks to remove them. */
   goneFromArtcraft: number;
+  /**
+   * The pod check found more of the library missing than it believes on its own (more than
+   * max(5, 10%) of the items asked): nothing was requeued. `copyAgain()` is the person's go-ahead.
+   */
+  libraryMissing?: { missing: number; checked: number } | null;
   /** Every download from ArtCraft's media host has failed since this install began, while the pod works. */
   mediaHostBlocked: boolean;
 }
@@ -203,5 +208,5 @@ export interface VerifyResult {
   /** Saved items whose pod copy the pod said is gone, queued to be copied again (hosted item still there). */
   requeued: number;
   /** `pod-unavailable`: the hosted side was checked but the pod could not be asked, so the pass is not recorded as done. */
-  stoppedBy: 'done' | 'too-soon' | 'hosted-unavailable' | 'pod-unavailable' | 'not-running';
+  stoppedBy: 'done' | 'too-soon' | 'hosted-unavailable' | 'pod-unavailable' | 'library-missing' | 'not-running';
 }

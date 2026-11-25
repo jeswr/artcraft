@@ -21,6 +21,11 @@ export interface PodMirrorView {
   retryAllFailed(): Promise<number>;
   /** Removes the pod copies of items ArtCraft no longer lists, after the person confirmed; resolves with how many. */
   removeGoneFromPod(): Promise<number>;
+  /**
+   * After the pod check found much of the library missing from the pod (`summary.libraryMissing`):
+   * copies those items again, on the person's say-so; resolves with how many were queued.
+   */
+  copyAgain?(): Promise<number>;
   /** Lifts an exposure pause and asks the pod again. */
   recheckExposure(): void;
   /** The person says the container is private, for a pod that cannot say; resolves false if nothing was waiting. */

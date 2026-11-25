@@ -84,3 +84,8 @@ export function describePause(reason: PauseReason): string {
       return `Paused: ${PAUSES[reason]}.`;
   }
 }
+
+/** The sentence for a pod check that found much of the library missing from the pod. */
+export function describeLibraryMissing(found: { missing: number; checked: number }): string {
+  return `ArtCraft could not find ${found.missing} of the ${found.checked} items it checked on your pod. This can mean the library was moved or removed, or that your pod is not answering properly. Nothing has been changed. Copy again saves them to your pod once more.`;
+}

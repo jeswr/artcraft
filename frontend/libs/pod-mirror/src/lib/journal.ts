@@ -83,6 +83,10 @@ export interface AccountState {
   verifiedAt?: number;
   /** When the pod copies were last checked (ms, local clock, scheduling only); apart from `verifiedAt`. */
   podVerifiedAt?: number;
+  /** A pod check in progress: the last token asked, how many were, and which were missing. */
+  podCheck?: { after: string; checked: number; missing: string[] };
+  /** Raised by a pod check that found too much missing; kept until the person chooses "Copy again". */
+  libraryMissing?: { at: number; checked: number; tokens: string[] };
   /** Library containers the person confirmed are private, for servers that cannot say. */
   confirmedPrivate?: string[];
   /** The last "copy my existing library" run; only a `running` one resumes by itself. */

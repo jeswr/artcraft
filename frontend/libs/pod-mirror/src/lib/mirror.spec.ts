@@ -2104,6 +2104,135 @@ describe('a saved item whose pod copy is gone', () => {
   });
 });
 
+describe('the pod check believes a 404 only with a second opinion and under a ceiling', () => {
+  const urlFor = (n: number) => `https://pod.example/alice/creative-assets/2026/06/d${n}`;
+  const COUNT = 40;
+  /** A mirror whose journal already holds `COUNT` saved items, each at its own address. */
+  const library = async (overrides: Partial<PodMirrorOptions> = {}, journal = createMemoryMirrorJournal()) => {
+    await journal.ensureBaseline(JOURNAL_ACCOUNT, { kind: 'empty' });
+    for (let n = 1; n <= COUNT; n++) {
+      await journal.create({ ...JOURNAL_ACCOUNT, token: token(n), state: 'saved', attempts: 0, createdAt: 1, updatedAt: 1, descriptionUrl: urlFor(n) });
+    }
+    const t = setup(Array.from({ length: COUNT }, (_, i) => hostedFile(i + 1)), overrides, journal);
+    // Not at start: these tests ask for the pass themselves.
+    await journal.updateAccountState(JOURNAL_ACCOUNT, { verifiedAt: Date.now(), podVerifiedAt: Date.now() });
+    return t;
+  };
+
+  it('requeues nothing when the pod answers 404 for everything, and raises library-missing', async () => {
+    const t = await library();
+    await t.mirror.start();
+    await settle(t.mirror);
+    t.store.getFailure = { kind: 'not-found', reason: 'storage' };
+    const result = await t.mirror.verify(true);
+    await settle(t.mirror);
+    expect(result.stoppedBy).toBe('library-missing');
+    expect(result.requeued).toBe(0);
+    expect(t.mirror.summary().counts).toMatchObject({ saved: COUNT, pending: 0 });
+    expect(t.mirror.summary().libraryMissing).toMatchObject({ missing: expect.any(Number) });
+    expect(t.store.puts).toHaveLength(0);
+    expect(t.bytes.urls).toHaveLength(0);
+    // It stopped as soon as the ceiling was passed, not after asking about everything.
+    expect(t.store.gets.length).toBeLessThan(COUNT);
+    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.libraryMissing).toBeDefined();
+  });
+
+  it('does not run again, nor lose the flag across a restart, until the person chooses', async () => {
+    const t = await library();
+    await t.mirror.start();
+    t.store.getFailure = { kind: 'not-found', reason: 'storage' };
+    await t.mirror.verify(true);
+    await t.mirror.stop();
+    const again = setup(Array.from({ length: COUNT }, (_, i) => hostedFile(i + 1)), {}, t.journal);
+    await again.mirror.start();
+    await settle(again.mirror);
+    expect(again.mirror.summary().libraryMissing).not.toBeNull();
+    expect((await again.mirror.verify(true)).stoppedBy).toBe('library-missing');
+    expect(again.store.gets).toHaveLength(0);
+  });
+
+  it('copies again only on the person\'s say-so, the items the hosted side still has', async () => {
+    const t = await library();
+    await t.mirror.start();
+    t.store.getFailure = { kind: 'not-found', reason: 'storage' };
+    await t.mirror.verify(true);
+    const flagged = t.mirror.summary().libraryMissing?.missing ?? 0;
+    expect(flagged).toBeGreaterThan(5);
+    t.store.getFailure = null;
+    t.hosted.files.delete(token(1)); // gone from the hosted side too: not copied again
+    const queued = await t.mirror.copyAgain();
+    await settle(t.mirror);
+    expect(queued).toBe(flagged - 1);
+    expect(t.mirror.summary().libraryMissing).toBeNull();
+    expect(t.store.puts).toHaveLength(queued);
+    expect(t.mirror.summary().counts.saved).toBe(COUNT);
+    expect(await t.mirror.copyAgain()).toBe(0);
+  });
+
+  it('requeues a few missing copies, paced through the normal queue', async () => {
+    const t = await library({ concurrency: 2 });
+    await t.mirror.start();
+    await settle(t.mirror);
+    for (const n of [3, 7, 11]) t.store.missing.add(urlFor(n));
+    const result = await t.mirror.verify(true);
+    expect(result).toMatchObject({ requeued: 3, stoppedBy: 'done' });
+    expect(t.mirror.summary().libraryMissing).toBeNull();
+    await settle(t.mirror);
+    expect(t.store.puts).toHaveLength(3);
+    expect(t.mirror.summary().counts.saved).toBe(COUNT);
+  });
+
+  it('stops as "cannot tell" when the library container itself does not answer, however the items answer', async () => {
+    const t = await library();
+    await t.mirror.start();
+    t.store.libraryProbe = 'unknown';
+    t.store.getFailure = { kind: 'not-found', reason: 'storage' };
+    const result = await t.mirror.verify(true);
+    expect(result.stoppedBy).toBe('pod-unavailable');
+    expect(t.store.gets).toHaveLength(0);
+    expect(t.mirror.summary().counts.pending).toBe(0);
+    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.podVerifiedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('raises library-missing at once when the pod says the library is not there, without a request per item', async () => {
+    const t = await library();
+    await t.mirror.start();
+    t.store.libraryProbe = 'missing';
+    const result = await t.mirror.verify(true);
+    expect(result.stoppedBy).toBe('library-missing');
+    expect(t.store.gets).toHaveLength(0);
+    expect(t.mirror.summary().counts.pending).toBe(0);
+  });
+
+  it('continues an interrupted pass from its cursor instead of starting again, and a stop ends it at once', async () => {
+    const t = await library();
+    await t.mirror.start();
+    await settle(t.mirror);
+    for (const n of [35, 39]) t.store.missing.add(urlFor(n));
+    const realGet = t.store.get.bind(t.store);
+    t.store.get = async (url, signal) => {
+      if (t.store.gets.length === 10) void t.mirror.stop();
+      return realGet(url, signal);
+    };
+    const first = await t.mirror.verify(true);
+    expect(first.stoppedBy).not.toBe('done');
+    const askedFirst = t.store.gets.length;
+    expect(askedFirst).toBeLessThan(COUNT);
+    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.podCheck).toBeDefined();
+
+    const again = setup(Array.from({ length: COUNT }, (_, i) => hostedFile(i + 1)), {}, t.journal);
+    for (const n of [35, 39]) again.store.missing.add(urlFor(n));
+    await again.mirror.start();
+    await settle(again.mirror);
+    await again.mirror.verify(true);
+    await settle(again.mirror);
+    // Between them the two passes asked about each copy once, and the two missing ones were requeued and saved again.
+    expect(askedFirst + again.store.gets.length).toBeLessThanOrEqual(COUNT + 1);
+    expect(again.store.puts).toHaveLength(2);
+    expect((await t.journal.getAccountState(JOURNAL_ACCOUNT))?.podCheck).toBeUndefined();
+  });
+});
+
 describe('an item the pod check queued to be copied again', () => {
   const savedItem = async () => {
     const t = setup([hostedFile(1)]);
