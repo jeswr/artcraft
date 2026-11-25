@@ -5,16 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const world = vi.hoisted(() => ({
   loads: 0,
-  built: [] as { webId: string; podFetch: unknown; library: { loader: { purge: ReturnType<typeof vi.fn> }; close: ReturnType<typeof vi.fn> } }[],
+  built: [] as { webId: string; getFetch: () => typeof fetch | null; getSessionKey: () => string; library: { tileLoader: { purge: ReturnType<typeof vi.fn> }; viewerLoader: { purge: ReturnType<typeof vi.fn> }; close: ReturnType<typeof vi.fn> } }[],
   fail: false,
 }));
 vi.mock("./gallery-runtime", () => {
   world.loads++;
   return {
-    buildPodLibrary: async (podFetch: unknown, webId: string) => {
+    buildPodLibrary: async ({ getFetch, getSessionKey, webId }: { getFetch: () => typeof fetch | null; getSessionKey: () => string; webId: string }) => {
       if (world.fail) throw new PodLibraryOpenError("offline");
-      const library = { source: { list: vi.fn(), get: vi.fn() }, loader: { purge: vi.fn() }, close: vi.fn() };
-      world.built.push({ webId, podFetch, library });
+      const library = { source: { list: vi.fn(), get: vi.fn() }, tileLoader: { purge: vi.fn() }, viewerLoader: { purge: vi.fn() }, close: vi.fn() };
+      world.built.push({ webId, getFetch, getSessionKey, library });
       return library as unknown as PodLibrary;
     },
   };
@@ -76,19 +76,33 @@ describe("the host that offers the pod library to the gallery", () => {
     expect(screen.getByTestId("probe").textContent).toBe(ALICE);
     expect(world.loads).toBe(0);
     const library = await access!.open();
-    expect(world.built.map((entry) => [entry.webId, entry.podFetch])).toEqual([[ALICE, FETCH]]);
+    expect(world.built.map((entry) => [entry.webId, entry.getFetch()])).toEqual([[ALICE, FETCH]]);
     expect(await access!.open()).toBe(library);
     expect(world.built).toHaveLength(1);
   });
 
-  it("purges the loader when the pod is disconnected", async () => {
+  it("purges both loaders when the pod is disconnected", async () => {
     const pod = fakePodSession(connected(ALICE));
     render(<PodGalleryHost session={pod.session}><Probe /></PodGalleryHost>);
     await access!.open();
     await pod.set(disconnected);
     expect(screen.getByTestId("probe").textContent).toBe("none");
-    expect(world.built[0]?.library.loader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.library.tileLoader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.library.viewerLoader.purge).toHaveBeenCalledTimes(1);
     expect(world.built[0]?.library.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives the runtime the session's fetch per request and its WebID as the loaders' key, both following the session", async () => {
+    const pod = fakePodSession(connected(ALICE));
+    render(<PodGalleryHost session={pod.session}><Probe /></PodGalleryHost>);
+    await access!.open();
+    const built = world.built[0]!;
+    expect(built.getSessionKey()).toBe(ALICE);
+    expect(built.getFetch()).toBe(FETCH);
+    await pod.set(disconnected);
+    // Nothing captured: once the session is gone there is no fetch to use and the key is empty.
+    expect(built.getFetch()).toBeNull();
+    expect(built.getSessionKey()).toBe("");
   });
 
   it("purges everything when the account changes, and builds the new library for the new WebID", async () => {
@@ -97,10 +111,11 @@ describe("the host that offers the pod library to the gallery", () => {
     await access!.open();
     await pod.set(connected(BOB));
     expect(screen.getByTestId("probe").textContent).toBe(BOB);
-    expect(world.built[0]?.library.loader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.library.tileLoader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.library.viewerLoader.purge).toHaveBeenCalledTimes(1);
     await access!.open();
     expect(world.built.map((entry) => entry.webId)).toEqual([ALICE, BOB]);
-    expect(world.built[1]?.library.loader.purge).not.toHaveBeenCalled();
+    expect(world.built[1]?.library.tileLoader.purge).not.toHaveBeenCalled();
   });
 
   it("purges when the host goes away", async () => {
@@ -108,7 +123,8 @@ describe("the host that offers the pod library to the gallery", () => {
     const view = render(<PodGalleryHost session={pod.session}><Probe /></PodGalleryHost>);
     await access!.open();
     view.unmount();
-    expect(world.built[0]?.library.loader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.library.tileLoader.purge).toHaveBeenCalledTimes(1);
+    expect(world.built[0]?.library.viewerLoader.purge).toHaveBeenCalledTimes(1);
   });
 
   it("reports a pod that could not be opened with a closed word and tries again next time", async () => {

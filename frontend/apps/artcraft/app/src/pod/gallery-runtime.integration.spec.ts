@@ -3,7 +3,7 @@ import type { ExposureCheck } from "@jeswr/pod-media-store";
 import { createTypeIndex } from "@jeswr/pod-type-index";
 import type { StorageClient } from "@jeswr/storage-client";
 import { createMemoryStorage } from "@jeswr/storage-client/memory";
-import { podAssetDescriptionUrl, type PodAsset, type PodLibrary } from "@storyteller/pod-gallery";
+import { podAssetKey, type PodAsset, type PodLibrary } from "@storyteller/pod-gallery";
 import { createMemoryJournal } from "@jeswr/pod-media-store";
 import { openCreativeAssetStore } from "@storyteller/pod-mirror";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -47,8 +47,9 @@ async function seed() {
   };
   const older = await put(1, "2026-05-10T10:00:00Z", "Older");
   const newer = await put(2, "2026-06-10T10:00:00Z", "<img src=x onerror=alert(1)>", { generation: { prompt: "a fox" } });
-  const library = await openPodLibrary({ storage, features: storage.features, typeIndex, signal });
-  return { library, older, newer, typeIndex };
+  const session = { key: WEB_ID };
+  const library = await openPodLibrary({ storage, features: storage.features, typeIndex, signal, getSessionKey: () => session.key });
+  return { library, older, newer, typeIndex, session };
 }
 
 async function everythingOnThePod(): Promise<string> {
@@ -76,49 +77,77 @@ beforeEach(async () => {
 });
 
 describe("the pod library opened for viewing, against a real store, loader and memory pod", () => {
-  it("lists newest first, with the text exactly as the pod wrote it", async () => {
+  it("lists newest first, with the text exactly as the pod wrote it, and hands out only opaque addresses", async () => {
     const items = await listAll(world.library);
     expect(items.map((item) => item.name)).toEqual(["<img src=x onerror=alert(1)>", "Older"]);
     expect(items[0]?.prompt).toBe("a fox");
-    expect(items.every((item) => item.contentUrl.startsWith(`${ROOT}creative-assets/`))).toBe(true);
-    expect(items.every((item) => item.thumbnailUrl?.startsWith(`${ROOT}creative-assets/`))).toBe(true);
-    expect(podAssetDescriptionUrl(items[0]!.ref)).toBe(world.newer.descriptionUrl);
+    // Nothing of an item is a string that names the pod.
+    expect(JSON.stringify(items.map((item) => [item.ref, item.content, item.thumbnail]))).not.toContain("pod.example");
+    for (const item of items) for (const value of [item.ref, item.content, item.thumbnail]) expect(typeof value).toBe("object");
+    expect(new Set(items.map((item) => podAssetKey(item.ref))).size).toBe(2);
+    const again = await world.library.source.get(items[0]!.ref);
+    expect(again.ok && again.value.name).toBe("<img src=x onerror=alert(1)>");
   });
 
-  it("loads a file as a blob URL typed by its bytes, and a purge ends it", async () => {
-    const [item] = await listAll(world.library);
-    const result = await world.library.loader.acquire(item!.contentUrl);
-    if (!result.ok) throw new Error(`acquire failed: ${result.error.code}`);
-    expect(result.value.url.startsWith("blob:")).toBe(true);
-    expect(result.value.contentType).toBe("image/png");
-    result.value.release();
-    world.library.loader.purge();
-    const after = await world.library.loader.acquire(item!.contentUrl);
-    expect(after.ok ? "ok" : after.error.code).toBe("purged");
+  it("reads thumbnails through a small image-only loader and originals through the viewer's, both as blob URLs typed by their bytes", async () => {
+    const thumb = await world.library.tileLoader.acquire(world.newer.thumbnailUrl!);
+    if (!thumb.ok) throw new Error(`acquire failed: ${thumb.error.code}`);
+    expect(thumb.value.url.startsWith("blob:")).toBe(true);
+    expect(thumb.value.contentType).toBe("image/png");
+    thumb.value.release();
+    const original = await world.library.viewerLoader.acquire(world.newer.binaryUrl);
+    if (!original.ok) throw new Error(`acquire failed: ${original.error.code}`);
+    expect(original.value.contentType).toBe("image/png");
+    original.value.release();
+  });
+
+  it("purges both loaders when the session key changes, before anything is served", async () => {
+    const first = await world.library.viewerLoader.acquire(world.newer.binaryUrl);
+    if (!first.ok) throw new Error("acquire failed");
+    first.value.release();
+    world.session.key = "https://pod.example/bob/profile/card#me";
+    const second = await world.library.viewerLoader.acquire(world.newer.binaryUrl);
+    if (!second.ok) throw new Error("acquire failed");
+    expect(second.value.url).not.toBe(first.value.url);
+    second.value.release();
+  });
+
+  it("ends every read on a purge", async () => {
+    const result = await world.library.tileLoader.acquire(world.newer.thumbnailUrl!);
+    if (result.ok) result.value.release();
+    world.library.tileLoader.purge();
+    world.library.viewerLoader.purge();
+    for (const loader of [world.library.tileLoader, world.library.viewerLoader]) {
+      const after = await loader.acquire(world.newer.binaryUrl);
+      expect(after.ok ? "ok" : after.error.code).toBe("purged");
+    }
   });
 
   it("refuses a file whose bytes are not passive media, whatever its name says", async () => {
-    const [item] = await listAll(world.library);
-    await storage.write(item!.contentUrl, new Blob(["<html><script>alert(1)</script></html>"]), { contentType: "image/png", ifMatch: "*" });
-    const result = await world.library.loader.acquire(item!.contentUrl);
+    await storage.write(world.newer.binaryUrl, new Blob(["<html><script>alert(1)</script></html>"]), { contentType: "image/png", ifMatch: "*" });
+    const result = await world.library.viewerLoader.acquire(world.newer.binaryUrl);
     expect(result.ok ? "ok" : result.error.code).toBe("unsupported-type");
   });
 
   it("refuses an address outside the library without reading it", async () => {
-    const result = await world.library.loader.acquire(`${ROOT}profile/card`);
-    expect(result.ok ? "ok" : result.error.code).toBe("out-of-scope");
+    for (const loader of [world.library.tileLoader, world.library.viewerLoader]) {
+      const result = await loader.acquire(`${ROOT}profile/card`);
+      expect(result.ok ? "ok" : result.error.code).toBe("out-of-scope");
+    }
   });
 
   it("does not change anything on the pod: not by listing, not by showing, not by opening an item", async () => {
     const before = await everythingOnThePod();
     const items = await listAll(world.library);
-    for (const item of items) {
-      for (const url of [item.thumbnailUrl, item.contentUrl]) {
-        const result = await world.library.loader.acquire(url!);
-        if (result.ok) result.value.release();
-      }
-      await world.library.source.get(item.ref);
+    for (const [url, loader] of [
+      [world.newer.thumbnailUrl, world.library.tileLoader],
+      [world.newer.binaryUrl, world.library.viewerLoader],
+      [world.older.binaryUrl, world.library.viewerLoader],
+    ] as const) {
+      const result = await loader.acquire(url!);
+      if (result.ok) result.value.release();
     }
+    for (const item of items) await world.library.source.get(item.ref);
     expect(await everythingOnThePod()).toBe(before);
   });
 });

@@ -40,7 +40,7 @@ export function describeListError(kind: PodAssetsErrorKind): { title: string; de
     case "sign-in":
       return { title: "Sign in to your pod again", detail: "Your pod session has ended. Open Settings, under Solid pod, to sign in again; this list reloads when you press Retry." };
     case "forbidden":
-      return { title: "Your pod refused access", detail: "This account is not allowed to read the library. Settings, under Solid pod, shows which account is connected." };
+      return { title: "Your pod refused access", detail: "This account is not allowed to read the library. Settings, under Solid pod, shows which account is connected and lets you sign in again." };
     case "not-connected":
       return { title: "No pod is connected", detail: "Connect a pod from Settings, under Solid pod." };
     default:
