@@ -130,6 +130,9 @@
       "path": "./libs/analytics/google-analytics"
     },
     {
+      "path": "./libs/pod-mode"
+    },
+    {
       "path": "./libs/components/provider-setup-modal"
     },
     {

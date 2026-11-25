@@ -9,6 +9,7 @@ import { Button } from "@storyteller/ui-button";
 import { PopoverMenu, PopoverItem } from "@storyteller/ui-popover";
 import { getNewsPosts, markdownToHtml } from "@storyteller/markdown-content";
 import { clickOnEnterOrSpace } from "@storyteller/common";
+import { fetchRemoteNews } from "./remote-news";
 
 import { UpdateDialog } from "./update-dialog";
 
@@ -27,18 +28,12 @@ const NewsView = ({ onBack }: { onBack: () => void }) => {
   const [items, setItems] = useState(bundledItems);
 
   useEffect(() => {
-    // Attempt to fetch fresh news
+    // Attempt to fetch fresh news (never in a pod window; see remote-news.ts)
     const fetchNews = async () => {
       try {
-        const baseUrl = import.meta.env.DEV
-          ? "http://localhost:4200"
-          : "https://getartcraft.com";
-        const res = await fetch(`${baseUrl}/news.json`);
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data)) {
-            setItems(data);
-          }
+        const data = await fetchRemoteNews();
+        if (data) {
+          setItems(data as typeof bundledItems);
         }
       } catch (e) {
         // Fallback or ignore

@@ -30,6 +30,9 @@
       "@storyteller/google-analytics": [
         "libs/analytics/google-analytics/src/index.ts"
       ],
+      "@storyteller/pod-mode": [
+        "libs/pod-mode/src/index.ts"
+      ],
       "@storyteller/api": [
         "libs/api/src/index.ts"
       ],

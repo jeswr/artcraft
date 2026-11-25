@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { latchPodWindow, resetPodWindowForTests, sessionRestoreAllowed } from '@storyteller/pod-mode';
 import { loadClarity, loadGoogleTag } from './load-trackers.js';
 
 function freshWindow() {
@@ -6,6 +7,11 @@ function freshWindow() {
   doc.head.appendChild(doc.createElement('script'));
   return { doc, win: {} as unknown as Window & Record<string, any> };
 }
+
+afterEach(() => {
+  resetPodWindowForTests();
+  localStorage.clear();
+});
 
 describe('tracker loaders (same ids and order as the old inline snippets)', () => {
   it('google tag: async script, then js and config on the dataLayer as arguments objects', () => {
@@ -46,5 +52,29 @@ describe('tracker loaders (same ids and order as the old inline snippets)', () =
       ['set', 'k', 'v'],
       ['event', 'e'],
     ]);
+  });
+});
+
+describe('tracker loaders in a pod window', () => {
+  it('do nothing and leave session restore allowed', () => {
+    localStorage.setItem('artcraft.podMode', '1');
+    latchPodWindow();
+    const { doc, win } = freshWindow();
+    loadGoogleTag(doc, win);
+    loadClarity(doc, win);
+    expect(doc.head.querySelectorAll('script')).toHaveLength(1);
+    expect(win.gtag).toBeUndefined();
+    expect(win.clarity).toBeUndefined();
+    expect(sessionRestoreAllowed()).toBe(true);
+  });
+
+  it('either loader running in a non-pod window forbids session restore later', () => {
+    for (const load of [loadGoogleTag, loadClarity]) {
+      resetPodWindowForTests();
+      load(freshWindow().doc, freshWindow().win);
+      localStorage.setItem('artcraft.podMode', '1'); // flag appears later; latch is already non-pod
+      expect(sessionRestoreAllowed()).toBe(false);
+      localStorage.clear();
+    }
   });
 });

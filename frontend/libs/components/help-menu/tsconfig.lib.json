@@ -44,6 +44,9 @@
   ],
   "references": [
     {
+      "path": "../../pod-mode/tsconfig.lib.json"
+    },
+    {
       "path": "../../markdown-content/tsconfig.lib.json"
     },
     {

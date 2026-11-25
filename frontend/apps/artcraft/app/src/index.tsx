@@ -10,9 +10,9 @@ import "./styles/base.css";
 import EnvironmentVariables from "~/Classes/EnvironmentVariables";
 import { pageHeight, pageWidth, persistLogin } from "~/signals";
 import { SyncStorytellerApiConfig } from "./api/SyncStorytellerApiConfig";
-import { posthog } from "posthog-js";
 import { SoundManager } from "@storyteller/soundboard";
 import { useModelsStore } from "@storyteller/tauri-api";
+import { initPostHogIfAllowed } from "./posthog-init";
 
 // TODO(bt,2025-04-19): Make these configurable
 const ENV = {
@@ -35,20 +35,12 @@ const GlobalSettingsManager = ({ env }: { env: Record<string, string> }) => {
   });
 
   /// Initizations that depends on ENV vars ///
-  function PostHogInit() {
-    const apiKey = import.meta.env.VITE_POSTHOG_API_KEY;
-    posthog.init(apiKey, {
-      api_host: "https://us.i.posthog.com/",
-      ui_host: "https://us.i.posthog.com/",
-    });
-  }
-
   useEffect(() => {
     EnvironmentVariables.initialize(env);
     if (import.meta.env.DEV) {
       return;
     }
-    PostHogInit();
+    initPostHogIfAllowed(import.meta.env.VITE_POSTHOG_API_KEY);
   }, [env]);
 
   // Apply stored theme early on mount

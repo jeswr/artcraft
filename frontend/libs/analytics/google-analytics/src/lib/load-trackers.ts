@@ -1,9 +1,12 @@
+import { isPodMode, markAnalyticsLoaded } from '@storyteller/pod-mode';
 import { TAG_ID } from './tag-id.js';
 
 export const CLARITY_ID = 'sixp9uu263';
 
-/** Google tag (gtag.js): same script URL, dataLayer, js and config calls as the old inline snippet. */
+/** Google tag (gtag.js); a no-op in a pod window: same script URL, dataLayer, js and config calls as the old inline snippet. */
 export function loadGoogleTag(doc: Document = document, win: Window = window): void {
+  if (isPodMode()) return;
+  markAnalyticsLoaded();
   const script = doc.createElement('script');
   script.async = true;
   script.src = `https://www.googletagmanager.com/gtag/js?id=${TAG_ID}`;
@@ -20,8 +23,10 @@ export function loadGoogleTag(doc: Document = document, win: Window = window): v
   w.gtag('config', TAG_ID);
 }
 
-/** Microsoft Clarity: same loader as the old inline snippet. */
+/** Microsoft Clarity: same loader as the old inline snippet; a no-op in a pod window. */
 export function loadClarity(doc: Document = document, win: Window = window): void {
+  if (isPodMode()) return;
+  markAnalyticsLoaded();
   const w = win as unknown as Record<string, any>;
   w['clarity'] =
     w['clarity'] ||

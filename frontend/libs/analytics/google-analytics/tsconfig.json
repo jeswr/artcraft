@@ -4,6 +4,9 @@
   "include": [],
   "references": [
     {
+      "path": "../../pod-mode"
+    },
+    {
       "path": "./tsconfig.lib.json"
     },
     {
