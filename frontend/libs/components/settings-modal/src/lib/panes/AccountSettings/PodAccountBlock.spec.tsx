@@ -77,7 +77,7 @@ it("tells the truth about this build: new work is copied to the pod, servers sti
   expect(text).toMatch(/saves a copy of your new generations, uploads and edits to your pod/);
   expect(text).toMatch(/ArtCraft's servers still receive what you generate and upload/);
   expect(text).toMatch(/When you delete an item, ArtCraft removes its pod copy too/);
-  expect(text).toMatch(/Audio, scene files and files over 16 MB are not copied/);
+  expect(text).toMatch(/Audio, scene files and files over 50 MB are not copied/);
   expect(text).toMatch(/a deletion made elsewhere is noticed the next time ArtCraft checks/);
   expect(text).toMatch(/Anything unsaved in this window is lost/);
   expect(text).not.toMatch(/does not copy any of your work/);

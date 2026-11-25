@@ -122,8 +122,8 @@ SHA-256 of the added tarballs as committed:
 0dbcc9440b342e6dea45a7e29fe47918e417b300abce592ee0318c4faaf9af63  jeswr-fetch-rdf-0.1.0.tgz
 cf164e21246efe5c8ef3455df3f604592bf39eaaa8e7e457e27e48d852f71351  jeswr-model-runtime-0.2.0.tgz
 9295bc1f24ddcaf7dd0e4be2860ebf0a5e1057a533e614de30126f1e1819220c  jeswr-pod-access-0.1.0.tgz
-dc22055399669c880122ccb18a77dfa835adf78a668dc303ec42b43b2031fe6d  jeswr-pod-media-store-0.1.0.tgz
-de9a7fc23875d22de462814ee6aa9a05ef6a00732947a6496c22194b7958e2a0  jeswr-pod-type-index-0.1.0.tgz
+eaa3464c4d0e752c686b3795fd4a0a75be8d7f7680f90b2e9b939859fa24ab75  jeswr-pod-media-store-0.1.0.tgz
+ecc187de5fc5bfd202da239ada0a957ce69b067cda31b7deec670d833039d3cf  jeswr-pod-type-index-0.1.0.tgz
 f99e60e4b33c8bd66232680f1782f305a3af6a623b7451fd88c00a637e2f3a74  jeswr-rdf-serialize-0.1.0.tgz
 228dc2a65acbbde1db2f7ab45484c1ca8c6be8a4bab0690e628e0ed5e3b46e34  jeswr-solid-creative-assets-0.1.0.tgz
 1165f1d01c8b021471c374fb446bead14d76a030c6183f74f81f175e5244cea4  jeswr-solid-odrl-0.1.0.tgz
@@ -132,5 +132,12 @@ f99e60e4b33c8bd66232680f1782f305a3af6a623b7451fd88c00a637e2f3a74  jeswr-rdf-seri
 f4ed44e367e4344b5bfa97674c6d5cc1fa3dee7c6a9c3711f1a3b345dbc3b4a6  jeswr-suite-vocab-0.1.0.tgz
 3ed8c7e94a5c0463e166889b43a6b49f0983db18ed43c2ef543f24ce037bb933  solid-agent-notify-0.1.0.tgz
 ```
+
+Re-vendored later: `jeswr-pod-media-store-0.1.0.tgz` from `origin/feat/pod-media-store` at `bd52f77`
+(Blob pass-through, `allowUnknownExposureFor`, PLY and SPZ sniffing) and `jeswr-pod-type-index-0.1.0.tgz`
+from `origin/fix/pod-type-index-vite-regex` at `2f1ece2` (regex literals hoisted to constants), each
+built and packed as described above in its own worktree; the hashes above are the new ones. Every
+other tarball is unchanged. With the new pod-type-index the app's `vite build` no longer needs the
+regex rewrite plugin, which was removed.
 
 These packages are experimental and security critical; they are unreleased and unaudited.

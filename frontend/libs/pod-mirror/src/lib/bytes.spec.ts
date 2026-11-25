@@ -15,7 +15,7 @@ const streamOf = (chunks: Uint8Array[], headers: Record<string, string> = {}) =>
 describe('readBounded', () => {
   it('reads a body within the ceiling in order', async () => {
     const out = await readBounded(streamOf([new Uint8Array([1, 2]), new Uint8Array([3])]), 10);
-    expect([...out]).toEqual([1, 2, 3]);
+    expect([...new Uint8Array(await out.arrayBuffer())]).toEqual([1, 2, 3]);
   });
 
   it('stops streaming once the ceiling is passed', async () => {
@@ -43,7 +43,7 @@ describe('createPublicBytesFetcher', () => {
   it('fetches without credentials, referrer or cookies', async () => {
     const fetchMock = vi.fn(async () => new Response(new Uint8Array([9])));
     const bytes = await createPublicBytesFetcher({ fetch: fetchMock as unknown as typeof fetch })('https://cdn.example/a.png', { maxBytes: 5 });
-    expect([...bytes]).toEqual([9]);
+    expect([...new Uint8Array(await bytes.arrayBuffer())]).toEqual([9]);
     expect(fetchMock).toHaveBeenCalledWith('https://cdn.example/a.png', expect.objectContaining({ credentials: 'omit', referrerPolicy: 'no-referrer' }));
   });
 

@@ -38,6 +38,17 @@ export function glb(): Uint8Array {
   return bytes;
 }
 
+export function ply(): Uint8Array {
+  return new TextEncoder().encode('ply\nformat binary_little_endian 1.0\nelement vertex 1\nend_header\n');
+}
+
+/** A version 4 SPZ header (`NGSP`, version 4, 32 bytes). */
+export function spz(): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set([0x4e, 0x47, 0x53, 0x50, 4, 0, 0, 0]);
+  return bytes;
+}
+
 export function wav(): Uint8Array {
   const bytes = new Uint8Array(32);
   bytes.set([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45]);
@@ -179,9 +190,9 @@ export function fakeStore(): FakeStore {
     target: 'https://pod.example/alice/creative-assets/',
     gate: null,
     async put(input) {
-      const { bytes, signal: _signal, ...rest } = input as PutInput<unknown> & { bytes: Uint8Array };
+      const { bytes, signal: _signal, ...rest } = input as PutInput<unknown> & { bytes: Blob | Uint8Array };
       store.puts.push(input as PutInput<unknown>);
-      store.seen.push(JSON.stringify({ ...rest, bytesLength: bytes.byteLength }));
+      store.seen.push(JSON.stringify({ ...rest, bytesLength: bytes instanceof Blob ? bytes.size : bytes.byteLength }));
       if (store.gate) await store.gate;
       const failure = store.putFailures.shift();
       if (failure) return { ok: false, error: failure };
@@ -307,7 +318,7 @@ export function fakeBytes(hosted?: FakeHosted): FakeBytes {
       const body = bodies.get(url);
       if (body instanceof BytesError) throw body;
       if (!body) throw new BytesError('gone');
-      return body;
+      return new Blob([body as BlobPart]);
     },
   };
   if (hosted) {
@@ -320,12 +331,12 @@ export function fakeBytes(hosted?: FakeHosted): FakeBytes {
   return fake;
 }
 
-export type FakeOpen = OpenStore & { calls: number; fail: 'offline' | 'failed' | null; allowed: boolean[] };
+export type FakeOpen = OpenStore & { calls: number; fail: 'offline' | 'failed' | null; allowed: ((containerUrl: string) => boolean)[] };
 
 export function openFake(store: PodStorePort | (() => PodStorePort)): FakeOpen {
-  const open = (async (_signal: AbortSignal, options: { allowUnknownExposure: boolean }) => {
+  const open = (async (_signal: AbortSignal, options: { allowUnknownExposureFor: (containerUrl: string) => boolean }) => {
     open.calls++;
-    open.allowed.push(options.allowUnknownExposure);
+    open.allowed.push(options.allowUnknownExposureFor);
     if (open.fail) return { ok: false as const, reason: open.fail };
     return { ok: true as const, store: typeof store === 'function' ? store() : store };
   }) as unknown as FakeOpen;

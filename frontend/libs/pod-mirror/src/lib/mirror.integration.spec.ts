@@ -18,6 +18,7 @@ import {
   hostedFile,
   hostedPrompt,
   mp4,
+  ply,
 } from './testing.js';
 
 const ROOT = 'https://pod.example/alice/';
@@ -53,7 +54,7 @@ async function harness(exposure: ExposureCheck = async () => 'private') {
         typeIndex: createTypeIndex({ storage, features: storage.features, profile: WEB_ID }),
         exposure,
         journal: journal.deletesFor(WEB_ID, ROOT),
-        allowUnknownExposure: options.allowUnknownExposure,
+        allowUnknownExposureFor: options.allowUnknownExposureFor,
         signal,
       });
       return store.ok ? { ok: true, store: asPodStorePort(store.value, ROOT) } : { ok: false, reason: 'failed' };
@@ -134,6 +135,20 @@ describe('the mirror against the real store, model and a memory pod', () => {
     expect(pod).not.toContain('prompt_tok_1');
     expect(pod).not.toContain('cdn.example');
     expect(pod).not.toContain('alice_hosted');
+  });
+
+  it('stores a PLY splat as a 3D asset that the model reads back', async () => {
+    const h = await harness();
+    const file = hostedFile(5, { media_type: 'ply', media_class: 'splat', media_links: { cdn_url: 'https://cdn.example/files/5.ply', thumbnail_template: '' } });
+    h.hosted.files.set(file.token, file);
+    h.bytes.bodies.set(file.media_links.cdn_url, ply());
+    await h.mirror.start();
+    await h.mirror.enqueue(file.token);
+    await settle(h.mirror);
+    expect(h.mirror.stateOf(file.token)).toMatchObject({ kind: 'saved' });
+    const listed = await h.library()!.list();
+    expect(listed.ok && listed.value.items).toHaveLength(1);
+    if (listed.ok) expect(listed.value.items[0].value).toMatchObject({ kind: 'model3d' });
   });
 
   it('is idempotent on the pod: the same bytes saved again from another hosted item adopt the verified copy', async () => {
@@ -230,7 +245,7 @@ describe('the mirror against the real store, model and a memory pod', () => {
           typeIndex: createTypeIndex({ storage: h.storage, features: h.storage.features, profile: WEB_ID }),
           exposure: async () => 'unknown',
           journal: h.journal.deletesFor(WEB_ID, ROOT),
-          allowUnknownExposure: options.allowUnknownExposure,
+          allowUnknownExposureFor: options.allowUnknownExposureFor,
           signal,
         });
         return opened.ok ? { ok: true, store: asPodStorePort(opened.value, ROOT) } : { ok: false, reason: 'failed' };

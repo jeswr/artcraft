@@ -24,3 +24,21 @@ audio, scenes and intermediate files are skipped with a visible reason.
 
 Verified only in a real webview or against a real pod: CDN byte download through plain `fetch`
 (CORS), IndexedDB durability, and the owner-only probe on a real server.
+
+## Size ceiling and memory
+
+The CDN response is read into a `Blob` (bounded; larger than `DEFAULT_MAX_BYTES`, 50 MiB, the media
+store's own default, is `skipped(too-large)`), and that same `Blob` goes to the store, which hands it
+to the session's `fetch` unchanged, so the upload is not buffered by the auth layer. Sniffing reads
+only the first 4096 bytes. The store reads the whole `Blob` once to compute its SHA-256 (WebCrypto
+has no streaming digest): expect about one to two times the file size in transient memory per item
+while hashing, for the hash only, with `concurrency` (default 2) items at a time. The download
+itself is held as a `Blob`, which a browser may back with disk.
+
+Splats: PLY, and SPZ when the hosted record declares it (`media_type` or file name), are written as
+`model3d` with the store's sniffed type (`application/octet-stream`, `.ply` / `.spz`). Other mesh
+formats (FBX, OBJ, glTF) are not recognised by the store's sniffer and end `skipped(unsupported-type)`.
+
+Unknown exposure: a container the probe cannot judge is written to only after the person confirmed it;
+the confirmation is stored per container and WebID and handed to the store as
+`allowUnknownExposureFor`, which asks per container (the library and its shards) on every write.

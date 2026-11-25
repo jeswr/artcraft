@@ -29,7 +29,7 @@ const SKIPS: Record<SkipReason, string> = {
   scene: 'scene files are not copied',
   intermediate: 'it is a working file',
   'unsupported-type': 'this file type is not supported',
-  'too-large': 'the file is larger than 16 MB, the most the pod connection can send',
+  'too-large': 'the file is larger than 50 MB, the most ArtCraft copies to a pod',
   'bad-date': 'ArtCraft could not read when it was made',
   'hosted-deleted': 'it was already deleted',
 };

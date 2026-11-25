@@ -22,18 +22,21 @@ export interface FetchBytesOptions {
 }
 
 /** Downloads a public address without credentials. Rejects with a {@link BytesError}. */
-export type FetchPublicBytes = (url: string, options: FetchBytesOptions) => Promise<Uint8Array>;
+export type FetchPublicBytes = (url: string, options: FetchBytesOptions) => Promise<Blob>;
 
-/** Reads a response body in chunks and stops as soon as it passes `maxBytes`. */
-export async function readBounded(response: Response, maxBytes: number): Promise<Uint8Array> {
+/**
+ * Reads a response body in chunks into a `Blob` and stops as soon as it passes `maxBytes`. The
+ * chunks are handed to the `Blob` without being joined, so no second full copy is made here.
+ */
+export async function readBounded(response: Response, maxBytes: number): Promise<Blob> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maxBytes) {
     void response.body?.cancel().catch(() => undefined);
     throw new BytesError('too-large');
   }
   if (!response.body) {
-    const whole = new Uint8Array(await response.arrayBuffer());
-    if (whole.byteLength > maxBytes) throw new BytesError('too-large');
+    const whole = await response.blob();
+    if (whole.size > maxBytes) throw new BytesError('too-large');
     return whole;
   }
   const reader = response.body.getReader();
@@ -49,13 +52,12 @@ export async function readBounded(response: Response, maxBytes: number): Promise
     }
     chunks.push(value);
   }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
+  return new Blob(chunks as BlobPart[]);
+}
+
+/** The first `length` bytes of a `Blob`, for sniffing. */
+export async function blobHead(blob: Blob, length = 4096): Promise<Uint8Array> {
+  return new Uint8Array(await blob.slice(0, length).arrayBuffer());
 }
 
 /** An https address with no credentials in it. */

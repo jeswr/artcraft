@@ -91,8 +91,8 @@ export interface OpenCreativeAssetStoreDeps {
   exposure: ExposureCheck;
   /** The durable delete journal for this WebID and storage (`MirrorJournal.deletesFor`). */
   journal: DeleteJournal;
-  /** Let writes proceed when the exposure probe cannot tell; only after the person confirmed. */
-  allowUnknownExposure?: boolean;
+  /** Asked per container when the exposure probe cannot tell; true only for a confirmed one. */
+  allowUnknownExposureFor?: (containerUrl: string) => boolean;
   signal?: AbortSignal;
 }
 
@@ -108,7 +108,7 @@ export function openCreativeAssetStore(deps: OpenCreativeAssetStoreDeps) {
     typeIndex: deps.typeIndex,
     exposure: deps.exposure,
     journal: deps.journal,
-    ...(deps.allowUnknownExposure ? { allowUnknownExposure: true } : {}),
+    ...(deps.allowUnknownExposureFor ? { allowUnknownExposureFor: deps.allowUnknownExposureFor } : {}),
     ...(deps.signal ? { signal: deps.signal } : {}),
   });
 }

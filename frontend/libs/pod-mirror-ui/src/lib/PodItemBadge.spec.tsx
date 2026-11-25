@@ -116,7 +116,7 @@ describe('PodItemBadge', () => {
     fireEvent.click(screen.getByRole('button', { name: /could not read when it was made\. Retry$/ }));
     expect(fake.retry).toHaveBeenCalledWith('m_1');
     expect(screen.getAllByRole('button')).toHaveLength(1);
-    expect(screen.getByRole('img', { name: /larger than 16 MB/ })).toBeTruthy();
+    expect(screen.getByRole('img', { name: /larger than 50 MB/ })).toBeTruthy();
   });
 
   it('every text starts with what it says and never leaks internals', () => {

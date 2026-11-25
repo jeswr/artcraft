@@ -16,10 +16,10 @@ export function profileDocumentOf(webId: string): string {
  * client, Type Index, the media store with the creative-assets model, the durable delete
  * journal (this WebID's and this storage's entries only), and the read-only owner-only probe
  * for the exposure check. Writes into a container whose exposure cannot be determined happen
- * only when the caller says the person confirmed it.
+ * only for a container the person confirmed (asked per container by the store).
  */
 export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; webId: string; journal: MirrorJournal }): OpenStore {
-  return async (signal, { allowUnknownExposure }) => {
+  return async (signal, { allowUnknownExposureFor }) => {
     const podFetch = deps.podFetch();
     if (!podFetch) return { ok: false, reason: "failed" };
     try {
@@ -30,7 +30,7 @@ export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; w
         typeIndex: createTypeIndex({ storage, features, profile: deps.webId, fetch: podFetch }),
         exposure: exposureFromOwnerOnly((url) => checkOwnerOnly({ storage, url, ownerWebId: deps.webId })),
         journal: deps.journal.deletesFor(deps.webId, storage.root),
-        allowUnknownExposure,
+        allowUnknownExposureFor,
         signal,
       });
       if (opened.ok) return { ok: true, store: asPodStorePort(opened.value, storage.root) };

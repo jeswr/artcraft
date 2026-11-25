@@ -10,7 +10,7 @@ import {
   type Sniffer,
 } from '@jeswr/pod-media-store';
 import { thumbnailMutation } from './assets-store.js';
-import { BytesError, type FetchPublicBytes } from './bytes.js';
+import { BytesError, blobHead, type FetchPublicBytes } from './bytes.js';
 import type { Baseline, ItemMark, JournalRecord, MirrorJournal, RecordPatch } from './journal.js';
 import { type AssetInput, type AssetKind, classify, type Expected, parseDate, referenceTokens, thumbnailUrl, toAssetInput } from './mapping.js';
 import type {
@@ -45,8 +45,11 @@ export interface PodStorePort {
 
 export type OpenStoreResult = { ok: true; store: PodStorePort } | { ok: false; reason: 'offline' | 'failed' };
 export interface OpenStoreOptions {
-  /** Let writes proceed when the probe cannot tell; set only for a container the person confirmed. */
-  allowUnknownExposure: boolean;
+  /**
+   * Asked by the store, per container, when the probe cannot tell. True only for a container
+   * the person confirmed (a child of a confirmed container counts).
+   */
+  allowUnknownExposureFor: (containerUrl: string) => boolean;
 }
 /** Builds the store from the session's fetch. Called again after every reconnect. */
 export type OpenStore = (signal: AbortSignal, options: OpenStoreOptions) => Promise<OpenStoreResult>;
@@ -94,10 +97,13 @@ interface Work {
   seq: number;
 }
 
+/** The store's own default binary limit; the mirror holds items to the same ceiling. */
+export const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
+
 const DEFAULTS = {
   concurrency: 2,
-  /** What the session's fetch can replay: it buffers any non-Blob body and refuses above 16 MiB. */
-  maxBytes: 16 * 1024 * 1024,
+  /** Handed to the store as a Blob, which the session's fetch sends without buffering it. */
+  maxBytes: DEFAULT_MAX_BYTES,
   maxThumbnailBytes: 5 * 1024 * 1024,
   blockedAttempts: 3,
   verifyIntervalMs: 24 * 60 * 60_000,
@@ -146,7 +152,6 @@ export class PodMirror {
   private baseline: Baseline | undefined;
   private store: PodStorePort | null = null;
   private exposureOk = false;
-  private allowUnknown = false;
   private blocked: 'exposed' | 'exposure-unknown' | null = null;
   private target: string | null = null;
   private storeAttempts = 0;
@@ -652,7 +657,7 @@ export class PodMirror {
       if (known?.state === 'saved' && known.descriptionUrl) referencedAssets.push(`${known.descriptionUrl}#it`);
     }
 
-    let bytes: Uint8Array;
+    let bytes: Blob;
     try {
       bytes = await this.o.fetchPublicBytes(file.media_links.cdn_url, { maxBytes: this.o.maxBytes, signal });
     } catch (error) {
@@ -663,14 +668,14 @@ export class PodMirror {
       if (kind === 'network') return this.failTask(token, 'copy', 'cdn-blocked', signal, this.o.blockedAttempts);
       return this.failTask(token, 'copy', 'bytes-unavailable', signal, 'transient');
     }
-    const sniffed = this.o.sniff(bytes);
+    const sniffed = this.o.sniff(await blobHead(bytes), { extension: declaredExtension(file) });
     if (!sniffed) return this.skip(token, 'unsupported-type');
     if (sniffed.contentType.startsWith('audio/')) return this.skip(token, 'audio-unsupported');
-    const kind = kindOf(sniffed.contentType);
+    const kind = kindOf(sniffed.contentType, sniffed.extension);
     if (!kind || !agrees(verdict.expects, kind)) return this.skip(token, 'unsupported-type');
 
     const template = file.media_links.thumbnail_template;
-    let thumb: { bytes: Uint8Array; contentType: string } | undefined;
+    let thumb: { bytes: Blob; contentType: string } | undefined;
     if (kind !== 'model3d') thumb = await this.fetchThumbnail(template, signal);
 
     const description: AssetInput = {
@@ -711,12 +716,12 @@ export class PodMirror {
     });
   }
 
-  private async fetchThumbnail(template: string | null | undefined, signal: AbortSignal): Promise<{ bytes: Uint8Array; contentType: string } | undefined> {
+  private async fetchThumbnail(template: string | null | undefined, signal: AbortSignal): Promise<{ bytes: Blob; contentType: string } | undefined> {
     const url = thumbnailUrl(template);
     if (!url) return undefined;
     try {
       const bytes = await this.o.fetchPublicBytes(url, { maxBytes: this.o.maxThumbnailBytes, signal });
-      const sniffed = this.o.sniff(bytes);
+      const sniffed = this.o.sniff(await blobHead(bytes));
       return sniffed?.contentType.startsWith('image/') ? { bytes, contentType: sniffed.contentType } : undefined;
     } catch {
       return undefined;
@@ -885,7 +890,7 @@ export class PodMirror {
     if (!signal) return;
     const generation = this.generation;
     if (!this.store) {
-      const opened = await this.o.openStore(signal, { allowUnknownExposure: this.allowUnknown }).catch(() => ({ ok: false as const, reason: 'failed' as const }));
+      const opened = await this.o.openStore(signal, { allowUnknownExposureFor: (url) => this.isConfirmed(url) }).catch(() => ({ ok: false as const, reason: 'failed' as const }));
       // A session change while this was opening: the store it built used the previous fetch.
       if (generation !== this.generation || !this.running) return;
       if (!opened.ok) return this.retryPrepareLater(opened.reason);
@@ -900,13 +905,8 @@ export class PodMirror {
       else if (checked?.ok && checked.value === 'exposed') this.blocked = 'exposed';
       else if (checked?.ok) {
         // The pod cannot say. Only a container the person confirmed is written to.
-        const confirmed = this.target !== null && this.isConfirmed(this.target);
-        if (confirmed !== this.allowUnknown) {
-          this.allowUnknown = confirmed;
-          this.store = null;
-          return this.prepareOnce();
-        }
-        if (confirmed) this.exposureOk = true;
+        // The store asks `allowUnknownExposureFor` itself on every write.
+        if (this.target !== null && this.isConfirmed(this.target)) this.exposureOk = true;
         else this.blocked = 'exposure-unknown';
       } else if (checked && !checked.ok && checked.error.kind === 'exposed') this.blocked = checked.error.reason === 'library-exposed' ? 'exposed' : 'exposure-unknown';
       else return this.retryPrepareLater(checked && !checked.ok && checked.error.kind === 'offline' ? 'offline' : 'failed');
@@ -1012,11 +1012,26 @@ function stateFromRecord(record: JournalRecord): ItemState {
   }
 }
 
-function kindOf(contentType: string): AssetKind | undefined {
+/** What the store's sniffer reports for splats: a generic type, told apart by its extension. */
+const SPLAT_EXTENSIONS = new Set(['.ply', '.spz']);
+
+function kindOf(contentType: string, extension: string): AssetKind | undefined {
   if (contentType.startsWith('image/')) return 'image';
   if (contentType.startsWith('video/')) return 'video';
   if (contentType.startsWith('model/')) return 'model3d';
+  if (contentType === 'application/octet-stream' && SPLAT_EXTENSIONS.has(extension)) return 'model3d';
   return undefined;
+}
+
+/**
+ * The extension the hosted record declares, which the sniffer needs only to accept SPZ (a
+ * format with no signature). It narrows and never decides: the bytes still have to be an SPZ.
+ */
+function declaredExtension(file: HostedMediaFile): string | undefined {
+  if (file.media_type.toLowerCase() === 'spz') return '.spz';
+  const name = file.maybe_original_filename?.toLowerCase();
+  const dot = name?.lastIndexOf('.') ?? -1;
+  return name && dot >= 0 ? name.slice(dot) : undefined;
 }
 
 /** A 3D record whose bytes are an image is a cover screenshot, not the model. */

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BytesError } from './bytes.js';
 import { createMemoryMirrorJournal, type MirrorJournal } from './journal.js';
-import { type OpenStore, PodMirror, type PodMirrorOptions, backoffDelay } from './mirror.js';
+import { DEFAULT_MAX_BYTES, type OpenStore, PodMirror, type PodMirrorOptions, backoffDelay } from './mirror.js';
 import {
   ACCOUNT,
   HOSTED_TOKEN_PREFIX,
@@ -12,6 +12,8 @@ import {
   fakeSession,
   fakeStore,
   glb,
+  ply,
+  spz,
   hostedFile,
   hostedPrompt,
   mp4,
@@ -1144,12 +1146,20 @@ describe('exposure pauses the person can act on', () => {
     await settle(t.mirror);
     expect(t.mirror.summary()).toMatchObject({ paused: 'exposure-unknown', exposureTarget: 'https://pod.example/alice/creative-assets/' });
     expect(t.store.puts).toEqual([]);
-    expect(t.open.allowed).toEqual([false]);
+    expect(t.open.calls).toBe(1);
+    expect(t.open.allowed[0]('https://pod.example/alice/creative-assets/')).toBe(false);
 
     expect(await t.mirror.confirmPrivate()).toBe(true);
     await settle(t.mirror);
     expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
-    expect(t.open.allowed.at(-1)).toBe(true);
+    // The same store is kept; the store's own per-container question now answers yes for the
+    // confirmed library and its shards, and no for any other container.
+    expect(t.open.calls).toBe(1);
+    const allowed = t.open.allowed[0];
+    expect(allowed('https://pod.example/alice/creative-assets/')).toBe(true);
+    expect(allowed('https://pod.example/alice/creative-assets/2026/06/')).toBe(true);
+    expect(allowed('https://pod.example/alice/creative-assets-evil/')).toBe(false);
+    expect(allowed('https://pod.example/alice/other-library/')).toBe(false);
     expect((await t.journal.getAccountState(ACCOUNT))?.confirmedPrivate).toEqual(['https://pod.example/alice/creative-assets/']);
 
     // Nothing is left to confirm, so a second confirmation is not accepted.
@@ -1181,7 +1191,7 @@ describe('exposure pauses the person can act on', () => {
     await again.mirror.enqueue(token(1));
     await settle(again.mirror);
     expect(again.mirror.stateOf(token(1))?.kind).toBe('saved');
-    expect(again.open.allowed).toContain(true);
+    expect(again.open.allowed[0]('https://pod.example/alice/creative-assets/')).toBe(true);
     await again.mirror.stop();
     const exposed = setup([hostedFile(2)], {}, t.journal);
     exposed.store.exposure = 'exposed';
@@ -1369,6 +1379,58 @@ describe('what the hosted side says about an item', () => {
     await settle(t.mirror);
     const put = t.store.puts.find((p) => (p as { description: { generation?: unknown } }).description.generation) as { description: { generation?: { usedAssets?: string[] } } } | undefined;
     expect(put?.description.generation?.usedAssets).toBeUndefined();
+  });
+
+  it.each([
+    ['a PLY splat', 'ply', ply, '.ply'],
+    ['an SPZ splat declared by its media type', 'spz', spz, '.spz'],
+  ])('saves %s as a 3D asset with the sniffed type', async (_name, mediaType, bytesOf, extension) => {
+    const file = hostedFile(1, { media_type: mediaType, media_class: 'splat', media_links: { cdn_url: 'https://cdn.example/files/1.bin', thumbnail_template: '' } });
+    const t = setup([file]);
+    t.bytes.bodies.set(file.media_links.cdn_url, bytesOf());
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(file.token)).toMatchObject({ kind: 'saved' });
+    expect(t.store.puts[0]).toMatchObject({ contentType: 'application/octet-stream', extension, description: { kind: 'model3d' } });
+  });
+
+  it('does not take an SPZ for granted: undeclared bytes with that header stay unsupported', async () => {
+    const file = hostedFile(1, { media_type: 'glb', media_class: 'mesh' });
+    const t = setup([file]);
+    t.bytes.bodies.set(file.media_links.cdn_url, spz());
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(file.token)).toEqual({ kind: 'skipped', reason: 'unsupported-type' });
+  });
+
+  it('skips a mesh format the sniffer does not know, such as FBX', async () => {
+    const file = hostedFile(1, { media_type: 'fbx', media_class: 'mesh' });
+    const t = setup([file]);
+    t.bytes.bodies.set(file.media_links.cdn_url, new TextEncoder().encode('Kaydara FBX Binary  \0\x1a\0'));
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(file.token)).toEqual({ kind: 'skipped', reason: 'unsupported-type' });
+  });
+
+  it('hands the store the downloaded Blob itself and lets files up to the store limit through', async () => {
+    const file = hostedFile(1);
+    const limits: number[] = [];
+    const base = fakeBytes(fakeHosted([file]));
+    const t = setup([file], {
+      fetchPublicBytes: async (url, options) => {
+        if (url === file.media_links.cdn_url) limits.push(options.maxBytes);
+        return base.fetch(url, options);
+      },
+    });
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect((t.store.puts[0] as { bytes: unknown }).bytes).toBeInstanceOf(Blob);
+    expect(limits).toEqual([DEFAULT_MAX_BYTES]);
+    expect(DEFAULT_MAX_BYTES).toBeGreaterThan(16 * 1024 * 1024);
   });
 
   it('does not fetch a thumbnail for a 3D model', async () => {
