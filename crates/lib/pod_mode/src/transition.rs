@@ -1,5 +1,5 @@
 use crate::origin::{Loopback, parse_origin};
-use crate::record::{MAX_STORAGE_ORIGINS, MAX_STORAGE_PROMPTS, PodModeRecord};
+use crate::record::{MAX_ENTER_PROMPTS, MAX_STORAGE_ORIGINS, MAX_STORAGE_PROMPTS, PodModeRecord};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransitionError {
@@ -16,15 +16,51 @@ pub enum TransitionError {
 /// Enter pod mode for `issuer`, replacing any earlier issuer and storage origins. The caller
 /// shows the native confirmation first; this only validates and builds the new record.
 pub fn enter(issuer: &str, loopback: Loopback) -> Result<PodModeRecord, TransitionError> {
+  enter_from(&PodModeRecord::default(), issuer, loopback)
+}
+
+/// As `enter`, from the record the window had: the dialog budget and back-off are carried (a
+/// leave and enter must not reset them); the declined storage origins belong to the session that
+/// ends and go.
+pub fn enter_from(before: &PodModeRecord, issuer: &str, loopback: Loopback) -> Result<PodModeRecord, TransitionError> {
   let issuer = parse_origin(issuer, loopback).ok_or(TransitionError::InvalidOrigin)?;
   Ok(PodModeRecord {
     enabled: true,
     issuer: Some(issuer),
-    storage_origins: Vec::new(),
     credentials_may_exist: true,
-    storage_prompts: 0,
-    refused_origins: Vec::new(),
+    ..before.carried()
   })
+}
+
+/// Whether an "enter pod mode" dialog may be shown for `issuer` now: not one the person declined,
+/// and the allowance of such dialogs is not used up.
+pub fn may_enter(record: &PodModeRecord, issuer: &str) -> Result<(), TransitionError> {
+  if record.declined_issuers.iter().any(|o| o == issuer) {
+    return Err(TransitionError::RefusedOrigin);
+  }
+  if record.enter_prompts >= MAX_ENTER_PROMPTS {
+    return Err(TransitionError::TooManyPrompts);
+  }
+  Ok(())
+}
+
+/// Counts one "enter pod mode" dialog about to be shown. Persisted before the dialog opens.
+pub fn enter_prompt_shown(record: &PodModeRecord) -> PodModeRecord {
+  PodModeRecord { enter_prompts: record.enter_prompts.saturating_add(1), ..record.clone() }
+}
+
+/// Remembers that the person declined to enter pod mode for `issuer`.
+pub fn issuer_declined(record: &PodModeRecord, issuer: &str) -> PodModeRecord {
+  let mut next = record.clone();
+  if !next.declined_issuers.iter().any(|o| o == issuer) && next.declined_issuers.len() < MAX_ENTER_PROMPTS as usize {
+    next.declined_issuers.push(issuer.to_string());
+  }
+  next
+}
+
+/// How many dialogs the person has declined since the app started: the back-off grows with it.
+pub fn declines(record: &PodModeRecord) -> usize {
+  record.declined_issuers.len() + record.refused_origins.len()
 }
 
 /// Adds a storage origin to a record that is already in pod mode. Adding one that is present,
@@ -61,7 +97,7 @@ pub fn leave(record: &PodModeRecord) -> Result<PodModeRecord, TransitionError> {
   if !record.enabled {
     return Err(TransitionError::NotInPodMode);
   }
-  Ok(PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() })
+  Ok(PodModeRecord { credentials_may_exist: true, ..record.carried() })
 }
 
 /// Whether a dialog may be shown for `origin` now: not one the person already declined, and the
@@ -191,13 +227,42 @@ mod tests {
   }
 
   #[test]
-  fn leaving_forgets_the_prompt_budget_and_the_refusals() {
+  fn leaving_and_entering_keep_the_dialog_counts_and_the_back_off_but_drop_this_sessions_refusals() {
     let mut pod = enter("https://login.example", HttpRefused).unwrap();
     pod = refused(&prompt_shown(&pod), "https://nope.example");
-    assert_eq!((pod.storage_prompts, pod.refused_origins.len()), (1, 1));
+    pod = issuer_declined(&enter_prompt_shown(&pod), "https://typo.example");
+    pod.backoff_until_ms = 99;
+    assert_eq!((pod.storage_prompts, pod.refused_origins.len(), pod.enter_prompts, pod.declined_issuers.len()), (1, 1, 1, 1));
     let left = leave(&pod).unwrap();
-    assert_eq!((left.storage_prompts, left.refused_origins.len()), (0, 0));
+    assert_eq!((left.storage_prompts, left.refused_origins.len(), left.enter_prompts, left.declined_issuers.len()), (1, 0, 1, 1));
+    assert_eq!(left.backoff_until_ms, 99);
     assert!(crate::record::is_valid(&left, HttpRefused));
+    let again = enter_from(&left, "https://login.example", HttpRefused).unwrap();
+    assert_eq!((again.storage_prompts, again.enter_prompts, again.declined_issuers.len(), again.backoff_until_ms), (1, 1, 1, 99));
+    assert!(again.refused_origins.is_empty());
+  }
+
+  #[test]
+  fn a_declined_issuer_and_a_used_up_allowance_stop_the_next_enter_dialog() {
+    let mut record = PodModeRecord::default();
+    assert_eq!(may_enter(&record, "https://a.example"), Ok(()));
+    record = issuer_declined(&record, "https://a.example");
+    assert_eq!(may_enter(&record, "https://a.example"), Err(TransitionError::RefusedOrigin));
+    assert_eq!(may_enter(&record, "https://b.example"), Ok(()));
+    for _ in 0..MAX_ENTER_PROMPTS {
+      record = enter_prompt_shown(&record);
+    }
+    assert_eq!(may_enter(&record, "https://b.example"), Err(TransitionError::TooManyPrompts));
+    assert!(crate::record::is_valid(&record, HttpRefused));
+  }
+
+  #[test]
+  fn the_app_starting_outside_pod_mode_starts_the_budget_again_but_not_inside() {
+    let mut pod = enter("https://login.example", HttpRefused).unwrap();
+    pod = prompt_shown(&pod);
+    assert_eq!(pod.clone().budget_reset_on_start(), pod);
+    let left = leave(&pod).unwrap();
+    assert_eq!(left.budget_reset_on_start(), PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() });
   }
 
   #[test]

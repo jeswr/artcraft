@@ -24,7 +24,10 @@ impl Loopback {
 /// literals, embedded control characters and Unicode (IDN) forms. The host must have at least two
 /// labels of `[a-z0-9-]` (no empty label, so no trailing dot; none starting or ending with `-`;
 /// none starting with `xn--`, so a punycode name is never shown raw), and its last label must
-/// not be all digits, which refuses every IPv4 literal. `localhost` and `127.0.0.1`, over https
+/// not be all digits, which refuses every IPv4 literal. Port 0 and the special-use names
+/// (`*.localhost`, `.local`, `.lan`, `.internal`, `.home.arpa`, `.onion`, `.test`, `.invalid`) are
+/// refused; `.example` is allowed (tests and vectors use it). Internationalised host names are not
+/// supported yet. `localhost` and `127.0.0.1`, over https
 /// or http, are accepted only when `loopback` allows it. The TypeScript twin
 /// (`frontend/libs/pod-mode/src/lib/origins.ts`) follows the same rules; both are tested against
 /// `testdata/origin-vectors.json`.
@@ -37,14 +40,27 @@ pub fn parse_origin(value: &str, loopback: Loopback) -> Option<String> {
     return None;
   }
   let host = url.host_str()?;
+  if url.port() == Some(0) {
+    return None;
+  }
   if is_loopback_host(host) {
     return (loopback == Loopback::HttpAllowed && matches!(url.scheme(), "https" | "http")).then(|| value.to_string());
   }
   if url.scheme() == "https" && is_public_dns_host(host) { Some(value.to_string()) } else { None }
 }
 
+/// Names that are not on the public internet, or are reserved for tests and local use. They are
+/// refused (a name under them resolves to a private or loopback address on many systems), except
+/// `.example`, which the shared test vectors and these tests use throughout. `.example` can never
+/// be delegated, so allowing it grants nothing in a real deployment.
+const SPECIAL_USE_SUFFIXES: &[&str] = &["localhost", "local", "lan", "internal", "home.arpa", "onion", "test", "invalid"];
+
+fn is_special_use(host: &str) -> bool {
+  SPECIAL_USE_SUFFIXES.iter().any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+}
+
 fn is_public_dns_host(host: &str) -> bool {
-  if host.len() > MAX_HOST_LEN {
+  if host.len() > MAX_HOST_LEN || is_special_use(host) {
     return false;
   }
   let labels: Vec<&str> = host.split('.').collect();

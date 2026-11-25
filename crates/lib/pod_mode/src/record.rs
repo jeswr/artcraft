@@ -9,10 +9,17 @@ pub const RECORD_FILE_NAME: &str = "pod_mode.json";
 /// The most storage origins one pod-mode record may hold.
 pub const MAX_STORAGE_ORIGINS: usize = 8;
 
-/// The most storage-origin dialogs one pod-mode session may ever show, however they were
-/// answered. It is a lifetime cap for the record (entering pod mode starts a new one), so a
-/// page that calls the command directly cannot keep asking.
-pub const MAX_STORAGE_PROMPTS: u32 = 6;
+/// The most storage-origin dialogs the app shows between two starts of the app, however they were
+/// answered. The count is carried across leaving and entering pod mode (it is cleared only when the
+/// app starts outside pod mode), so a page that calls the command directly, or loops leave and
+/// `credentials_cleared`, cannot keep asking. An honest sign-in needs at most four of these (the
+/// provider, ArtCraft's identity document, the pod's storage and a Type Index elsewhere), so this
+/// allows three complete sign-ins, with the declined ones counted, per run of the app.
+pub const MAX_STORAGE_PROMPTS: u32 = 12;
+
+/// The most "enter pod mode" dialogs the app shows between two starts of the app. An honest person
+/// types an address once, perhaps again after a typing mistake.
+pub const MAX_ENTER_PROMPTS: u32 = 6;
 
 /// The persisted pod-mode state. Written only by the app after a native confirmation; the
 /// page never writes it. It holds origins, never credentials.
@@ -26,21 +33,55 @@ pub struct PodModeRecord {
   /// ordinary window loads no analytics: pod credentials may still be in web storage.
   #[serde(default)]
   pub credentials_may_exist: bool,
-  /// How many storage-origin dialogs this pod-mode session has shown (counted before the dialog
-  /// opens, so quitting with it open does not give the page a fresh one). At most
-  /// `MAX_STORAGE_PROMPTS`.
+  /// How many storage-origin dialogs the app has shown since it started outside pod mode
+  /// (counted before the dialog opens, so quitting with it open does not give the page a fresh
+  /// one). Kept by leaving and by entering. At most `MAX_STORAGE_PROMPTS`.
   #[serde(default)]
   pub storage_prompts: u32,
-  /// Storage origins the person declined in this pod-mode session. They are never asked about
-  /// again until pod mode is left and entered anew. At most `MAX_STORAGE_PROMPTS` entries.
+  /// Storage origins the person declined in the current pod-mode session. They are never asked
+  /// about again in it. Cleared when pod mode is entered anew. At most `MAX_STORAGE_PROMPTS`.
   #[serde(default)]
   pub refused_origins: Vec<String>,
+  /// How many "enter pod mode" dialogs the app has shown since it started outside pod mode
+  /// (counted before the dialog opens). Kept by leaving. At most `MAX_ENTER_PROMPTS`.
+  #[serde(default)]
+  pub enter_prompts: u32,
+  /// Issuers the person declined to enter pod mode for. Never asked about again until the app is
+  /// restarted outside pod mode. Kept by leaving. At most `MAX_ENTER_PROMPTS` entries.
+  #[serde(default)]
+  pub declined_issuers: Vec<String>,
+  /// Wall-clock time (ms since the epoch) before which no dialog is shown: the back-off after a
+  /// refusal. It is clamped when read, so a clock change cannot extend it past
+  /// `MAX_COOLDOWN_MS` from now. Kept by leaving.
+  #[serde(default)]
+  pub backoff_until_ms: u64,
 }
 
 impl PodModeRecord {
   /// The window must run restricted: pod mode, or credentials that were never confirmed wiped.
   pub fn restricted(&self) -> bool {
     self.enabled || self.credentials_may_exist
+  }
+
+  /// The counters that outlive leaving pod mode: they bound dialogs, so leaving must not reset
+  /// them. Everything else about the session is dropped.
+  pub fn carried(&self) -> PodModeRecord {
+    PodModeRecord {
+      storage_prompts: self.storage_prompts,
+      enter_prompts: self.enter_prompts,
+      declined_issuers: self.declined_issuers.clone(),
+      backoff_until_ms: self.backoff_until_ms,
+      ..PodModeRecord::default()
+    }
+  }
+
+  /// The app has just started outside pod mode: the dialog budget starts again. (Quitting and
+  /// reopening ArtCraft is the documented way to reset it.)
+  pub fn budget_reset_on_start(self) -> PodModeRecord {
+    if self.enabled {
+      return self;
+    }
+    PodModeRecord { credentials_may_exist: self.credentials_may_exist, ..PodModeRecord::default() }
   }
 }
 
@@ -65,8 +106,7 @@ impl Loaded {
         issuer: None,
         storage_origins: Vec::new(),
         credentials_may_exist: true,
-        storage_prompts: 0,
-        refused_origins: Vec::new(),
+        ..PodModeRecord::default()
       },
     }
   }
@@ -128,11 +168,16 @@ pub fn save(dir: &Path, record: &PodModeRecord) -> io::Result<()> {
 }
 
 pub fn is_valid(record: &PodModeRecord, loopback: Loopback) -> bool {
+  let counters_ok = record.storage_prompts <= MAX_STORAGE_PROMPTS
+    && record.enter_prompts <= MAX_ENTER_PROMPTS
+    && record.refused_origins.len() <= MAX_STORAGE_PROMPTS as usize
+    && record.declined_issuers.len() <= MAX_ENTER_PROMPTS as usize
+    && record.refused_origins.iter().all(|s| parse_origin(s, loopback).is_some())
+    && record.declined_issuers.iter().all(|s| parse_origin(s, loopback).is_some())
+    && !has_duplicates(&record.refused_origins)
+    && !has_duplicates(&record.declined_issuers);
   if !record.enabled {
-    return record.issuer.is_none()
-      && record.storage_origins.is_empty()
-      && record.storage_prompts == 0
-      && record.refused_origins.is_empty();
+    return record.issuer.is_none() && record.storage_origins.is_empty() && record.refused_origins.is_empty() && counters_ok;
   }
   if !record.credentials_may_exist {
     return false; // pod mode always implies the flag
@@ -141,11 +186,7 @@ pub fn is_valid(record: &PodModeRecord, loopback: Loopback) -> bool {
   let storage_ok = record.storage_origins.len() <= MAX_STORAGE_ORIGINS
     && record.storage_origins.iter().all(|s| parse_origin(s, loopback).is_some())
     && !has_duplicates(&record.storage_origins);
-  let memory_ok = record.storage_prompts <= MAX_STORAGE_PROMPTS
-    && record.refused_origins.len() <= MAX_STORAGE_PROMPTS as usize
-    && record.refused_origins.iter().all(|s| parse_origin(s, loopback).is_some())
-    && !has_duplicates(&record.refused_origins);
-  issuer_ok && storage_ok && memory_ok
+  issuer_ok && storage_ok && counters_ok
 }
 
 fn has_duplicates(values: &[String]) -> bool {

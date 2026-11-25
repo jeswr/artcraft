@@ -32,10 +32,12 @@ pub fn host_init_script(
   value.insert("storageOrigins".into(), json!(storage));
   value.insert("headerPolicy".into(), json!(record.restricted() && header_policy));
   value.insert("credentialsMayExist".into(), json!(record.restricted()));
-  // A connect the person approved in a dialog in this process, for exactly this issuer. A record
-  // merely loaded from disk never carries it, so it cannot start a fresh sign-in.
+  // An origin the person approved in a dialog in this process: the issuer they entered pod mode
+  // for, or an origin they then allowed. It is only ever carried while that origin is one of the
+  // record's own, and a record merely loaded from disk never carries it, so it cannot start a
+  // fresh sign-in.
   if let (true, Some(issuer), Some(fresh)) = (record.enabled, record.issuer.as_deref(), fresh_connect) {
-    if issuer == fresh {
+    if issuer == fresh || record.storage_origins.iter().any(|o| o == fresh) {
       value.insert("freshConnect".into(), json!(fresh));
     }
   }
@@ -113,6 +115,13 @@ mod tests {
     assert!(script.contains(r#"value:"ai.artcraft.app.dev""#));
     let hostile = host_init_script(&PodModeRecord::default(), false, "a</script>\u{2028}\"b", None);
     assert!(!hostile.contains('<') && !hostile.contains('\u{2028}'));
+  }
+
+  #[test]
+  fn a_fresh_grant_for_an_origin_the_person_allowed_is_carried_only_while_the_record_lists_it() {
+    let script = host_init_script(&enabled(), true, ID, Some("https://pod.example"));
+    assert!(script.contains(r#""freshConnect":"https://pod.example""#));
+    assert!(!host_init_script(&enabled(), true, ID, Some("https://unlisted.example")).contains("freshConnect"));
   }
 
   #[test]

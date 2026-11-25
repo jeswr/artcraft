@@ -3,7 +3,7 @@
 //! an origin at most, never a credential, and answer only the main window.
 
 use crate::core::pod_mode::PodModeController;
-use pod_mode::controller::{CommandError, Reply};
+use pod_mode::controller::{CommandError, Purpose, Reply};
 use serde_derive::Serialize;
 use tauri::{State, WebviewWindow};
 
@@ -39,8 +39,13 @@ pub async fn pod_mode_add_storage_origin_command(
   window: WebviewWindow,
   controller: State<'_, PodModeController>,
   origin: String,
+  purpose: String,
 ) -> Result<Outcome, String> {
-  outcome(controller.add_storage_origin(window.label(), &origin).await)
+  // The reason the page gives is a closed word that only changes what the dialog says.
+  let Some(purpose) = Purpose::from_word(&purpose) else {
+    return Err(CommandError::InvalidPurpose.as_str().to_string());
+  };
+  outcome(controller.add_storage_origin(window.label(), &origin, purpose).await)
 }
 
 /// The window asks to leave only after its own wipe reported success. The app cannot check that.

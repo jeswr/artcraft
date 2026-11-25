@@ -381,7 +381,8 @@ fn is_dev_identifier(identifier: &str) -> bool {
 /// `xdg-mime` and `update-desktop-database`, and macOS reads the bundle (unsupported). Only a dev
 /// identifier registers, and only its own scheme, so a debug binary built from the release config
 /// never takes over an installed release build's `ai.artcraft.app`. `is_registered` is asked
-/// first so the two tools are not run at every start. The release AppImage is deliberately not
+/// first (and the handler file must name this very binary) so the two tools are not run at every
+/// start. The release AppImage is deliberately not
 /// registered here: see `frontend/libs/pod-session/README.md`, "Deep links".
 #[cfg(any(windows, target_os = "linux"))]
 fn register_dev_deep_links(app: &tauri::AppHandle) {
@@ -391,7 +392,10 @@ fn register_dev_deep_links(app: &tauri::AppHandle) {
     return;
   }
   let links = app.deep_link();
-  if links.is_registered(&identifier).unwrap_or(false) {
+  // `is_registered` on Linux only checks that a handler file of the binary's NAME is the default,
+  // and every checkout's dev binary has the same name, so a registration left by another build
+  // would be kept for ever. Register again unless the file points at THIS binary.
+  if links.is_registered(&identifier).unwrap_or(false) && registered_command_is_this_binary(app) {
     return;
   }
   if let Err(err) = links.register(&identifier) {
@@ -399,12 +403,44 @@ fn register_dev_deep_links(app: &tauri::AppHandle) {
   }
 }
 
+/// Whether the handler file the plugin wrote on Linux names the running binary. Windows' check
+/// already compares the full path, so there it is always true.
+#[cfg(target_os = "linux")]
+fn registered_command_is_this_binary(app: &tauri::AppHandle) -> bool {
+  use tauri::Manager;
+  let Ok(exe) = tauri::utils::platform::current_exe() else { return false };
+  let Some(name) = exe.file_name() else { return false };
+  let Ok(dir) = app.path().data_dir() else { return false };
+  let file = dir.join("applications").join(format!("{}-handler.desktop", name.to_string_lossy()));
+  std::fs::read_to_string(file).is_ok_and(|text| desktop_exec_matches(&text, &exe.to_string_lossy()))
+}
+
+#[cfg(windows)]
+fn registered_command_is_this_binary(_app: &tauri::AppHandle) -> bool {
+  true
+}
+
+/// The plugin writes `Exec="<binary>" %u`.
+#[cfg(any(test, target_os = "linux"))]
+fn desktop_exec_matches(desktop_file: &str, exe: &str) -> bool {
+  let wanted = format!("Exec=\"{exe}\" %u");
+  desktop_file.lines().any(|line| line.trim() == wanted)
+}
+
 #[cfg(not(any(windows, target_os = "linux")))]
 fn register_dev_deep_links(_app: &tauri::AppHandle) {}
 
 #[cfg(test)]
 mod deep_link_tests {
-  use super::is_dev_identifier;
+  use super::{desktop_exec_matches, is_dev_identifier};
+
+  #[test]
+  fn a_handler_file_that_names_another_binary_is_not_this_ones_registration() {
+    let file = "[Desktop Entry]\nName=ArtCraft\nExec=\"/work/a/target/debug/artcraft\" %u\nMimeType=x-scheme-handler/ai.artcraft.app.dev;\n";
+    assert!(desktop_exec_matches(file, "/work/a/target/debug/artcraft"));
+    assert!(!desktop_exec_matches(file, "/work/b/target/debug/artcraft"));
+    assert!(!desktop_exec_matches("", "/work/a/target/debug/artcraft"));
+  }
 
   /// The sign-in redirect is `<identifier>:/oauth/callback`, so the scheme each config registers
   /// must equal its identifier, and only the dev overlays may use a `.dev` one.

@@ -25,7 +25,8 @@ pub struct PodModeState {
 impl PodModeState {
   pub fn load(settings_dir: PathBuf, identifier: &str) -> Self {
     let dir = record::record_dir(&settings_dir, identifier);
-    let record = record::load(&dir, Loopback::for_this_build()).effective();
+    // The dialog budget is per run of the app: it starts again when the app starts outside pod mode.
+    let record = record::load(&dir, Loopback::for_this_build()).effective().budget_reset_on_start();
     Self { dir, record: Mutex::new(record), fresh: Mutex::new(None), rebuilding: AtomicBool::new(false), policy: Mutex::new(None) }
   }
 

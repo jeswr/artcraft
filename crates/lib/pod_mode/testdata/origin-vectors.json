@@ -275,6 +275,86 @@
    "origin": "https://login.example https://other.example",
    "valid_release": false,
    "valid_dev": false
+  },
+  {
+   "origin": "https://foo.localhost",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a.b.localhost",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://foo.local",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://router.lan",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a.internal",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://x.home.arpa",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a.onion",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a.test",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://a.invalid",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://example.com:0",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://login.example:0",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://localhost.test",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://home.arpa",
+   "valid_release": false,
+   "valid_dev": false
+  },
+  {
+   "origin": "https://localhostx.example",
+   "valid_release": true,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://mylocal.example",
+   "valid_release": true,
+   "valid_dev": true
+  },
+  {
+   "origin": "https://pod.home.example",
+   "valid_release": true,
+   "valid_dev": true
   }
  ]
 }
