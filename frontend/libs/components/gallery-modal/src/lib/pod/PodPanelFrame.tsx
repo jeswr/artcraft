@@ -1,7 +1,7 @@
 import { CloseButton } from "@storyteller/ui-close-button";
 import { Modal } from "@storyteller/ui-modal";
 import type { ReactNode } from "react";
-import { SIGNED_OUT_DETAIL, SIGNED_OUT_TITLE } from "./podMessages";
+import { SIGN_IN_STEP_TITLE, SIGNED_OUT_DETAIL, SIGNED_OUT_TITLE } from "./podMessages";
 
 /**
  * The header of the "My pod" view (source switch, title, controls, close) around its body. The
@@ -49,6 +49,7 @@ export function PodSignedOut({
   asking = false,
   problem = null,
   canPress = true,
+  step = null,
 }: {
   onSignInAgain: () => void;
   /** The app is asking in its dialog: the button waits and says so. */
@@ -57,7 +58,32 @@ export function PodSignedOut({
   problem?: string | null;
   /** False when pressing again cannot help: no button. */
   canPress?: boolean;
+  /** A sign-in in progress: shown instead of "Sign in again", with its next click when it is the person's. */
+  step?: { status: string; action?: { label: string; press(): void } | null } | null;
 }) {
+  if (step) {
+    return (
+      <div className="flex h-64 items-center justify-center px-6" data-testid="pod-sign-in-step">
+        <div className="flex max-w-sm flex-col items-center gap-3 text-center text-sm">
+          <div className="text-base-fg/70">{SIGN_IN_STEP_TITLE}</div>
+          {/* Announced when it changes: each step of the sign-in is said where the person is looking. */}
+          <div role="status" aria-live="polite" className="text-xs text-base-fg/60" data-testid="pod-sign-in-step-status">
+            {step.status}
+          </div>
+          {/* No autofocus: a stray Enter must not move the sign-in on. */}
+          {step.action && (
+            <button
+              type="button"
+              className="rounded-[3px] bg-ui-controls px-3 py-1.5 text-sm font-medium text-base-fg hover:bg-ui-controls/80"
+              onClick={step.action.press}
+            >
+              {step.action.label}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex h-64 items-center justify-center px-6" role="alert" data-testid="pod-signed-out">
       <div className="flex max-w-sm flex-col items-center gap-3 text-center text-sm">

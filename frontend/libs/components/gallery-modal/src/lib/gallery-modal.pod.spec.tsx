@@ -225,6 +225,19 @@ describe("what the gallery lets go of", () => {
     );
     expect(screen.getByTestId("pod-signed-out-status").textContent).toBe("Out of tries.");
     expect(screen.queryByRole("button", { name: "Sign in again" })).toBeNull();
+    // A sign-in in progress replaces "Sign in again" with its own step and next click.
+    const press = vi.fn();
+    rerender(
+      <PodGalleryProvider access={null} signedOut={{ ...signedOut, step: { status: "Nothing has started yet.", action: { label: "Continue sign-in", press } } }}>
+        <GalleryModal mode="view" />
+      </PodGalleryProvider>,
+    );
+    expect(screen.getByRole("button", { name: "My pod" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("pod-sign-in-step-status").textContent).toBe("Nothing has started yet.");
+    expect(screen.queryByRole("button", { name: "Sign in again" })).toBeNull();
+    expect(press).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Continue sign-in" }));
+    expect(press).toHaveBeenCalledTimes(1);
     // The person can still go to the ArtCraft library.
     fireEvent.click(screen.getByRole("button", { name: "ArtCraft library" }));
     expect(screen.getByText("All Assets", { selector: "button" })).toBeTruthy();

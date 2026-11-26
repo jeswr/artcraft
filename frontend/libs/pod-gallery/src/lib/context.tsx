@@ -21,6 +21,19 @@ export interface PodGallerySignedOut {
   readonly problem?: string | null;
   /** False when pressing again cannot help (the app's limit for this run is reached). Default true. */
   readonly canPress?: boolean;
+  /**
+   * Set while a pod window is part-way through signing in (after "Sign in again" reloaded it, for
+   * example). "My pod" then shows this step instead of "Sign in again".
+   */
+  readonly step?: PodGallerySignInStep | null;
+}
+
+/** One step of a sign-in in progress, as "My pod" shows it. */
+export interface PodGallerySignInStep {
+  /** What is happening, in words. */
+  readonly status: string;
+  /** The next step when it is the person's: called only from their click. */
+  readonly action?: { readonly label: string; press(): void } | null;
 }
 
 const PodGalleryContext = createContext<PodGalleryAccess | null>(null);

@@ -2650,6 +2650,7 @@ export const GalleryModal = React.memo(
                 asking={podSignedOut.asking}
                 problem={podSignedOut.problem}
                 canPress={podSignedOut.canPress}
+                step={podSignedOut.step}
               />
             </PodPanelFrame>
           ) : showPod && podAccess ? (

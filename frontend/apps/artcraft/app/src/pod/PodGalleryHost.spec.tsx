@@ -27,11 +27,16 @@ const ALICE = "https://alice.example/profile/card#me";
 const BOB = "https://bob.example/profile/card#me";
 const FETCH = vi.fn() as unknown as typeof fetch;
 
-function fakePodSession(initial: PodSessionState, options: { canSignInAgain?: (state: PodSessionState) => boolean } = {}) {
+function fakePodSession(initial: PodSessionState, options: { canSignInAgain?: (state: PodSessionState) => boolean; podWindow?: boolean } = {}) {
   let state = initial;
   const listeners = new Set<() => void>();
   const signInAgain = vi.fn(async () => undefined);
+  const beginSignIn = vi.fn(async () => undefined);
+  const openBrowser = vi.fn();
   const session = {
+    inPodMode: () => options.podWindow ?? false,
+    beginSignIn,
+    openBrowser,
     getState: () => state,
     subscribe: (listener: () => void) => (listeners.add(listener), () => listeners.delete(listener)),
     getFetch: () => (state.kind === "connected" ? FETCH : null),
@@ -41,6 +46,8 @@ function fakePodSession(initial: PodSessionState, options: { canSignInAgain?: (s
   return {
     session,
     signInAgain,
+    beginSignIn,
+    openBrowser,
     set: (next: PodSessionState) =>
       act(() => {
         state = next;
@@ -105,6 +112,46 @@ describe("the host that offers the pod library to the gallery", () => {
     pod.set({ kind: "error", error: "sign-in-again-limit" });
     expect(signedOut).toMatchObject({ canPress: false });
     expect(signedOut!.problem).toBeTruthy();
+  });
+
+  it("keeps My pod through the sign-in steps of a reloaded pod window, moving on only at the person's click", async () => {
+    // Widened so the checks below are not narrowed to the initial null.
+    let signedOut = null as ReturnType<typeof usePodGallerySignedOut>;
+    function SignedOutProbe() {
+      signedOut = usePodGallerySignedOut();
+      return null;
+    }
+    // "Sign in again" reloaded the window: this new page never saw the press.
+    const pod = fakePodSession({ kind: "ready-to-sign-in", issuer: "https://idp.example" }, { podWindow: true });
+    render(<PodGalleryHost session={pod.session}><Probe /><SignedOutProbe /></PodGalleryHost>);
+    expect(signedOut?.step?.action?.label).toBe("Continue sign-in");
+    expect(pod.beginSignIn).not.toHaveBeenCalled();
+    signedOut!.step!.action!.press();
+    expect(pod.beginSignIn).toHaveBeenCalledTimes(1);
+    pod.set({ kind: "confirm-provider", provider: "https://idp.example" });
+    expect(signedOut?.step?.action?.label).toMatch(/Sign in at/);
+    expect(pod.openBrowser).not.toHaveBeenCalled();
+    pod.set({ kind: "signing-in", issuer: "https://idp.example", provider: "https://idp.example" });
+    expect(signedOut?.step).toBeTruthy();
+    expect(signedOut?.step?.action).toBeFalsy();
+    // Allowing a new address is left to Settings, which explains it.
+    pod.set({ kind: "needs-approval", origin: "https://other.example", phase: "sign-in", purpose: "sign-in" });
+    expect(signedOut?.step?.status).toMatch(/Settings/);
+    expect(signedOut?.step?.action).toBeFalsy();
+    pod.set(connected(ALICE));
+    expect(signedOut).toBeNull();
+    expect(screen.getByTestId("probe").textContent).toBe(ALICE);
+  });
+
+  it("offers no sign-in step outside a pod window", async () => {
+    let signedOut: ReturnType<typeof usePodGallerySignedOut> = null;
+    function SignedOutProbe() {
+      signedOut = usePodGallerySignedOut();
+      return null;
+    }
+    const pod = fakePodSession({ kind: "ready-to-sign-in", issuer: "https://idp.example" });
+    render(<PodGalleryHost session={pod.session}><Probe /><SignedOutProbe /></PodGalleryHost>);
+    expect(signedOut).toBeNull();
   });
 
   it("does not keep My pod for a connecting state it did not start", async () => {

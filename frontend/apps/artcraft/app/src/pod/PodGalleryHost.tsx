@@ -1,4 +1,4 @@
-import { PodGalleryProvider, PodLibraryOpenError, createPodLibraryController, type PodGalleryAccess, type PodGallerySignedOut } from "@storyteller/pod-gallery";
+import { PodGalleryProvider, PodLibraryOpenError, createPodLibraryController, type PodGalleryAccess, type PodGallerySignedOut, type PodGallerySignInStep } from "@storyteller/pod-gallery";
 import { ERROR_TEXT, usePodSessionState, type PodSession, type PodSessionState } from "@storyteller/pod-session";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
@@ -6,7 +6,9 @@ const DECLINED_TEXT = "You declined in ArtCraft's dialog. Choose Sign in again t
 
 /**
  * Offers the pod library to the gallery while a pod is connected. When the session has ended in a
- * pod window that can sign in again, the gallery keeps "My pod" and offers that instead. Otherwise
+ * pod window that can sign in again, the gallery keeps "My pod" and offers that instead; while a pod
+ * window is part-way through signing in (after "Sign in again" reloaded it), "My pod" shows the step
+ * and its next click, so the person can finish there instead of in Settings. Otherwise
  * it provides nothing, and nothing is loaded: the code that opens the pod is one dynamic import,
  * made only when the person opens "My pod". Both media loaders are purged when the pod is disconnected,
  * when the signed-in WebID changes and when this host unmounts.
@@ -53,7 +55,8 @@ export function PodGalleryHost({ session, children }: { session: PodSession; chi
   // Re-read on every state change: whether the window can sign in again follows the session's state.
   const canSignInAgain = webId === null && session.canSignInAgain();
   const followUp = pressed && webId === null ? afterPress(state) : null;
-  const offered = canSignInAgain || followUp !== null;
+  const step = useMemo(() => (webId === null ? signInStep(state, session) : null), [state, session, webId]);
+  const offered = canSignInAgain || followUp !== null || step !== null;
   const asking = followUp?.asking ?? false;
   const problem = followUp?.problem ?? null;
   const signedOut = useMemo<PodGallerySignedOut | null>(
@@ -67,9 +70,10 @@ export function PodGalleryHost({ session, children }: { session: PodSession; chi
             asking,
             problem,
             canPress: canSignInAgain,
+            step,
           }
         : null,
-    [session, offered, asking, problem, canSignInAgain],
+    [session, offered, asking, problem, canSignInAgain, step],
   );
 
   return (
@@ -88,4 +92,47 @@ function afterPress(state: PodSessionState): { asking: boolean; problem: string 
   if (state.kind === "disconnected") return { asking: false, problem: state.outcome === "declined" ? DECLINED_TEXT : null };
   if (state.kind === "error") return { asking: false, problem: ERROR_TEXT[state.error] };
   return null;
+}
+
+/**
+ * A sign-in in progress in a pod window, as "My pod" shows it: what is happening, and the next step
+ * when it is the person's click (the same click Settings offers). Allowing a new address is left to
+ * Settings, which explains it in full. Null in any other state.
+ */
+function signInStep(state: PodSessionState, session: PodSession): PodGallerySignInStep | null {
+  switch (state.kind) {
+    case "ready-to-sign-in":
+    case "needs-approval":
+    case "confirm-provider":
+    case "signing-in":
+      break;
+    default:
+      return null;
+  }
+  if (!session.inPodMode()) return null;
+  switch (state.kind) {
+    case "ready-to-sign-in":
+      return {
+        status: `${state.approved ? `You allowed ${state.approved}` : `You confirmed ${state.issuer}`} in ArtCraft's dialog. Nothing has started yet; your browser opens only after you continue and then choose to sign in.`,
+        action: { label: "Continue sign-in", press: () => void session.beginSignIn() },
+      };
+    case "needs-approval":
+      // Whether to allow an address needs the full explanation, which only Settings gives.
+      return {
+        status: `Going on needs ArtCraft to be allowed to contact ${state.origin}. Settings, under Solid pod, says what it is for and lets you allow it.`,
+        action: null,
+      };
+    case "confirm-provider":
+      return {
+        status: `You sign in at ${state.provider}. Your browser opens there when you choose to; Settings, under Solid pod, can cancel.`,
+        action: { label: `Sign in at ${state.provider}`, press: () => session.openBrowser() },
+      };
+    case "signing-in":
+      return {
+        status: state.provider
+          ? `Waiting for your browser to finish signing in at ${state.provider}. Your pod shows here once you are back.`
+          : "Preparing your sign-in. Your browser has not opened yet.",
+        action: null,
+      };
+  }
 }
