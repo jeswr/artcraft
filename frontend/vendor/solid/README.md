@@ -224,16 +224,74 @@ One tarball per package. Where a package was re-packed several times in the sect
 | `jeswr-guarded-fetch-0.1.0.tgz` | feat/desktop-auth 225a553 (dist identical at d20ddf6) | `198d0b6b78381df298071345d87d7769888ab467140d94b2ea11417e812d4f97` |
 | `jeswr-model-runtime-0.2.0.tgz` | feat/creative-assets d6dcc9a (main d20ddf6) | `cf164e21246efe5c8ef3455df3f604592bf39eaaa8e7e457e27e48d852f71351` |
 | `jeswr-pod-access-0.1.0.tgz` | feat/pod-media-store ce7d766 | `9295bc1f24ddcaf7dd0e4be2860ebf0a5e1057a533e614de30126f1e1819220c` |
-| `jeswr-pod-auth-0.1.0.tgz` | feat/pod-auth-identity-hook b58caad (draft PR #677) | `b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e` |
+| `jeswr-pod-auth-0.1.0-14143e0.tgz` | 14143e09b (draft PR #690) + b58caad (draft PR #677), local merge 330d69c2d; **known open review finding, re-vendor when fixed** | `ec67959ec7a95ee104c27c54c6df44c04e4860b3d4985a10426c5776db81b2f6` |
 | `jeswr-pod-media-loader-0.1.0-fdf084a.tgz` | feat/pod-media-loader fdf084a | `b69d680862d923516b339df849693303ca7b73416f4f3feca8079e9163b3e9fc` |
 | `jeswr-pod-media-store-0.1.0.tgz` | feat/pod-media-store 690ecee7c | `2814fa93aee8e4edb1bf2f986d97b96cd0dbe27c4435ff2dbd39ef2b8032a998` |
 | `jeswr-pod-type-index-0.1.0.tgz` | fix/pod-type-index-vite-regex 2f1ece2 | `ecc187de5fc5bfd202da239ada0a957ce69b067cda31b7deec670d833039d3cf` |
 | `jeswr-rdf-serialize-0.1.0.tgz` | feat/pod-media-store ce7d766 | `f99e60e4b33c8bd66232680f1782f305a3af6a623b7451fd88c00a637e2f3a74` |
-| `jeswr-reactive-authentication-0.1.5.tgz` | feat/desktop-auth 225a553 | `5acce3f79351b6e7efb69f5e5d1c214fe4ae03f4d35d2bf5d4be9f533e43a0a2` |
+| `jeswr-reactive-authentication-0.1.5-14143e0.tgz` | 14143e09b (draft PR #690) | `6e877ba9633aab98dfd9940705157dd2501a238865d41d09f4079d6336f922fb` |
 | `jeswr-solid-creative-assets-0.1.0.tgz` | feat/creative-assets d6dcc9a | `228dc2a65acbbde1db2f7ab45484c1ca8c6be8a4bab0690e628e0ed5e3b46e34` |
 | `jeswr-solid-odrl-0.1.0.tgz` | feat/pod-media-store ce7d766 | `1165f1d01c8b021471c374fb446bead14d76a030c6183f74f81f175e5244cea4` |
 | `jeswr-storage-capabilities-0.1.0.tgz` | feat/pod-media-store ce7d766 | `5bea6ce143ea34ad9c5428d08a29dd42908a1ed18caf81ef24f3ec9bea596b72` |
-| `jeswr-storage-client-0.1.0-fdf084a.tgz` | feat/pod-media-loader fdf084a | `a72b3814f2769d25916e6e273f9c7395465a5e8b8129f1c5e3f39cd86c6f87bf` |
+| `jeswr-storage-client-0.1.0-14143e0.tgz` | 14143e09b (draft PR #690) + fdf084a `contentLength` patch, local commit 324f75d24 | `55c95f6a73f380ad9df09c0a18bf9abed8d68c0f097f9f1984ea3fdced44359c` |
 | `jeswr-suite-native-0.1.0.tgz` | feat/desktop-auth 225a553 | `89d27479963625ada5355a62d9a277d18a9f08ebd63948039fe11d3bcd4229a0` |
 | `jeswr-suite-vocab-0.1.0.tgz` | feat/creative-assets d6dcc9a (main d20ddf6) | `f4ed44e367e4344b5bfa97674c6d5cc1fa3dee7c6a9c3711f1a3b345dbc3b4a6` |
 | `solid-agent-notify-0.1.0.tgz` | feat/pod-media-store ce7d766 | `3ed8c7e94a5c0463e166889b43a6b49f0983db18ed43c2ef543f24ce037bb933` |
+
+## Re-vendor at SDK draft PR #690 (`14143e09b`)
+
+Three tarballs were re-packed so the app gets pod-auth's `nonInteractiveFetch`, the typed replay
+cap (`ReplayBodyTooLargeError`), `identity.storageDiscovery` (the credential boundary learned from
+the WebID server's storage description when the profile has no `pim:storage`), the storage
+client's `allow` fix and `parentOf({ signal })`, and the reactive-authentication engine changes
+under them. #690 (`claude/project-thread-jn2p5t` at `14143e09b`) does not contain the two draft
+branches the replaced tarballs needed, so the build commit is a local, unpushed one on top of it:
+
+1. `git merge origin/feat/pod-auth-identity-hook` (`b58caad`, draft PR #677, `PodAuthOptions.fetch`).
+   Six files conflicted, all in `packages/pod-auth`; every conflict was resolved by keeping both
+   sides: the union of the `AUTHORED-BY` lines, both import blocks in `index.ts`, and the export
+   list `AmbiguousIssuerError, InjectedFetchError, InvalidInjectedResponseError,
+   OwnershipChangedError`. No code line of either side was dropped. Result: `330d69c2d`.
+2. `git diff 8a51401fb origin/feat/pod-media-loader -- packages/storage-client | git apply --3way`
+   (the optional `ReadResult.contentLength` from `fdf084a` that the vendored media loader reads;
+   applies cleanly). Result: `324f75d24`.
+
+**Known open review finding.** An adversarial review of `14143e09b` found a high-severity issue
+in the new storage discovery: on a Community Solid Server with the default root-storage
+configuration, pod-auth learns the origin root `/` as the credential boundary. A fix is being made
+on the same SDK branch. This pod-auth build has the issue and MUST be re-vendored once the fix
+lands. (The test server used for ArtCraft's webview runs uses per-pod storage, which this does
+not affect.)
+
+At that commit the pod-auth (944), storage-client (1305) and reactive-authentication (623) test
+suites pass. Built and packed as before, in a scratch worktree, with Node 24:
+
+```sh
+pnpm install --frozen-lockfile --filter "@jeswr/pod-auth..." --filter "@jeswr/storage-client..." \
+  --filter "@jeswr/pod-type-index..." --filter "@jeswr/pod-access..." --filter "@jeswr/solid-sdk-workspace"
+pnpm exec turbo run build --concurrency=2 --filter "@jeswr/pod-auth..." --filter "@jeswr/storage-client..."
+for p in pod-auth reactive-authentication storage-client; do (cd packages/$p && pnpm pack --pack-destination <dir>); done
+# then rename each to <name>-<version>-14143e0.tgz
+```
+
+Only these three are replaced. Every other tarball is kept, for one of two reasons:
+
+- `desktop-auth`, `pod-media-store`, `pod-media-loader` and `solid-creative-assets` do not exist
+  at `14143e09b`; they come from the draft branches named in the table. Their manifests name
+  `@jeswr/storage-client` and the others by plain version, which the `overrides` map to the new
+  tarballs; every name they import from `@jeswr/storage-client` (root and `/helpers`) is still
+  exported by the new build.
+- The rest (`guarded-fetch`, `storage-capabilities`, `pod-type-index`, `pod-access`, `fetch-rdf`,
+  `model-runtime`, `rdf-serialize`, `suite-vocab`, `solid-odrl`, `solid-agent-notify`,
+  `suite-native`) either did not change in #690 or changed only in ways the app does not need
+  (`pod-type-index` gained an abort option and, on main, a generated model needing newer
+  `model-runtime` and `suite-vocab`, which the kept `solid-creative-assets` was not built
+  against). Every name the new pod-auth and storage-client import from `guarded-fetch`,
+  `storage-capabilities`, `fetch-rdf`, `rdf-serialize` and `reactive-authentication` is exported
+  by the vendored copy.
+
+No package manifest's dependencies changed, so no third-party package enters the production
+closure. The lockfile integrity values are the real SHA-512 of the new files. These replace the
+older `pod-auth`, `reactive-authentication` and `storage-client` builds listed above; the
+current-set table above carries the new names and hashes. Replace them with merged builds when
+#677, #690 and the loader's storage-client change land.
