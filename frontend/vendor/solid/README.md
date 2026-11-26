@@ -224,7 +224,7 @@ One tarball per package. Where a package was re-packed several times in the sect
 | `jeswr-guarded-fetch-0.1.0.tgz` | feat/desktop-auth 225a553 (dist identical at d20ddf6) | `198d0b6b78381df298071345d87d7769888ab467140d94b2ea11417e812d4f97` |
 | `jeswr-model-runtime-0.2.0.tgz` | feat/creative-assets d6dcc9a (main d20ddf6) | `cf164e21246efe5c8ef3455df3f604592bf39eaaa8e7e457e27e48d852f71351` |
 | `jeswr-pod-access-0.1.0.tgz` | feat/pod-media-store ce7d766 | `9295bc1f24ddcaf7dd0e4be2860ebf0a5e1057a533e614de30126f1e1819220c` |
-| `jeswr-pod-auth-0.1.0-7c09caa.tgz` | 7c09caa78 (draft PR #690, review fix) + b58caad (draft PR #677), local merge 8362139e6 | `9a89fc5d679baf74bfa278ecc8ff5132b0151d372a79c0b0960f2e79e6de7e68` |
+| `jeswr-pod-auth-0.1.0-c86c6ea.tgz` | c86c6eab7 (draft PR #690, review fixes) + b58caad (draft PR #677), local merge 80eacc891 | `9da5779d304951aa834fcc3714e97b102f3d93298aa2985f15900296e2198dbd` |
 | `jeswr-pod-media-loader-0.1.0-fdf084a.tgz` | feat/pod-media-loader fdf084a | `b69d680862d923516b339df849693303ca7b73416f4f3feca8079e9163b3e9fc` |
 | `jeswr-pod-media-store-0.1.0.tgz` | feat/pod-media-store 690ecee7c | `2814fa93aee8e4edb1bf2f986d97b96cd0dbe27c4435ff2dbd39ef2b8032a998` |
 | `jeswr-pod-type-index-0.1.0.tgz` | fix/pod-type-index-vite-regex 2f1ece2 | `ecc187de5fc5bfd202da239ada0a957ce69b067cda31b7deec670d833039d3cf` |
@@ -312,3 +312,13 @@ roots" or a transient failure. The pod-auth suite (964 tests) passes at that com
 manifest and dependencies are unchanged; only `dist/boundary.js` and `dist/types.d.ts` differ,
 plus the README and skill). The reactive-authentication and storage-client tarballs from
 `14143e0` are unchanged: the fix touches neither.
+
+It was packed once more from `c86c6eab7` ("never widen past a passed container in WebID-document
+storage discovery"), merged into the same local build branch without conflicts (result
+`80eacc891`; #677's rethrow of host refusals is still in `readStorageDescription`). The pod-auth
+suite (979 tests) passes there. Behaviour that matters here: on a server whose storage description
+claims each pod root itself (CSS's file-based configuration, as on the webview test server), a
+profile without `pim:storage` now learns no storage at all (`source: "none"`), on purpose, because
+that case cannot be told apart from an attack; only CSS's default layout (a typed pod container
+under a claimed origin root) is discovered. `jeswr-pod-auth-0.1.0-7c09caa.tgz` is replaced by
+`jeswr-pod-auth-0.1.0-c86c6ea.tgz`, SHA-256 `9da5779d304951aa834fcc3714e97b102f3d93298aa2985f15900296e2198dbd`; manifest and dependencies unchanged.
