@@ -10,6 +10,8 @@ use tauri::{AppHandle, Manager};
 /// The Tauri side of the window sequence in `pod_mode::rebuild`.
 pub struct TauriSurface {
   app: AppHandle,
+  /// The token of this rebuild's exit guard, from `PodModeState::begin_rebuild`.
+  guard: Mutex<Option<u64>>,
 }
 
 impl Surface for TauriSurface {
@@ -19,17 +21,20 @@ impl Surface for TauriSurface {
   /// asks to exit when no window is left) after the listener that woke this rebuild. Dropped at
   /// once, the guard was off by then and the app exited (seen on WebKitGTK, roughly every other
   /// rebuild). Queued, it drops only after the runtime handled that `Destroyed` and created the
-  /// new window, which were posted before it.
+  /// new window, which were posted before it. The queued release carries this rebuild's token, so
+  /// it cannot end the guard of a later rebuild that started before it ran.
   fn guard_exit(&self, on: bool) {
     let state = self.app.state::<Arc<PodModeState>>().inner().clone();
+    let mut guard = self.guard.lock().unwrap_or_else(|p| p.into_inner());
     if on {
-      state.set_rebuilding(true);
+      *guard = Some(state.begin_rebuild());
       return;
     }
+    let Some(token) = guard.take() else { return };
     let queued = state.clone();
-    if let Err(err) = self.app.run_on_main_thread(move || queued.set_rebuilding(false)) {
+    if let Err(err) = self.app.run_on_main_thread(move || queued.end_rebuild(token)) {
       warn!("pod mode: could not queue the end of the exit guard, ending it now: {err}");
-      state.set_rebuilding(false);
+      state.end_rebuild(token);
     }
   }
 
@@ -85,7 +90,7 @@ impl TauriWindows {
 impl Windows for TauriWindows {
   async fn rebuild(&self) -> Result<(), ()> {
     info!("pod mode: rebuilding the main window");
-    rebuild_main(&TauriSurface { app: self.app.clone() }).await.map_err(|_| ())
+    rebuild_main(&TauriSurface { app: self.app.clone(), guard: Mutex::new(None) }).await.map_err(|_| ())
   }
 
   fn restart(&self) {

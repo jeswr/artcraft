@@ -3,7 +3,7 @@ use pod_mode::origin::Loopback;
 use pod_mode::record::{self, PodModeRecord};
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The pod-mode record, read from disk once at start and replaced only through `replace`, which
@@ -15,7 +15,7 @@ pub struct PodModeState {
   record: Mutex<PodModeRecord>,
   fresh: Mutex<Option<String>>,
   /// Held while the main window is being rebuilt so the app does not exit in between.
-  rebuilding: AtomicBool,
+  rebuild_guard: Mutex<RebuildGuard>,
   /// The policy header of the window built last. The response handler reads this live: on
   /// WebKitGTK the first window's handler stays registered for later windows (shown in a throwaway
   /// app), so a handler that captured its own copy would keep serving the first window's policy.
@@ -30,13 +30,22 @@ pub struct PodModeState {
 
 type RestrictedHook = Box<dyn Fn() + Send + Sync>;
 
+/// The exit guard, with the generation of the rebuild that set it last. The release of a rebuild
+/// is queued on the event loop, so it can run after a later rebuild set the guard again; the
+/// generation lets it end only its own rebuild's guard.
+#[derive(Default)]
+struct RebuildGuard {
+  on: bool,
+  generation: u64,
+}
+
 impl PodModeState {
   pub fn load(settings_dir: PathBuf, identifier: &str) -> Self {
     let dir = record::record_dir(&settings_dir, identifier);
     // The dialog budget is per run of the app: it starts again when the app starts outside pod mode.
     let record = record::load(&dir, Loopback::for_this_build()).effective().budget_reset_on_start();
     let restricted_periods = AtomicU64::new(u64::from(record.restricted()));
-    Self { dir, record: Mutex::new(record), fresh: Mutex::new(None), rebuilding: AtomicBool::new(false), policy: Mutex::new(None), restricted_periods, on_restricted: Mutex::new(Vec::new()) }
+    Self { dir, record: Mutex::new(record), fresh: Mutex::new(None), rebuild_guard: Mutex::new(RebuildGuard::default()), policy: Mutex::new(None), restricted_periods, on_restricted: Mutex::new(Vec::new()) }
   }
 
   /// Pod mode, or pod credentials not yet confirmed wiped: no usage analytics may run.
@@ -55,11 +64,23 @@ impl PodModeState {
   }
 
   pub fn rebuilding(&self) -> bool {
-    self.rebuilding.load(Ordering::SeqCst)
+    self.rebuild_guard.lock().unwrap_or_else(|p| p.into_inner()).on
   }
 
-  pub fn set_rebuilding(&self, value: bool) {
-    self.rebuilding.store(value, Ordering::SeqCst);
+  /// Turns the exit guard on for a new rebuild and returns its token, for `end_rebuild`.
+  pub fn begin_rebuild(&self) -> u64 {
+    let mut guard = self.rebuild_guard.lock().unwrap_or_else(|p| p.into_inner());
+    guard.generation += 1;
+    guard.on = true;
+    guard.generation
+  }
+
+  /// Turns the exit guard off, unless a later rebuild has turned it on since `token` was issued.
+  pub fn end_rebuild(&self, token: u64) {
+    let mut guard = self.rebuild_guard.lock().unwrap_or_else(|p| p.into_inner());
+    if guard.generation == token {
+      guard.on = false;
+    }
   }
 
   pub fn set_policy(&self, policy: Option<String>) {
@@ -214,7 +235,22 @@ mod tests {
     let base = tempfile::tempdir().unwrap();
     let state = PodModeState::load(base.path().to_path_buf(), "x.y");
     assert!(!state.rebuilding());
-    state.set_rebuilding(true);
+    let token = state.begin_rebuild();
     assert!(state.rebuilding());
+    state.end_rebuild(token);
+    assert!(!state.rebuilding());
+  }
+
+  #[test]
+  fn a_late_release_does_not_end_a_later_rebuilds_guard() {
+    let base = tempfile::tempdir().unwrap();
+    let state = PodModeState::load(base.path().to_path_buf(), "x.y");
+    let first = state.begin_rebuild();
+    // A second rebuild sets the guard before the first one's queued release runs.
+    let second = state.begin_rebuild();
+    state.end_rebuild(first);
+    assert!(state.rebuilding());
+    state.end_rebuild(second);
+    assert!(!state.rebuilding());
   }
 }
