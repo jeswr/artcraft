@@ -85,11 +85,14 @@ export function PodSignedOut({
     );
   }
   return (
-    <div className="flex h-64 items-center justify-center px-6" role="alert" data-testid="pod-signed-out">
+    <div className="flex h-64 items-center justify-center px-6" data-testid="pod-signed-out">
       <div className="flex max-w-sm flex-col items-center gap-3 text-center text-sm">
-        <div className="text-base-fg/70">{SIGNED_OUT_TITLE}</div>
-        <div className="text-xs text-base-fg/60">{SIGNED_OUT_DETAIL}</div>
-        {/* Announced when it changes: the answer to a press is shown here, where the person is looking. */}
+        <div role="alert" className="flex flex-col items-center gap-3">
+          <div className="text-base-fg/70">{SIGNED_OUT_TITLE}</div>
+          <div className="text-xs text-base-fg/60">{SIGNED_OUT_DETAIL}</div>
+        </div>
+        {/* Announced when it changes: the answer to a press is shown here, where the person is looking.
+            Outside the alert, so a change re-announces only this line, not the whole alert. */}
         <div role="status" aria-live="polite" className="text-xs text-amber-300" data-testid="pod-signed-out-status">
           {asking ? "Waiting for your answer in ArtCraft's dialog." : problem}
         </div>

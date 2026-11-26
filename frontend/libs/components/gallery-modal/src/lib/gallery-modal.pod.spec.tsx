@@ -218,6 +218,8 @@ describe("what the gallery lets go of", () => {
     expect(screen.getByRole("button", { name: "My pod" }).getAttribute("aria-pressed")).toBe("true");
     expect((screen.getByRole("button", { name: "Sign in again" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("pod-signed-out-status").textContent).toMatch(/dialog/);
+    // The status line is its own live region, outside the alert, so its changes do not re-announce the alert.
+    expect(screen.getByRole("alert").contains(screen.getByTestId("pod-signed-out-status"))).toBe(false);
     rerender(
       <PodGalleryProvider access={null} signedOut={{ ...signedOut, problem: "Out of tries.", canPress: false }}>
         <GalleryModal mode="view" />
