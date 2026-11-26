@@ -35,6 +35,13 @@ impl ActivityGate {
     self.seen_periods = restricted_periods;
     ActivityStep::Report { new_session }
   }
+
+  /// Whether a report prepared after the last `step` may still go out: the window has not become
+  /// restricted since, not even briefly. Checked again right before sending, because preparing the
+  /// report takes time in which pod mode can be entered.
+  pub fn may_send(&self, restricted: bool, restricted_periods: u64) -> bool {
+    !restricted && restricted_periods == self.seen_periods
+  }
 }
 
 #[cfg(test)]
@@ -70,6 +77,20 @@ mod tests {
     assert_eq!(gate.step(false, 0), ActivityStep::Report { new_session: false });
     // Pod mode was entered and left while the reporter slept.
     assert_eq!(gate.step(false, 1), ActivityStep::Report { new_session: true });
+  }
+
+  #[test]
+  fn a_prepared_report_is_not_sent_once_the_window_has_become_restricted() {
+    let mut gate = ActivityGate::default();
+    assert_eq!(gate.step(false, 0), ActivityStep::Report { new_session: false });
+    assert!(gate.may_send(false, 0));
+    // Pod mode was entered while the report was being prepared.
+    assert!(!gate.may_send(true, 1));
+    // ...or entered and left again.
+    assert!(!gate.may_send(false, 1));
+    // The next pass starts a new session, whose report may go out.
+    assert_eq!(gate.step(false, 1), ActivityStep::Report { new_session: true });
+    assert!(gate.may_send(false, 1));
   }
 
   #[test]

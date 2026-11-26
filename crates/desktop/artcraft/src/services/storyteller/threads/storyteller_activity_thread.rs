@@ -134,6 +134,12 @@ async fn polling_loop(
       other_page_prompt_count: Some(usage_data.other_page_prompt_count),
     };
 
+    // Pod mode may have been entered while the report was prepared: send nothing then, and let the
+    // next pass hold or start a new session.
+    if !gate.may_send(pod_mode.restricted(), pod_mode.restricted_periods()) {
+      continue;
+    }
+
     debug!("Logging active user with storyteller.");
 
     let result = log_active_user_v2(
