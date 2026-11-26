@@ -1788,6 +1788,24 @@ describe('exposure pauses the person can act on', () => {
     expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
   });
 
+  it('says the pod refused the person when the store could not be opened after a 401, and waits for a check instead of retrying', async () => {
+    const t = setup([hostedFile(1)]);
+    t.open.fail = 'refused';
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary().paused).toBe('storage-refused');
+    const opened = t.open.calls;
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(t.open.calls).toBe(opened);
+    t.open.fail = null;
+    t.mirror.recheckExposure();
+    await settle(t.mirror);
+    expect(t.open.calls).toBeGreaterThan(opened);
+    expect(t.mirror.summary().paused).toBeNull();
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
   it('treats an exposed storage root the same way, and an exposed library as exposed', async () => {
     const t = setup([hostedFile(1)]);
     t.store.exposure = 'exposed';

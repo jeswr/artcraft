@@ -414,7 +414,7 @@ export function fakeBytes(hosted?: FakeHosted): FakeBytes {
   return fake;
 }
 
-export type FakeOpen = OpenStore & { calls: number; fail: 'offline' | 'failed' | null; allowed: ((containerUrl: string) => boolean)[] };
+export type FakeOpen = OpenStore & { calls: number; fail: 'offline' | 'failed' | 'refused' | null; allowed: ((containerUrl: string) => boolean)[] };
 
 export function openFake(store: PodStorePort | (() => PodStorePort)): FakeOpen {
   const open = (async (_signal: AbortSignal, options: { allowUnknownExposureFor: (containerUrl: string) => boolean }) => {

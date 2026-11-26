@@ -70,6 +70,18 @@ describe("opening the pod store", () => {
     expect(result.store.refusedSignIn?.()).toBe(true);
   });
 
+  it("says the pod refused the person when the store could not be opened after a 401", async () => {
+    const podFetch = vi.fn(async () => new Response(null, { status: 401 }));
+    const open = createStoreOpener({ podFetch: () => podFetch as unknown as typeof fetch, webId: WEB_ID, journal: createMemoryMirrorJournal() });
+    sdk.openCreativeAssetStore.mockImplementation(async () => {
+      await sdk.createPodClient.mock.calls.at(-1)?.[0].fetch("https://alice.example/settings/prefs.ttl");
+      return { ok: false, error: { kind: "failed" } };
+    });
+    expect(await open(signal, { allowUnknownExposureFor: () => false })).toEqual({ ok: false, reason: "refused" });
+    podFetch.mockImplementation(async () => new Response(null, { status: 403 }));
+    expect(await open(signal, { allowUnknownExposureFor: () => false })).toEqual({ ok: false, reason: "failed" });
+  });
+
   it("scopes the delete journal to this WebID and this storage", async () => {
     const journal = createMemoryMirrorJournal();
     const spy = vi.spyOn(journal, "deletesFor");

@@ -127,8 +127,10 @@ export type ItemState =
   | { kind: 'remove-failed'; reason: FailureReason; attempts: number };
 
 /**
- * `storage-refused` is `storage-unsafe` when the pod also refused a request with 401 while the store was
- * opened: the pod was not read as the signed-in person, so whether the storage is private is not known.
+ * `storage-refused`: the pod refused a request with 401 while the store was opened, and the store then
+ * found no safe library (otherwise `storage-unsafe`) or could not be opened at all (otherwise
+ * `store-unavailable`, retried). The pod was not read as the signed-in person, so whether the storage
+ * is private is not known; it waits for the person to check again.
  */
 export type PauseReason = 'offline' | 'session' | 'exposed' | 'exposure-unknown' | 'storage-unsafe' | 'storage-refused' | 'store-unavailable' | 'journal-closed' | 'stopped';
 

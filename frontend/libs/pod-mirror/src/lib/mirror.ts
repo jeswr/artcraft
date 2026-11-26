@@ -78,7 +78,11 @@ export interface PodStorePort {
   refusedSignIn?(): boolean;
 }
 
-export type OpenStoreResult = { ok: true; store: PodStorePort } | { ok: false; reason: 'offline' | 'failed' };
+/**
+ * `refused`: the store could not be opened and the pod answered one of its requests with 401, so it
+ * was not read as the signed-in person (see `PodStorePort.refusedSignIn`).
+ */
+export type OpenStoreResult = { ok: true; store: PodStorePort } | { ok: false; reason: 'offline' | 'failed' | 'refused' };
 export interface LibraryReport {
   url: string | null;
   created: boolean;
@@ -1755,7 +1759,12 @@ export class PodMirror {
       const opened = await this.o.openStore(signal, { allowUnknownExposureFor: (url) => this.isConfirmed(url) }).catch(() => ({ ok: false as const, reason: 'failed' as const }));
       // A session change while this was opening: the store it built used the previous fetch.
       if (generation !== this.generation || !this.running) return;
-      if (!opened.ok) return this.retryPrepareLater(opened.reason);
+      if (!opened.ok) {
+        if (opened.reason !== 'refused') return this.retryPrepareLater(opened.reason);
+        // Retrying cannot help until the profile or the pod changes: pause until the person checks again.
+        this.blocked = 'storage-refused';
+        return;
+      }
       this.store = opened.store;
       this.storeAttempts = 0;
     }

@@ -77,8 +77,10 @@ export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; w
         signal,
       });
       if (opened.ok) return { ok: true, store: { ...asPodStorePort(opened.value, storage.root), refusedSignIn: () => refused } };
+      if (refused) return { ok: false, reason: "refused" };
       return { ok: false, reason: opened.error.kind === "offline" ? "offline" : "failed" };
     } catch {
+      if (refused && !signal.aborted) return { ok: false, reason: "refused" };
       return { ok: false, reason: signal.aborted ? "failed" : "offline" };
     }
   };
