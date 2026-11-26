@@ -8,8 +8,8 @@ import { sessionPortFor } from "./mirror-ports";
 import { fakePodMode, memoryHint, memoryMarker, memoryPending } from "../../../../../libs/pod-session/src/lib/testing";
 
 /**
- * M4 of the delta review: can a background read through the gallery's fetch (`session.getFetch()`,
- * the only fetch `gallery-runtime.ts` uses) open the system browser by itself?
+ * M4 of the delta review: can a background read through the fetch the gallery and the mirror use
+ * (`session.getBackgroundFetch()`) open the system browser by itself?
  *
  * The wiring is ArtCraft's real one: `createPodSession` + `createDefaultAuth` (pod-auth with
  * desktop-auth's `getCode`), against pod-auth's in-memory identity provider; `host.openUrl` is the
@@ -77,7 +77,7 @@ async function connected() {
   await signedIn;
   expect(session.getState().kind).toBe("connected");
   expect(opened).toHaveLength(1); // the person's own sign-in
-  return { op, session, opened, podWindow, issuer, podFetch: session.getFetch()! };
+  return { op, session, opened, podWindow, issuer, podFetch: session.getBackgroundFetch()! };
 }
 
 /** Five minutes is the mock token's lifetime: a day later the cached access token is expired. */
@@ -107,7 +107,20 @@ describe("a background read through the session's fetch", () => {
     // The session is no longer connected, so the mirror pauses and the gallery says "sign in again".
     expect(session.getState()).toEqual({ kind: "error", error: "session-ended" });
     expect(session.getFetch()).toBeNull();
+    expect(session.getBackgroundFetch()).toBeNull();
     expect(sessionPortFor(session, op.webId).isConnected()).toBe(false);
+  });
+
+  it("after a refresh the provider could not answer for now, stays connected, opens nothing, and the next read works", async () => {
+    const { op, session, opened, podFetch } = await connected();
+    op.failRefresh("temporarily_unavailable");
+    aDayLater();
+    await podFetch(`${op.root}private`).catch(() => undefined);
+    expect(opened).toHaveLength(1);
+    expect(session.getState().kind).toBe("connected");
+    op.failRefresh(undefined);
+    expect((await podFetch(`${op.root}private`)).status).toBe(200);
+    expect(opened).toHaveLength(1);
   });
 
   it("after the gate ended the session, signs in again from the same pod window, opening the browser only after the clicks (M1)", async () => {
