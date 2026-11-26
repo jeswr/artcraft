@@ -34,21 +34,37 @@ describe("the hosted calls the mirror makes", () => {
     }
   });
 
+  it("hands the mirror's signal to every hosted request, so stopping the mirror ends them", async () => {
+    api.GetMediaFileByToken.mockResolvedValue({ success: true, data: { token: "m_1" } });
+    api.GetPromptsByToken.mockResolvedValue({ success: true, data: { token: "p_1" } });
+    api.ListMediaFilesByTokens.mockResolvedValue({ success: true, data: [] });
+    api.ListUserMediaFiles.mockResolvedValue({ success: true, data: [] });
+    const { signal } = new AbortController();
+    const client = createHostedClient("alice_hosted");
+    await client.getMediaFile("m_1", signal);
+    await client.getPrompt("p_1", signal);
+    await client.getMediaFiles(["m_1"], signal);
+    await client.listUserMediaFiles(0, 10, signal);
+    for (const call of [api.GetMediaFileByToken, api.GetPromptsByToken, api.ListMediaFilesByTokens, api.ListUserMediaFiles]) {
+      expect(call.mock.calls[0][1]).toEqual({ signal });
+    }
+  });
+
   it("passes the token on and returns the item", async () => {
     api.GetMediaFileByToken.mockResolvedValue({ success: true, data: { token: "m_1" } });
     api.GetPromptsByToken.mockResolvedValue({ success: true, data: { token: "p_1" } });
     const client = createHostedClient("alice_hosted");
     expect(await client.getMediaFile("m_1")).toEqual({ ok: true, value: { token: "m_1" } });
-    expect(api.GetMediaFileByToken).toHaveBeenCalledWith({ mediaFileToken: "m_1" });
+    expect(api.GetMediaFileByToken).toHaveBeenCalledWith({ mediaFileToken: "m_1" }, { signal: undefined });
     expect(await client.getPrompt("p_1")).toEqual({ ok: true, value: { token: "p_1" } });
-    expect(api.GetPromptsByToken).toHaveBeenCalledWith({ token: "p_1" });
+    expect(api.GetPromptsByToken).toHaveBeenCalledWith({ token: "p_1" }, { signal: undefined });
   });
 
   it("lists the signed-in user's whole library, uploads included, one page at a time", async () => {
     api.ListUserMediaFiles.mockResolvedValue({ success: true, data: [{ token: "m_1" }], pagination: { total_page_count: 7 } });
     const client = createHostedClient("alice_hosted");
     expect(await client.listUserMediaFiles(2, 100)).toEqual({ ok: true, value: { items: [{ token: "m_1" }], totalPages: 7 } });
-    expect(api.ListUserMediaFiles).toHaveBeenCalledWith({ username: "alice_hosted", page_index: 2, page_size: 100, include_user_uploads: true });
+    expect(api.ListUserMediaFiles).toHaveBeenCalledWith({ username: "alice_hosted", page_index: 2, page_size: 100, include_user_uploads: true }, { signal: undefined });
     api.ListUserMediaFiles.mockResolvedValue({ success: true, data: [] });
     expect(await client.listUserMediaFiles(0, 10)).toMatchObject({ ok: true, value: { totalPages: null } });
     api.ListUserMediaFiles.mockResolvedValue({ success: false, errorMessage: "boom" });
@@ -59,7 +75,7 @@ describe("the hosted calls the mirror makes", () => {
     api.ListMediaFilesByTokens.mockResolvedValue({ success: true, data: [{ token: "m_1" }] });
     const client = createHostedClient("alice_hosted", () => "someone_else");
     expect(await client.getMediaFiles(["m_1", "m_2"])).toEqual({ ok: true, value: [{ token: "m_1" }] });
-    expect(api.ListMediaFilesByTokens).toHaveBeenCalledWith({ mediaTokens: ["m_1", "m_2"] });
+    expect(api.ListMediaFilesByTokens).toHaveBeenCalledWith({ mediaTokens: ["m_1", "m_2"] }, { signal: undefined });
     expect(client.currentUsername()).toBe("someone_else");
     expect(client.currentHost()).toBe("https://api.example");
     api.host.mockReturnValue("http://localhost:12345");

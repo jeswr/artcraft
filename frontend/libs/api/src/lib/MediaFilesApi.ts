@@ -82,11 +82,14 @@ export class MediaFilesApi extends ApiManager {
       });
   }
 
-  public async ListMediaFilesByTokens({
-    mediaTokens,
-  }: {
-    mediaTokens: string[];
-  }): Promise<ApiResponse<MediaFile[]>> {
+  public async ListMediaFilesByTokens(
+    {
+      mediaTokens,
+    }: {
+      mediaTokens: string[];
+    },
+    { signal }: { signal?: AbortSignal } = {},
+  ): Promise<ApiResponse<MediaFile[]>> {
     if (mediaTokens.length === 0) {
       return { success: true, data: [] };
     }
@@ -103,7 +106,7 @@ export class MediaFilesApi extends ApiManager {
       success: boolean;
       media_files: MediaFile[];
       error_reason?: string;
-    }>({ endpoint })
+    }>({ endpoint, signal })
       .then((response) => ({
         success: response.success,
         data: response.media_files,
@@ -135,16 +138,19 @@ export class MediaFilesApi extends ApiManager {
       });
   }
 
-  public async GetMediaFileByToken({
-    mediaFileToken,
-  }: {
-    mediaFileToken: string;
-  }): Promise<ApiResponse<MediaFile>> {
+  public async GetMediaFileByToken(
+    {
+      mediaFileToken,
+    }: {
+      mediaFileToken: string;
+    },
+    { signal }: { signal?: AbortSignal } = {},
+  ): Promise<ApiResponse<MediaFile>> {
     const endpoint = `${this.getApiSchemeAndHost()}/v1/media_files/file/${mediaFileToken}`;
     return await this.get<{
       success: boolean;
       media_file: MediaFile;
-    }>({ endpoint })
+    }>({ endpoint, signal })
       .then((response) => ({
         success: response.success,
         data: response.media_file,
@@ -272,7 +278,8 @@ export class MediaFilesApi extends ApiManager {
   }
 
   public async ListUserMediaFiles(
-    query: ListUserMediaQuery
+    query: ListUserMediaQuery,
+    { signal }: { signal?: AbortSignal } = {},
   ): Promise<ApiResponse<MediaFile[], Pagination>> {
     const userName = query.username;
     const endpoint = `${this.getApiSchemeAndHost()}/v1/media_files/list/user/${userName}`;
@@ -293,7 +300,7 @@ export class MediaFilesApi extends ApiManager {
       success: boolean;
       results: MediaFile[];
       pagination?: Pagination;
-    }>({ endpoint, query: queryWithStrings })
+    }>({ endpoint, query: queryWithStrings, signal })
       .then((response) => {
         let results = response.results ?? [];
         if (query.user_uploads_only) {

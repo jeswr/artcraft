@@ -36,22 +36,27 @@ export function createHostedClient(
   return {
     currentUsername,
     currentHost,
-    async getMediaFiles(tokens) {
-      return toResult(await media.ListMediaFilesByTokens({ mediaTokens: [...tokens] }));
+    // Each call passes the mirror's signal on, so stopping the mirror ends a stalled hosted request
+    // instead of waiting for the network to give up.
+    async getMediaFiles(tokens, signal) {
+      return toResult(await media.ListMediaFilesByTokens({ mediaTokens: [...tokens] }, { signal }));
     },
-    async getMediaFile(token) {
-      return toResult(await media.GetMediaFileByToken({ mediaFileToken: token }));
+    async getMediaFile(token, signal) {
+      return toResult(await media.GetMediaFileByToken({ mediaFileToken: token }, { signal }));
     },
-    async getPrompt(token) {
-      return toResult(await prompts.GetPromptsByToken({ token }));
+    async getPrompt(token, signal) {
+      return toResult(await prompts.GetPromptsByToken({ token }, { signal }));
     },
-    async listUserMediaFiles(pageIndex, pageSize) {
-      const response = await media.ListUserMediaFiles({
-        username,
-        page_index: pageIndex,
-        page_size: pageSize,
-        include_user_uploads: true,
-      });
+    async listUserMediaFiles(pageIndex, pageSize, signal) {
+      const response = await media.ListUserMediaFiles(
+        {
+          username,
+          page_index: pageIndex,
+          page_size: pageSize,
+          include_user_uploads: true,
+        },
+        { signal },
+      );
       if (!response.success || !response.data) {
         return { ok: false, kind: NOT_FOUND.test(response.errorMessage ?? "") ? "not-found" : "unavailable" };
       }

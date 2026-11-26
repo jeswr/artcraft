@@ -111,10 +111,13 @@ export class ApiManager {
       method,
       query,
       body,
+      signal,
     }: {
       method: string;
       query?: Record<string, string | boolean | number | undefined>;
       body?: B;
+      /** Aborts the request, for a caller that stops waiting. */
+      signal?: AbortSignal;
     },
   ): Promise<T> {
     const queryInString =
@@ -144,6 +147,7 @@ export class ApiManager {
       }),
       credentials: "include",
       body: bodyInString,
+      ...(signal ? { signal } : {}),
     });
 
     if (!response.ok) {
@@ -191,11 +195,13 @@ export class ApiManager {
   protected get<T>({
     endpoint,
     query,
+    signal,
   }: {
     endpoint: string;
     query?: Record<string, string | boolean | number | undefined>;
+    signal?: AbortSignal;
   }): Promise<T> {
-    return this.fetch<null, T>(endpoint, { method: "GET", query });
+    return this.fetch<null, T>(endpoint, { method: "GET", query, ...(signal ? { signal } : {}) });
   }
 
   protected post<B, T>({
