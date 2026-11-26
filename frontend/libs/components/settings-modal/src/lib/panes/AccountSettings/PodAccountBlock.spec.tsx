@@ -452,6 +452,26 @@ it("does not say it is waiting for the pod when no storage was found for the Web
   expect(paused).not.toMatch(/waiting for your pod/);
 });
 
+it("offers no Check again while no storage is known, and points to reopening ArtCraft after the profile is fixed", () => {
+  renderWithMirror({ ...SUMMARY, paused: "storage-refused", exposureTarget: "https://pod.example/" }, {}, { kind: "connected", webId: WEBID, storageUnknown: "no-storage-declared" });
+  expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+  expect(screen.getByTestId("pod-mirror-paused").textContent).toMatch(/reopen ArtCraft/);
+  expect(screen.getByTestId("pod-storage-unknown").textContent).toMatch(/Add your pod's address to your profile/);
+});
+
+it("still says copying is paused while no storage is known, though no mirror runs then", () => {
+  const fake = fakeSession({ kind: "connected", webId: WEBID, storageUnknown: "no-storage-declared" });
+  render(
+    <PodSessionProvider session={fake.session} startNow={false}>
+      <PodMirrorViewProvider view={null}>
+        <PodAccountBlock />
+      </PodMirrorViewProvider>
+    </PodSessionProvider>,
+  );
+  expect(screen.getByTestId("pod-mirror-paused").textContent).toMatch(/cannot make requests to your pod as you/);
+  expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+});
+
 it("moves focus into the import confirmation and back to the status line when it closes", async () => {
   const user = userEvent.setup();
   renderWithMirror(SUMMARY);

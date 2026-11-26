@@ -428,13 +428,26 @@ const LeaveButton = ({ session, label }: { session: PodSession; label?: string }
 /**
  * How the copy to the pod is going: counts, why it is paused, and "Forget this account", which
  * deletes ArtCraft's local record of what was copied (never anything on the pod). Renders
- * nothing until the mirror exists.
+ * nothing until the mirror exists, except the pause line while no storage is known (no mirror runs then).
  */
+const STORAGE_UNKNOWN_PAUSE =
+  "Copying to your pod is paused: ArtCraft cannot make requests to your pod as you, for the reason given above. Checking again here does not help; do what it says, then close and reopen ArtCraft.";
+
 const PodMirrorStatus = ({ storageUnknown }: { storageUnknown?: StorageUnknownReason }) => {
   const view = usePodMirrorView();
   const summary = usePodMirrorSummary();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  // While no storage is known the mirror does not run and nothing here can help: "Check again"
+  // would be refused the same way. The reason above says what does (fix the profile, then reopen
+  // ArtCraft), so this line points at it and offers no buttons.
+  if (storageUnknown) {
+    return (
+      <div role="status" className="text-sm text-base-fg/80" data-testid="pod-mirror-status">
+        <span data-testid="pod-mirror-paused">{STORAGE_UNKNOWN_PAUSE}</span>
+      </div>
+    );
+  }
   if (!view || !summary) return null;
   if (view.unavailable) {
     return (
@@ -464,10 +477,7 @@ const PodMirrorStatus = ({ storageUnknown }: { storageUnknown?: StorageUnknownRe
       <div role="status" aria-live="polite" className="flex flex-col gap-1 text-sm text-base-fg/80">
         {summary.paused && summary.paused !== "stopped" && (
           <span data-testid="pod-mirror-paused">
-            {/* While no storage is known, a refused pod or one that cannot be opened has one cause: say it instead of guessing or waiting. */}
-            {(summary.paused === "storage-refused" || summary.paused === "store-unavailable") && storageUnknown
-              ? "Paused: ArtCraft cannot make requests to your pod as you, for the reason given above."
-              : describePause(summary.paused)}
+            {describePause(summary.paused)}
           </span>
         )}
         {summary.paused === "exposure-unknown" && summary.exposureTarget && (
