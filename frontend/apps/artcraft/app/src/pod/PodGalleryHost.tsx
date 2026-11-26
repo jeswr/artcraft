@@ -1,5 +1,5 @@
 import { PodGalleryProvider, PodLibraryOpenError, createPodLibraryController, type PodGalleryAccess, type PodGallerySignedOut, type PodGallerySignInStep } from "@storyteller/pod-gallery";
-import { ERROR_TEXT, usePodSessionState, type PodSession, type PodSessionState } from "@storyteller/pod-session";
+import { ERROR_TEXT, STORAGE_UNKNOWN_TEXT, usePodSessionState, type PodSession, type PodSessionState } from "@storyteller/pod-session";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 const DECLINED_TEXT = "You declined in ArtCraft's dialog. Choose Sign in again to be asked again.";
@@ -44,7 +44,12 @@ export function PodGalleryHost({ session, children }: { session: PodSession; chi
   }, [controller, webId]);
   useEffect(() => () => controller.dispose(), [controller]);
 
-  const access = useMemo<PodGalleryAccess | null>(() => (webId ? { sessionKey: webId, open: () => controller.open() } : null), [controller, webId]);
+  // No storage found: the same sentence Settings shows, so "My pod" explains it instead of failing a read.
+  const storageUnknown = state.kind === "connected" && state.storageUnknown ? STORAGE_UNKNOWN_TEXT[state.storageUnknown] : undefined;
+  const access = useMemo<PodGalleryAccess | null>(
+    () => (webId ? { sessionKey: webId, open: () => controller.open(), ...(storageUnknown ? { storageUnknown } : {}) } : null),
+    [controller, webId, storageUnknown],
+  );
 
   // Set by a press of "Sign in again" here: from then on "My pod" stays while the app asks and after
   // its answer, which the gallery shows, instead of switching to the ArtCraft library.

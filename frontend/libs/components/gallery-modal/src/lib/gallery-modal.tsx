@@ -101,7 +101,7 @@ import {
   type GallerySource,
 } from "@storyteller/pod-gallery";
 import { PodPanelBoundary } from "./pod/PodPanelBoundary";
-import { PodPanelFrame, PodSignedOut, PodSkeleton } from "./pod/PodPanelFrame";
+import { PodPanelFrame, PodSignedOut, PodSkeleton, PodStorageUnknown } from "./pod/PodPanelFrame";
 
 // The "My pod" source: a separate chunk, fetched only when a connected pod's gallery shows it.
 const PodGalleryPanel = React.lazy(() => import("./pod/PodGalleryPanel"));
@@ -2652,6 +2652,17 @@ export const GalleryModal = React.memo(
                 canPress={podSignedOut.canPress}
                 step={podSignedOut.step}
               />
+            </PodPanelFrame>
+          ) : showPod && podAccess?.storageUnknown ? (
+            // Connected, but no request can carry the person's credentials: say why, read nothing.
+            <PodPanelFrame
+              sourceSwitch={<PodSourceSwitch source={source} onChange={chooseSource} focusOnMount={switchFocus} />}
+              onClose={() => {
+                clearBulkSelection();
+                galleryModalVisibleViewMode.value = false;
+              }}
+            >
+              <PodStorageUnknown sentence={podAccess.storageUnknown} />
             </PodPanelFrame>
           ) : showPod && podAccess ? (
             (() => {

@@ -185,6 +185,31 @@ describe("what the gallery lets go of", () => {
     expect(screen.getByText("All Assets", { selector: "button" })).toBeTruthy();
   });
 
+  it("says why the pod cannot be read as the person when no storage was found, offers no sign-in, and reads nothing", async () => {
+    const pod = testPod([page([asset(1)])], { files: pngFiles(1) });
+    const open = vi.fn(async () => pod.library);
+    const sentence = "ArtCraft cannot make requests to your pod as you: the reason Settings gives.";
+    render(
+      <PodGalleryProvider access={{ sessionKey: KEY, open, storageUnknown: sentence }}>
+        <GalleryModal mode="view" />
+      </PodGalleryProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "My pod" }));
+    await act(async () => undefined);
+    expect(screen.getByRole("alert").textContent).toContain(sentence);
+    // Signing in again cannot help here, so neither the words nor the button are offered.
+    expect(screen.queryByText(/Sign in to your pod again/)).toBeNull();
+    expect(screen.queryByText(/Couldn't read your pod library/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sign in again" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // Nothing is read from the pod as nobody, and the panel's code is not loaded.
+    expect(open).not.toHaveBeenCalled();
+    expect(world.panelLoads).toBe(0);
+    // Still My pod, not the ArtCraft library behind it.
+    expect(screen.getByRole("button", { name: "My pod" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByText("All Assets", { selector: "button" })).toBeNull();
+  });
+
   it("keeps My pod when the session ends there, says to sign in again and offers it, and releases the pictures", async () => {
     const pod = testPod([page([asset(1), asset(2)])], { files: pngFiles(2) });
     const { rerender } = render(

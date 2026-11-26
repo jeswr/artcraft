@@ -66,6 +66,9 @@ export const SIGNED_OUT_TITLE = "Sign in to your pod again";
 export const SIGNED_OUT_DETAIL =
   "Your pod session has ended, so ArtCraft stopped reading your pod. Nothing opened your browser. Sign in again to see your pod here; ArtCraft first asks you to confirm in a separate dialog and reloads this window.";
 
+/** "My pod" while no pod request can carry the person's credentials; the reason comes from the app. */
+export const STORAGE_UNKNOWN_TITLE = "Your pod can't be read as you";
+
 /** "My pod" while a pod window is part-way through signing in. */
 export const SIGN_IN_STEP_TITLE = "Finish signing in to your pod";
 

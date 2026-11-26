@@ -1,7 +1,7 @@
 import { CloseButton } from "@storyteller/ui-close-button";
 import { Modal } from "@storyteller/ui-modal";
 import type { ReactNode } from "react";
-import { SIGN_IN_STEP_TITLE, SIGNED_OUT_DETAIL, SIGNED_OUT_TITLE } from "./podMessages";
+import { SIGN_IN_STEP_TITLE, SIGNED_OUT_DETAIL, SIGNED_OUT_TITLE, STORAGE_UNKNOWN_TITLE } from "./podMessages";
 
 /**
  * The header of the "My pod" view (source switch, title, controls, close) around its body. The
@@ -36,6 +36,22 @@ export function PodSkeleton({ columns }: { columns: number }) {
       {Array.from({ length: columns * 3 }, (_, index) => (
         <div key={index} className="aspect-square animate-pulse bg-white/[0.06]" />
       ))}
+    </div>
+  );
+}
+
+/**
+ * The body of "My pod" while the account is connected but no pod request can carry its credentials
+ * (no storage was found for the WebID). The sentence is the one Settings shows, passed in by the
+ * app. No button: neither retrying nor signing in again helps.
+ */
+export function PodStorageUnknown({ sentence }: { sentence: string }) {
+  return (
+    <div className="flex h-64 items-center justify-center px-6" data-testid="pod-storage-unknown">
+      <div role="alert" className="flex max-w-md flex-col items-center gap-3 text-center text-sm">
+        <div className="text-base-fg/70">{STORAGE_UNKNOWN_TITLE}</div>
+        <div className="text-xs text-base-fg/60">{sentence}</div>
+      </div>
     </div>
   );
 }

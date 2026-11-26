@@ -6,6 +6,12 @@ export interface PodGalleryAccess {
   /** The signed-in WebID. A different one is a different account: a new access object. */
   readonly sessionKey: string;
   open(): Promise<PodLibrary>;
+  /**
+   * Set when the account is connected but no pod request can carry its credentials (no storage was
+   * found for the WebID): the sentence Settings shows for the reason. "My pod" shows it instead of
+   * the library, reads nothing and offers no sign-in, which would not help.
+   */
+  readonly storageUnknown?: string;
 }
 
 /**

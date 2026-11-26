@@ -20,7 +20,7 @@ vi.mock("./gallery-runtime", () => {
   };
 });
 
-import { ERROR_TEXT, type PodSession, type PodSessionState } from "@storyteller/pod-session";
+import { ERROR_TEXT, STORAGE_UNKNOWN_TEXT, type PodSession, type PodSessionState } from "@storyteller/pod-session";
 import { PodGalleryHost } from "./PodGalleryHost";
 
 const ALICE = "https://alice.example/profile/card#me";
@@ -211,6 +211,23 @@ describe("the host that offers the pod library to the gallery", () => {
     expect(world.built.map((entry) => [entry.webId, entry.getFetch()])).toEqual([[ALICE, FETCH]]);
     expect(await access!.open()).toBe(library);
     expect(world.built).toHaveLength(1);
+  });
+
+  it("passes on the Settings sentence when pod-auth found no storage, and offers no sign-in", async () => {
+    let signedOut: ReturnType<typeof usePodGallerySignedOut> = null;
+    function SignedOutProbe() {
+      signedOut = usePodGallerySignedOut();
+      return null;
+    }
+    const pod = fakePodSession({ kind: "connected", webId: ALICE, storageUnknown: "no-storage-declared" } as PodSessionState, { canSignInAgain: () => true });
+    render(<PodGalleryHost session={pod.session}><Probe /><SignedOutProbe /></PodGalleryHost>);
+    expect(access!.storageUnknown).toBe(STORAGE_UNKNOWN_TEXT["no-storage-declared"]);
+    expect(signedOut).toBeNull();
+    pod.set({ kind: "connected", webId: ALICE, storageUnknown: "discovery-failed" } as PodSessionState);
+    expect(access!.storageUnknown).toBe(STORAGE_UNKNOWN_TEXT["discovery-failed"]);
+    pod.set(connected(ALICE));
+    expect(access!.storageUnknown).toBeUndefined();
+    expect(world.built).toEqual([]);
   });
 
   it("purges both loaders when the pod is disconnected", async () => {
