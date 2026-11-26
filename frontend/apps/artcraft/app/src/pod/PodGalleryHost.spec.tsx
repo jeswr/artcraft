@@ -20,7 +20,7 @@ vi.mock("./gallery-runtime", () => {
   };
 });
 
-import type { PodSession, PodSessionState } from "@storyteller/pod-session";
+import { ERROR_TEXT, type PodSession, type PodSessionState } from "@storyteller/pod-session";
 import { PodGalleryHost } from "./PodGalleryHost";
 
 const ALICE = "https://alice.example/profile/card#me";
@@ -141,6 +141,30 @@ describe("the host that offers the pod library to the gallery", () => {
     pod.set(connected(ALICE));
     expect(signedOut).toBeNull();
     expect(screen.getByTestId("probe").textContent).toBe(ALICE);
+  });
+
+  it("says what failed when a sign-in step of a reloaded pod window fails, without a press in this page", async () => {
+    let signedOut = null as ReturnType<typeof usePodGallerySignedOut>;
+    function SignedOutProbe() {
+      signedOut = usePodGallerySignedOut();
+      return null;
+    }
+    const pod = fakePodSession(
+      { kind: "ready-to-sign-in", issuer: "https://idp.example" },
+      { podWindow: true, canSignInAgain: (state) => state.kind === "error" && state.error !== "sign-in-again-limit" },
+    );
+    render(<PodGalleryHost session={pod.session}><SignedOutProbe /></PodGalleryHost>);
+    signedOut!.step!.action!.press();
+    for (const error of ["request-failed", "sign-in-failed", "sign-in-timed-out"] as const) {
+      pod.set({ kind: "error", error });
+      expect(signedOut?.step).toBeFalsy();
+      expect(signedOut?.canPress).toBe(true);
+      expect(signedOut?.problem).toBe(ERROR_TEXT[error]);
+    }
+    // An ended session is what the signed-out text already says.
+    pod.set({ kind: "error", error: "session-ended" });
+    expect(signedOut?.problem).toBeNull();
+    expect(pod.signInAgain).not.toHaveBeenCalled();
   });
 
   it("offers no sign-in step outside a pod window", async () => {

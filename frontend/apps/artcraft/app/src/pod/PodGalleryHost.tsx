@@ -58,7 +58,9 @@ export function PodGalleryHost({ session, children }: { session: PodSession; chi
   const step = useMemo(() => (webId === null ? signInStep(state, session) : null), [state, session, webId]);
   const offered = canSignInAgain || followUp !== null || step !== null;
   const asking = followUp?.asking ?? false;
-  const problem = followUp?.problem ?? null;
+  // Without a press in this page (a reloaded pod window whose sign-in step failed), still say what
+  // failed, so "Sign in again" is not offered under the generic "session ended" text alone.
+  const problem = followUp?.problem ?? (webId === null ? unpressedProblem(state) : null);
   const signedOut = useMemo<PodGallerySignedOut | null>(
     () =>
       offered
@@ -92,6 +94,14 @@ function afterPress(state: PodSessionState): { asking: boolean; problem: string 
   if (state.kind === "disconnected") return { asking: false, problem: state.outcome === "declined" ? DECLINED_TEXT : null };
   if (state.kind === "error") return { asking: false, problem: ERROR_TEXT[state.error] };
   return null;
+}
+
+/**
+ * What the gallery says about an error this page did not cause with a press. An ended session needs
+ * no line of its own: the signed-out text already says so.
+ */
+function unpressedProblem(state: PodSessionState): string | null {
+  return state.kind === "error" && state.error !== "session-ended" ? ERROR_TEXT[state.error] : null;
 }
 
 /**
