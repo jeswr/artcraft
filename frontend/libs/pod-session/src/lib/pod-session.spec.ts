@@ -191,6 +191,16 @@ describe('start in a pod window', () => {
     expect(t.session.getBackgroundFetch()).toBeNull();
   });
 
+  it('says when pod-auth found no storage for the WebID, and why', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.finish(WEBID, { source: 'none', reason: 'no-storage-declared' });
+    await started;
+    expect(t.session.getState()).toEqual({ kind: 'connected', webId: WEBID, storageUnknown: 'no-storage-declared' });
+  });
+
   it('restores a remembered session when no sign-in was asked for', async () => {
     const t = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restored: WEBID }) });
     await t.session.start();

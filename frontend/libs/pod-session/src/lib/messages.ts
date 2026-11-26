@@ -1,4 +1,4 @@
-import type { PodSessionErrorKind, PodSessionState, UnsupportedReason } from './state.js';
+import type { PodSessionErrorKind, PodSessionState, StorageUnknownReason, UnsupportedReason } from './state.js';
 
 /** One sentence for each closed reason. No message carries a host's text, token or URL. */
 export const UNSUPPORTED_TEXT: Record<UnsupportedReason, string> = {
@@ -35,6 +35,20 @@ export const ERROR_TEXT: Record<PodSessionErrorKind, string> = {
   'invalid-response': 'ArtCraft could not read the profile or provider information it needed, so it did not sign in.',
   'wipe-failed':
     'ArtCraft could not finish removing your sign-in data from this computer, so this window stays restricted. Try again; if it keeps failing, quit and reopen ArtCraft first.',
+};
+
+/**
+ * Why a connected session cannot make pod requests as the person: pod-auth found no storage for
+ * the WebID, so it sends no credentials to any pod and every request reaches the pod as nobody.
+ * Each sentence says why and what the person can do.
+ */
+export const STORAGE_UNKNOWN_TEXT: Record<StorageUnknownReason, string> = {
+  'no-storage-declared':
+    "ArtCraft cannot make requests to your pod as you: your profile does not say where your pod is (it has no storage entry), and the server that holds your profile does not say either. Your pod sees ArtCraft's requests as coming from nobody, so nothing can be read from it or saved to it as you. Add your pod's address to your profile as its storage, then close and reopen ArtCraft.",
+  'profile-redirected':
+    "ArtCraft cannot make requests to your pod as you: your profile does not say where your pod is, and it was served from a different address than your WebID, which cannot speak for your pod. Your pod sees ArtCraft's requests as coming from nobody. Add your pod's address to your profile as its storage, then close and reopen ArtCraft.",
+  'storage-ineligible':
+    "ArtCraft cannot make requests to your pod as you: the pod your profile names is not one ArtCraft sends your sign-in to (for example, it does not use HTTPS). Your pod sees ArtCraft's requests as coming from nobody. Check the storage address in your profile, then close and reopen ArtCraft.",
 };
 
 export type Notice = { level: 'success' | 'error'; message: string };

@@ -225,7 +225,7 @@ it("offers only finishing the disconnect in a finishing window", async () => {
   expect(session.leave).toHaveBeenCalledTimes(1);
 });
 
-function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorView> = {}) {
+function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorView> = {}, state: PodSessionState = { kind: "connected", webId: WEBID }) {
   const view: PodMirrorView = {
     stateOf: () => undefined,
     summary: () => summary,
@@ -245,7 +245,7 @@ function renderWithMirror(summary: MirrorSummary, overrides: Partial<PodMirrorVi
     },
     ...overrides,
   };
-  const fake = fakeSession({ kind: "connected", webId: WEBID });
+  const fake = fakeSession(state);
   render(
     <PodSessionProvider session={fake.session} startNow={false}>
       <PodMirrorViewProvider view={view}>
@@ -432,6 +432,24 @@ it("says the pod could not be read as the person, not that it is public, when it
   expect(screen.queryByRole("button", { name: "Confirm this container is private" })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Check again" }));
   expect(view.recheckExposure).toHaveBeenCalledTimes(1);
+});
+
+it("says why pod requests cannot be made as the person when no storage was found for the WebID", () => {
+  renderWithMirror({ ...SUMMARY, paused: "storage-refused", exposureTarget: "https://pod.example/" }, {}, { kind: "connected", webId: WEBID, storageUnknown: "no-storage-declared" });
+  const connected = screen.getByTestId("pod-storage-unknown").textContent ?? "";
+  expect(connected).toMatch(/cannot make requests to your pod as you/);
+  expect(connected).toMatch(/profile does not say where your pod is/);
+  const paused = screen.getByTestId("pod-mirror-paused").textContent ?? "";
+  expect(paused).toMatch(/cannot make requests to your pod as you/);
+  // The specific cause replaces the generic two-cause sentence.
+  expect(paused).not.toMatch(/Otherwise your pod refused your sign-in/);
+});
+
+it("does not say it is waiting for the pod when no storage was found for the WebID", () => {
+  renderWithMirror({ ...SUMMARY, paused: "store-unavailable" }, {}, { kind: "connected", webId: WEBID, storageUnknown: "no-storage-declared" });
+  const paused = screen.getByTestId("pod-mirror-paused").textContent ?? "";
+  expect(paused).toMatch(/cannot make requests to your pod as you/);
+  expect(paused).not.toMatch(/waiting for your pod/);
 });
 
 it("moves focus into the import confirmation and back to the status line when it closes", async () => {

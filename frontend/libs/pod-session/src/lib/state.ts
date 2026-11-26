@@ -84,7 +84,11 @@ export type PodSessionState =
    * is open, so a text never names the wrong address; it is absent while pod-auth is still reading.
    */
   | { kind: 'signing-in'; issuer: string; provider?: string }
-  | { kind: 'connected'; webId: string }
+  /**
+   * `storageUnknown`: pod-auth found no storage for this WebID, so no pod request carries the
+   * person's credentials (see `StorageUnknownReason`). Absent when it found one.
+   */
+  | { kind: 'connected'; webId: string; storageUnknown?: StorageUnknownReason }
   | { kind: 'leaving'; step: 'revoking' | 'clearing' | 'reloading' }
   /**
    * Disconnected on this device: the stored sign-in data is gone, but the provider could not
@@ -93,3 +97,12 @@ export type PodSessionState =
   | { kind: 'signed-out-locally' }
   | { kind: 'error'; error: PodSessionErrorKind }
   | { kind: 'unsupported'; reason: UnsupportedReason };
+
+/**
+ * Why pod-auth found no storage for the signed-in WebID. `no-storage-declared`: the profile has
+ * no `pim:storage` and the server that holds it declares none either. `profile-redirected`: the
+ * profile was served from another address, which cannot speak for the WebID's storage.
+ * `storage-ineligible`: the storage it names is not one ArtCraft may send credentials to (for
+ * example not HTTPS).
+ */
+export type StorageUnknownReason = 'no-storage-declared' | 'profile-redirected' | 'storage-ineligible';

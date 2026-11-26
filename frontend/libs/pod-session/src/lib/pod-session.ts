@@ -19,7 +19,7 @@ import { parseSignInInput } from './issuer.js';
 import { type HintStore, localStoragePending, localStorageSignedIn, originOfHint, type PendingStore, type SignInHint } from './pending.js';
 import { runSelfTest, type SelfTestResult } from './self-test.js';
 import { type SignInGate, SignInNotInProgressError } from './sign-in-gate.js';
-import type { PodSessionErrorKind, PodSessionState } from './state.js';
+import type { PodSessionErrorKind, PodSessionState, StorageUnknownReason } from './state.js';
 import { createOriginGate, gateFetch, isInvalidInjectedResponse, type OriginAdmission, refusalOf } from './storage-origins.js';
 import type { WipeOutcome } from './wipe.js';
 
@@ -407,7 +407,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       }
       pending.set(null);
       signedIn.set(hint);
-      set({ kind: 'connected', webId: identity.webId });
+      set(connectedAs(identity.webId, identity));
     } catch (error) {
       // Tokens may already be stored when the failure came after the exchange.
       await scrub();
@@ -466,7 +466,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       const created = buildAuth(null);
       auth = created;
       const identity = await created.restore();
-      if (identity?.webId) set({ kind: 'connected', webId: identity.webId });
+      if (identity?.webId) set(connectedAs(identity.webId, identity));
       else {
         releaseAuth();
         // Nothing to restore: a new state object, so a view that offers "Sign in again" re-renders.
@@ -819,6 +819,19 @@ const SIGN_IN_AGAIN_FROM: ReadonlySet<PodSessionErrorKind> = new Set<PodSessionE
   'invalid-response',
   'sign-in-again-wait',
 ]);
+
+/**
+ * The connected state. When pod-auth found no storage for the WebID, its credentials go nowhere:
+ * every pod request is sent as nobody, and the state says why.
+ */
+function connectedAs(webId: string, identity: SignedInIdentity): PodSessionState {
+  const discovery = identity.storageDiscovery;
+  if (discovery?.source !== 'none') return { kind: 'connected', webId };
+  const reason = discovery.reason;
+  const storageUnknown: StorageUnknownReason =
+    reason === 'profile-redirected' || reason === 'storage-ineligible' ? reason : 'no-storage-declared';
+  return { kind: 'connected', webId, storageUnknown };
+}
 
 /** Maps a failure to a closed kind. Reads only `code`; never the message or any URL. */
 function classify(error: unknown): PodSessionErrorKind {

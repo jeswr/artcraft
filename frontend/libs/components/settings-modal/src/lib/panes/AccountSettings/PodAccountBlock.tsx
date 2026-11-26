@@ -4,6 +4,8 @@ import {
   type PodSession,
   type PodSessionErrorKind,
   type PodSessionState,
+  STORAGE_UNKNOWN_TEXT,
+  type StorageUnknownReason,
   UNSUPPORTED_TEXT,
   usePodSessionOrNull,
   usePodSessionState,
@@ -56,7 +58,7 @@ const PodAccountBlockInner = ({ session }: { session: PodSession }) => {
       <div role="status" aria-live="polite" className="text-sm text-base-fg/80">
         <StatusText state={state} podWindow={session.inPodMode()} finishing={finishing} />
       </div>
-      {state.kind === "connected" && <PodMirrorStatus />}
+      {state.kind === "connected" && <PodMirrorStatus storageUnknown={state.storageUnknown} />}
       <PodControls session={session} state={state} />
       {!finishing && (
         <>
@@ -190,6 +192,11 @@ const StatusText = ({
           <span className="text-xs text-base-fg/70">
             If you do not recognise this WebID, choose Leave pod mode now.
           </span>
+          {state.storageUnknown && (
+            <span className="text-sm text-amber-300" data-testid="pod-storage-unknown">
+              {STORAGE_UNKNOWN_TEXT[state.storageUnknown]}
+            </span>
+          )}
         </div>
       );
     case "ready-to-sign-in":
@@ -423,7 +430,7 @@ const LeaveButton = ({ session, label }: { session: PodSession; label?: string }
  * deletes ArtCraft's local record of what was copied (never anything on the pod). Renders
  * nothing until the mirror exists.
  */
-const PodMirrorStatus = () => {
+const PodMirrorStatus = ({ storageUnknown }: { storageUnknown?: StorageUnknownReason }) => {
   const view = usePodMirrorView();
   const summary = usePodMirrorSummary();
   const [confirming, setConfirming] = useState(false);
@@ -455,7 +462,14 @@ const PodMirrorStatus = () => {
       </p>
       {/* Only a change in what needs attention is announced, not every count. */}
       <div role="status" aria-live="polite" className="flex flex-col gap-1 text-sm text-base-fg/80">
-        {summary.paused && summary.paused !== "stopped" && <span data-testid="pod-mirror-paused">{describePause(summary.paused)}</span>}
+        {summary.paused && summary.paused !== "stopped" && (
+          <span data-testid="pod-mirror-paused">
+            {/* While no storage is known, a refused pod or one that cannot be opened has one cause: say it instead of guessing or waiting. */}
+            {(summary.paused === "storage-refused" || summary.paused === "store-unavailable") && storageUnknown
+              ? "Paused: ArtCraft cannot make requests to your pod as you, for the reason given above."
+              : describePause(summary.paused)}
+          </span>
+        )}
         {summary.paused === "exposure-unknown" && summary.exposureTarget && (
           <span data-testid="pod-mirror-unverified">
             Your pod does not let ArtCraft read its access rules, so this cannot be checked for {summary.exposureTarget}. If you know
