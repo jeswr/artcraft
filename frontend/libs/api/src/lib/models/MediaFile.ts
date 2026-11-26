@@ -29,7 +29,15 @@ export interface MediaFile {
   public_bucket_url: string;
   media_links: {
     cdn_url: string;
+    /** Not sent by the hosted API (see `maybe_thumbnail_template`); kept for existing readers. */
     thumbnail_template: string;
+    /** The image resize template, with `{WIDTH}` (`MediaLinks` in `artcraft_api_defs`). */
+    maybe_thumbnail_template?: string | null;
+    /** A video's preview templates, with `{WIDTH}`. */
+    maybe_video_previews?: {
+      still_thumbnail_template?: string | null;
+      animated_thumbnail_template?: string | null;
+    } | null;
   };
   cover_image: {
     maybe_cover_image_public_bucket_path: null | string;

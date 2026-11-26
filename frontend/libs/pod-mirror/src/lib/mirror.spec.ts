@@ -108,7 +108,7 @@ describe('copying one item', () => {
   });
 
   it('classifies a video by its bytes and sends the duration', async () => {
-    const file = hostedFile(2, { media_type: 'video', media_class: 'video', maybe_duration_millis: 4000, media_links: { cdn_url: 'https://cdn.example/v.mp4', thumbnail_template: '' } });
+    const file = hostedFile(2, { media_type: 'video', media_class: 'video', maybe_duration_millis: 4000, media_links: { cdn_url: 'https://cdn.example/v.mp4' } });
     const t = setup([file]);
     t.bytes.bodies.set('https://cdn.example/v.mp4', mp4());
     await t.mirror.start();
@@ -118,6 +118,28 @@ describe('copying one item', () => {
     expect(put.contentType).toBe('video/mp4');
     expect(put.description).toMatchObject({ kind: 'video', duration: 'PT4S' });
     expect(t.mirror.stateOf(file.token)).toMatchObject({ kind: 'saved', thumbnail: 'none' });
+  });
+
+  it("takes a video's thumbnail from its still frame, not from the image resize template", async () => {
+    const file = hostedFile(2, {
+      media_type: 'video',
+      media_class: 'video',
+      media_links: {
+        cdn_url: 'https://cdn.example/v.mp4',
+        maybe_thumbnail_template: 'https://cdn.example/resize/{WIDTH}.png',
+        maybe_video_previews: { still_thumbnail_template: 'https://cdn.example/still/{WIDTH}.png' },
+      },
+    });
+    const t = setup([file]);
+    t.bytes.bodies.set('https://cdn.example/v.mp4', mp4());
+    t.bytes.bodies.set('https://cdn.example/resize/512.png', png(7));
+    t.bytes.bodies.set('https://cdn.example/still/512.png', png(8));
+    await t.mirror.start();
+    await t.mirror.enqueue(file.token);
+    await settle(t.mirror);
+    expect(t.mirror.stateOf(file.token)).toMatchObject({ kind: 'saved', thumbnail: 'attached' });
+    expect(t.bytes.urls).toContain('https://cdn.example/still/512.png');
+    expect(t.bytes.urls).not.toContain('https://cdn.example/resize/512.png');
   });
 
   it('links a reference image only when it is already in the journal', async () => {
@@ -1982,7 +2004,7 @@ describe('what the hosted side says about an item', () => {
     ['a PLY splat', 'ply', ply, '.ply'],
     ['an SPZ splat declared by its media type', 'spz', spz, '.spz'],
   ])('saves %s as a 3D asset with the sniffed type', async (_name, mediaType, bytesOf, extension) => {
-    const file = hostedFile(1, { media_type: mediaType, media_class: 'splat', media_links: { cdn_url: 'https://cdn.example/files/1.bin', thumbnail_template: '' } });
+    const file = hostedFile(1, { media_type: mediaType, media_class: 'splat', media_links: { cdn_url: 'https://cdn.example/files/1.bin' } });
     const t = setup([file]);
     t.bytes.bodies.set(file.media_links.cdn_url, bytesOf());
     await t.mirror.start();
@@ -2031,7 +2053,7 @@ describe('what the hosted side says about an item', () => {
   });
 
   it('does not fetch a thumbnail for a 3D model', async () => {
-    const file = hostedFile(1, { media_type: 'glb', media_class: 'mesh', media_links: { cdn_url: 'https://cdn.example/files/1.glb', thumbnail_template: 'https://cdn.example/thumbs/1/{WIDTH}.png' } });
+    const file = hostedFile(1, { media_type: 'glb', media_class: 'mesh', media_links: { cdn_url: 'https://cdn.example/files/1.glb', maybe_thumbnail_template: 'https://cdn.example/thumbs/1/{WIDTH}.png' } });
     const t = setup([file]);
     t.bytes.bodies.set(file.media_links.cdn_url, glb());
     t.bytes.bodies.set('https://cdn.example/thumbs/1/512.png', png(1));

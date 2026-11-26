@@ -181,6 +181,13 @@ export function referenceTokens(prompt: HostedPrompt | undefined): string[] {
   return [...seen];
 }
 
+/** The hosted thumbnail template of a file: a video's still frame, otherwise the image resize template. */
+export function thumbnailTemplateOf(file: HostedMediaFile, kind: AssetKind): string | undefined {
+  const links = file.media_links;
+  const template = kind === 'video' ? links.maybe_video_previews?.still_thumbnail_template : links.maybe_thumbnail_template;
+  return template ?? undefined;
+}
+
 /** The CDN address of the hosted thumbnail at a width, or undefined without a template. */
 export function thumbnailUrl(template: string | null | undefined, width = 512): string | undefined {
   if (typeof template !== 'string' || !template.includes('{WIDTH}')) return undefined;

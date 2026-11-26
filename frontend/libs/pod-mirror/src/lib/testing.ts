@@ -69,7 +69,7 @@ export function hostedFile(n: number, overrides: Partial<HostedMediaFile> = {}):
     maybe_title: null,
     maybe_origin_model_type: null,
     origin: { maybe_model: null },
-    media_links: { cdn_url: `https://cdn.example/files/${n}.png`, thumbnail_template: `https://cdn.example/thumbs/${n}/{WIDTH}.png` },
+    media_links: { cdn_url: `https://cdn.example/files/${n}.png`, maybe_thumbnail_template: `https://cdn.example/thumbs/${n}/{WIDTH}.png` },
     // Newer items have larger numbers.
     created_at: new Date(Date.UTC(2026, 5, 1, 0, n)).toISOString(),
     ...overrides,

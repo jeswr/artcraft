@@ -89,7 +89,7 @@ describe('the mirror against the real store, model and a memory pod', () => {
     const image = hostedFile(1, { maybe_prompt_token: 'prompt_tok_1', maybe_title: 'Sunset fox', origin: { maybe_model: { title: 'Flux Pro' } } });
     h.hosted.files.set(image.token, image);
     h.hosted.prompts.set('prompt_tok_1', hostedPrompt('prompt_tok_1', { maybe_negative_prompt: 'blurry', maybe_aspect_ratio: '16:9' }));
-    const video = hostedFile(2, { media_type: 'video', media_class: 'video', maybe_duration_millis: 5500, media_links: { cdn_url: 'https://cdn.example/files/2.mp4', thumbnail_template: 'https://cdn.example/thumbs/2/{WIDTH}.png' } });
+    const video = hostedFile(2, { media_type: 'video', media_class: 'video', maybe_duration_millis: 5500, media_links: { cdn_url: 'https://cdn.example/files/2.mp4', maybe_video_previews: { still_thumbnail_template: 'https://cdn.example/thumbs/2/{WIDTH}.png' } } });
     h.hosted.files.set(video.token, video);
     const imageBytes = fakeBytes(h.hosted);
     imageBytes.bodies.set(video.media_links.cdn_url, mp4(2));
@@ -165,7 +165,7 @@ describe('the mirror against the real store, model and a memory pod', () => {
 
   it('stores a PLY splat as a 3D asset that the model reads back', async () => {
     const h = await harness();
-    const file = hostedFile(5, { media_type: 'ply', media_class: 'splat', media_links: { cdn_url: 'https://cdn.example/files/5.ply', thumbnail_template: '' } });
+    const file = hostedFile(5, { media_type: 'ply', media_class: 'splat', media_links: { cdn_url: 'https://cdn.example/files/5.ply' } });
     h.hosted.files.set(file.token, file);
     h.bytes.bodies.set(file.media_links.cdn_url, ply());
     await h.mirror.start();

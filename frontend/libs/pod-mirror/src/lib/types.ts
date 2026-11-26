@@ -13,7 +13,15 @@ export interface HostedMediaFile {
   maybe_title: string | null;
   maybe_origin_model_type: string | null;
   origin: { maybe_model: { title: string } | null };
-  media_links: { cdn_url: string; thumbnail_template: string };
+  /**
+   * As the hosted API sends them (`MediaLinks` in `artcraft_api_defs`): an image's resize template,
+   * a video's still-frame template. Each carries `{WIDTH}`.
+   */
+  media_links: {
+    cdn_url: string;
+    maybe_thumbnail_template?: string | null;
+    maybe_video_previews?: { still_thumbnail_template?: string | null } | null;
+  };
   created_at: string;
 }
 

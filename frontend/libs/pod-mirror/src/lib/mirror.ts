@@ -15,7 +15,7 @@ import {
 import { thumbnailMutation } from './assets-store.js';
 import { BytesError, blobHead, ByteBudget, type FetchPublicBytes } from './bytes.js';
 import { type Baseline, canonicalUrl, type ImportRun, type ItemMark, type JournalRecord, type MirrorJournal, type RecordPatch } from './journal.js';
-import { type AssetInput, type AssetKind, classify, type Expected, parseDate, referenceTokens, thumbnailUrl, toAssetInput } from './mapping.js';
+import { type AssetInput, type AssetKind, classify, type Expected, parseDate, referenceTokens, thumbnailTemplateOf, thumbnailUrl, toAssetInput } from './mapping.js';
 import type {
   FailureReason,
   HostedClient,
@@ -1363,7 +1363,7 @@ export class PodMirror {
     const kind = kindOf(sniffed.contentType, sniffed.extension);
     if (!kind || !agrees(verdict.expects, kind)) return this.skip(token, 'unsupported-type');
 
-    const template = file.media_links.thumbnail_template;
+    const template = thumbnailTemplateOf(file, kind);
     let thumb: { bytes: Blob; contentType: string } | undefined;
     if (kind !== 'model3d') thumb = await this.fetchThumbnail(template, signal);
 
