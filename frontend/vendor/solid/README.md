@@ -6,7 +6,7 @@ workspace packages of the Solid SDK monorepo (four are private there; `guarded-f
 `225a553` ("fix(desktop-auth): address review findings M1-M3, L1-L7"). Replace them with a
 registry dependency, or remove them, when that decision is made.
 
-**`jeswr-pod-auth-0.1.0.tgz` is the exception to the branch above: it was packed from the
+**(Superseded: pod-auth is now `jeswr-pod-auth-0.1.0-eb76ddf.tgz`; see the current vendored set below.)** **`jeswr-pod-auth-0.1.0.tgz` is the exception to the branch above: it was packed from the
 unmerged draft PR #677 of the Solid SDK (`feat/pod-auth-identity-hook` at `b58caad`), which adds
 `PodAuthOptions.fetch`. Its SHA-256 is `b2d2ba406b7f8f36e4295a7fd0fae6f4f6e1a7ea4313635f2e15c3f329db7c2e`; the hash
 in the list below for that file is the older one. Pinned code is normally merged upstream first
@@ -61,7 +61,7 @@ for p in suite-native guarded-fetch reactive-authentication pod-auth desktop-aut
 done
 ```
 
-SHA-256 of the tarballs as committed:
+SHA-256 of the tarballs as first committed. (Superseded: several of these files were replaced later; the [current vendored set](#current-vendored-set-integration-of-sign-in-fixes-pod-mirror-fixes-and-pod-gallery) below is the authority. This list is kept as history.)
 
 ```
 75f91bdc463a3a3d0ca96f5dd6e406364dbb71299dd4ed2528a099a6bee070ea  jeswr-desktop-auth-0.1.0.tgz
@@ -123,7 +123,7 @@ pnpm exec turbo run build --filter "@jeswr/pod-media-store..." --filter "@jeswr/
 for p in pod-media-store storage-client storage-capabilities pod-type-index pod-access rdf-serialize solid-odrl solid-agent-notify; do (cd packages/$p && pnpm pack --pack-destination <dir>); done
 ```
 
-SHA-256 of the added tarballs as committed:
+SHA-256 of the added tarballs as first committed. (Superseded: several of these files were replaced later; the [current vendored set](#current-vendored-set-integration-of-sign-in-fixes-pod-mirror-fixes-and-pod-gallery) below is the authority. This list is kept as history.)
 
 ```
 0dbcc9440b342e6dea45a7e29fe47918e417b300abce592ee0318c4faaf9af63  jeswr-fetch-rdf-0.1.0.tgz
@@ -205,6 +205,8 @@ vendored; its only peer, `react`, is optional and already present. No new third-
 production closure; the licence (MIT) is on the allowlist. The lockfile integrity values are the real sha512 of
 these files.
 
+(Superseded: several of these files were replaced later; the [current vendored set](#current-vendored-set-integration-of-sign-in-fixes-pod-mirror-fixes-and-pod-gallery) below is the authority. This list is kept as history.)
+
 ```
 b69d680862d923516b339df849693303ca7b73416f4f3feca8079e9163b3e9fc  jeswr-pod-media-loader-0.1.0-fdf084a.tgz
 a72b3814f2769d25916e6e273f9c7395465a5e8b8129f1c5e3f39cd86c6f87bf  jeswr-storage-client-0.1.0-fdf084a.tgz
@@ -278,8 +280,11 @@ Only these three are replaced. Every other tarball is kept, for one of two reaso
 
 - `desktop-auth`, `pod-media-store`, `pod-media-loader` and `solid-creative-assets` do not exist
   at `14143e09b`; they come from the draft branches named in the table. Their manifests name
-  `@jeswr/storage-client` and the others by plain version, which the `overrides` map to the new
-  tarballs; every name they import from `@jeswr/storage-client` (root and `/helpers`) is still
+  `@jeswr/storage-client` and the others by plain version. `@jeswr/storage-client` is not in
+  `overrides`: it is a top-level `file:` dependency of `frontend/package.json`, and npm dedupes
+  those plain-version references to that single top-level copy (the lockfile has no nested
+  `@jeswr/*/node_modules/@jeswr/*` entry). The packages that are not top-level dependencies are
+  mapped to their tarballs by `overrides`. Every name they import from `@jeswr/storage-client` (root and `/helpers`) is still
   exported by the new build.
 - The rest (`guarded-fetch`, `storage-capabilities`, `pod-type-index`, `pod-access`, `fetch-rdf`,
   `model-runtime`, `rdf-serialize`, `suite-vocab`, `solid-odrl`, `solid-agent-notify`,
