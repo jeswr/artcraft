@@ -174,6 +174,18 @@ describe('start in a pod window', () => {
     expect(t.session.getFetch()).toBe(t.auth.fetch);
   });
 
+  it('gives background readers no fetch when pod-auth has no non-interactive one, never the interactive fetch', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    delete (t.auth as { nonInteractiveFetch?: typeof fetch }).nonInteractiveFetch;
+    await t.session.start();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.finish(WEBID);
+    await started;
+    expect(t.session.getFetch()).not.toBeNull();
+    expect(t.session.getBackgroundFetch()).toBeNull();
+  });
+
   it('hands background readers the fetch that never asks for the person', async () => {
     const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
     await t.session.start();

@@ -198,7 +198,8 @@ export interface PodSession {
   /**
    * `getFetch()` for background reads and writes (the gallery, the mirror): it never asks for
    * the person, so a request that would need a new sign-in answers 401 instead. The origin gate
-   * and `authorizeSignIn` still apply. Null unless connected.
+   * and `authorizeSignIn` still apply. Null unless connected, and null when pod-auth offers no
+   * non-interactive fetch (never the interactive one in its place).
    */
   getBackgroundFetch(): typeof fetch | null;
   /** Whether this window is a pod window, as the app recorded it. */
@@ -790,7 +791,10 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
 
     getBackgroundFetch() {
       if (state.kind !== 'connected' || !auth) return null;
-      const source = auth.nonInteractiveFetch ?? auth.fetch;
+      // Fails closed: without pod-auth's non-interactive fetch there is no background fetch, rather
+      // than the interactive one, which could reach a new sign-in.
+      const source = auth.nonInteractiveFetch;
+      if (!source) return null;
       if (!originGate) return source;
       if (gatedBackground?.source !== source) gatedBackground = { source, fetch: gateFetch(source, originGate) };
       return gatedBackground.fetch;
