@@ -79,7 +79,7 @@ export function describePause(reason: PauseReason): string {
     case 'exposure-unknown':
       return 'Paused: ArtCraft could not confirm that your pod library is private.';
     case 'storage-unsafe':
-      return "Paused: the top level of your pod can be read by others, or ArtCraft could not check it, so no library was created. Nothing was saved. Check again once that is fixed.";
+      return "Paused: the top level of your pod can be read by others, or ArtCraft could not check it, so no library was created. Nothing more is saved or created in your pod until that is fixed. Check again once it is.";
     case 'storage-refused':
       return "Paused: your pod did not accept ArtCraft's requests as you, so ArtCraft could not read your pod as you or check that it is private. Nothing more is saved or created in your pod until then. If your profile does not say where your pod's storage is, add it, then close and reopen ArtCraft: ArtCraft reads your profile only when you sign in or reopen it. Otherwise your pod refused your sign-in: check again once that is fixed.";
     case 'journal-closed':
