@@ -1202,6 +1202,17 @@ describe('signing in again in a pod window', () => {
     expect(t.wipeStores).not.toHaveBeenCalled();
   });
 
+  it('is offered in the last state a subscriber is told about when the start settles, without a later change', async () => {
+    for (const auth of [fakeAuth(), fakeAuth({ restoreError: new Error('boom') })]) {
+      const t = setup({ podWindow: true, issuer: ISSUER, auth });
+      // What a view rendering on each notification would read, as the app's views do.
+      const seen: boolean[] = [];
+      t.session.subscribe(() => seen.push(t.session.canSignInAgain()));
+      await t.session.start();
+      expect(seen.at(-1)).toBe(true);
+    }
+  });
+
   it('is offered in a pod window with nothing to restore, and Try again leads back to it', async () => {
     const t = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restoreError: new Error('boom') }) });
     await t.session.start();

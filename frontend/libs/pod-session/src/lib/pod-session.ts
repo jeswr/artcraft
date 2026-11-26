@@ -597,7 +597,12 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
         if (state.kind !== 'error') await restore();
         return state;
       })().finally(() => {
+        const offeredBefore = session.canSignInAgain();
         settled = true;
+        // The last state of the start was announced while `settled` was still false, so a view that
+        // read `canSignInAgain()` then saw false. When the answer is now different, announce the
+        // state again (a new object) so such a view reads it again.
+        if (!offeredBefore && session.canSignInAgain()) set({ ...state });
       });
       return started;
     },
