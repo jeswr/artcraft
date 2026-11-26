@@ -51,8 +51,16 @@ export function withDetectedAccessModel(storage: Storage, podFetch: typeof fetch
  */
 export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; webId: string; journal: MirrorJournal }): OpenStore {
   return async (signal, { allowUnknownExposureFor }) => {
-    const podFetch = deps.podFetch();
-    if (!podFetch) return { ok: false, reason: "failed" };
+    const sessionFetch = deps.podFetch();
+    if (!sessionFetch) return { ok: false, reason: "failed" };
+    // A 401 means the pod did not read the request as the person: their sign-in was refused, or the
+    // request went out without credentials (the session could not tell that the URL is in their pod).
+    let refused = false;
+    const podFetch: typeof fetch = async (input, init) => {
+      const response = await sessionFetch(input, init);
+      if (response.status === 401) refused = true;
+      return response;
+    };
     try {
       const { storage, features } = await createPodClient({ fetch: podFetch, storage: profileDocumentOf(deps.webId), signal });
       const modelled = withDetectedAccessModel(storage, podFetch);
@@ -68,7 +76,7 @@ export function createStoreOpener(deps: { podFetch: () => typeof fetch | null; w
         allowUnknownExposureFor,
         signal,
       });
-      if (opened.ok) return { ok: true, store: asPodStorePort(opened.value, storage.root) };
+      if (opened.ok) return { ok: true, store: { ...asPodStorePort(opened.value, storage.root), refusedSignIn: () => refused } };
       return { ok: false, reason: opened.error.kind === "offline" ? "offline" : "failed" };
     } catch {
       return { ok: false, reason: signal.aborted ? "failed" : "offline" };

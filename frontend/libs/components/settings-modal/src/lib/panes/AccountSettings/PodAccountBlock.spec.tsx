@@ -422,6 +422,17 @@ it("explains a pod root that is readable by others or cannot be checked, offers 
   expect(view.recheckExposure).toHaveBeenCalledTimes(1);
 });
 
+it("says the pod could not be read as the person, not that it is public, when its requests were refused, and offers Check again", async () => {
+  const user = userEvent.setup();
+  const view = renderWithMirror({ ...SUMMARY, paused: "storage-refused", exposureTarget: "https://pod.example/" });
+  const text = screen.getByTestId("pod-mirror-paused").textContent ?? "";
+  expect(text).toMatch(/as you/);
+  expect(text).not.toMatch(/can be read by others/);
+  expect(screen.queryByRole("button", { name: "Confirm this container is private" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Check again" }));
+  expect(view.recheckExposure).toHaveBeenCalledTimes(1);
+});
+
 it("moves focus into the import confirmation and back to the status line when it closes", async () => {
   const user = userEvent.setup();
   renderWithMirror(SUMMARY);

@@ -126,7 +126,11 @@ export type ItemState =
   /** The hosted copy is deleted but the pod copy could not be removed yet. */
   | { kind: 'remove-failed'; reason: FailureReason; attempts: number };
 
-export type PauseReason = 'offline' | 'session' | 'exposed' | 'exposure-unknown' | 'storage-unsafe' | 'store-unavailable' | 'journal-closed' | 'stopped';
+/**
+ * `storage-refused` is `storage-unsafe` when the pod also refused a request with 401 while the store was
+ * opened: the pod was not read as the signed-in person, so whether the storage is private is not known.
+ */
+export type PauseReason = 'offline' | 'session' | 'exposed' | 'exposure-unknown' | 'storage-unsafe' | 'storage-refused' | 'store-unavailable' | 'journal-closed' | 'stopped';
 
 export interface MirrorStatus {
   running: boolean;

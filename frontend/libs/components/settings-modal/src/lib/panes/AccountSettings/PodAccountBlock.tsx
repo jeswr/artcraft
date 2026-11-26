@@ -437,7 +437,8 @@ const PodMirrorStatus = () => {
     );
   }
   const { saved, pending, failed, skipped, removing } = summary.counts;
-  const exposurePause = summary.paused === "exposed" || summary.paused === "exposure-unknown" || summary.paused === "storage-unsafe";
+  const exposurePause =
+    summary.paused === "exposed" || summary.paused === "exposure-unknown" || summary.paused === "storage-unsafe" || summary.paused === "storage-refused";
   const forget = async () => {
     setBusy(true);
     try {

@@ -40,12 +40,34 @@ describe("the profile document", () => {
 
 describe("opening the pod store", () => {
   it("uses the pod session's own fetch for every pod call and nothing else", async () => {
-    const podFetch = vi.fn() as unknown as typeof fetch;
-    const open = createStoreOpener({ podFetch: () => podFetch, webId: WEB_ID, journal: createMemoryMirrorJournal() });
+    const podFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    const open = createStoreOpener({ podFetch: () => podFetch as unknown as typeof fetch, webId: WEB_ID, journal: createMemoryMirrorJournal() });
     const result = await open(signal, { allowUnknownExposureFor: () => false });
     expect(result.ok).toBe(true);
-    expect(sdk.createPodClient).toHaveBeenCalledWith(expect.objectContaining({ fetch: podFetch, storage: "https://alice.example/profile/card" }));
-    expect(sdk.createTypeIndex).toHaveBeenCalledWith(expect.objectContaining({ fetch: podFetch, profile: WEB_ID }));
+    expect(sdk.createPodClient).toHaveBeenCalledWith(expect.objectContaining({ storage: "https://alice.example/profile/card" }));
+    expect(sdk.createTypeIndex).toHaveBeenCalledWith(expect.objectContaining({ profile: WEB_ID }));
+    const init = { method: "HEAD" };
+    await sdk.createPodClient.mock.calls[0][0].fetch("https://alice.example/a", init);
+    await (sdk.createTypeIndex.mock.calls[0] as unknown as [{ fetch: typeof fetch }])[0].fetch("https://alice.example/b", init);
+    expect(podFetch.mock.calls).toEqual([
+      ["https://alice.example/a", init],
+      ["https://alice.example/b", init],
+    ]);
+  });
+
+  it("tells the mirror when the pod refused a request of the store as the person (401), and only then", async () => {
+    let status = 200;
+    const podFetch = vi.fn(async () => new Response(null, { status }));
+    const open = createStoreOpener({ podFetch: () => podFetch as unknown as typeof fetch, webId: WEB_ID, journal: createMemoryMirrorJournal() });
+    const result = await open(signal, { allowUnknownExposureFor: () => false });
+    if (!result.ok) throw new Error("expected a store");
+    const storeFetch = sdk.createPodClient.mock.calls[0][0].fetch as typeof fetch;
+    status = 403;
+    await storeFetch("https://alice.example/");
+    expect(result.store.refusedSignIn?.()).toBe(false);
+    status = 401;
+    await storeFetch("https://alice.example/");
+    expect(result.store.refusedSignIn?.()).toBe(true);
   });
 
   it("scopes the delete journal to this WebID and this storage", async () => {

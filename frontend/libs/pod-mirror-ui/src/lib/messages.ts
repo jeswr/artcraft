@@ -41,6 +41,7 @@ const PAUSES: Record<PauseReason, string> = {
   exposed: 'your pod library can be read by others',
   'exposure-unknown': 'ArtCraft could not confirm that your pod library is private',
   'storage-unsafe': 'your pod is not set up for private copies',
+  'storage-refused': 'your pod could not be read as you',
   'store-unavailable': 'waiting for your pod',
   'journal-closed': 'ArtCraft needs to be reloaded',
   stopped: 'copying is not running',
@@ -79,6 +80,8 @@ export function describePause(reason: PauseReason): string {
       return 'Paused: ArtCraft could not confirm that your pod library is private.';
     case 'storage-unsafe':
       return "Paused: the top level of your pod can be read by others, or ArtCraft could not check it, so no library was created. Nothing was saved. Check again once that is fixed.";
+    case 'storage-refused':
+      return "Paused: your pod did not accept ArtCraft's requests as you, so ArtCraft could not read it as you or check that it is private, and no library was created. Nothing was saved. Your profile may not say where your pod's storage is, or your pod refused your sign-in. Check again once that is fixed.";
     case 'journal-closed':
       return 'Paused: another ArtCraft window updated the local record of your pod copies. Reload ArtCraft to go on.';
     case 'stopped':

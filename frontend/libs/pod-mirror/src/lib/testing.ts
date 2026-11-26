@@ -191,6 +191,8 @@ export interface FakeStore extends PodStorePort {
   fixedUrl: string | null;
   /** What `exposureTarget()` says. */
   target: string | null;
+  /** What `refusedSignIn()` says. */
+  refused: boolean;
   /** What `ensureLibrary` reports as the library; null is "none, and the storage root is not safe". Defaults to the target. */
   library: string | null | undefined;
   ensured: number;
@@ -224,6 +226,7 @@ export function fakeStore(): FakeStore {
     resumed: 0,
     fixedUrl: null,
     target: 'https://pod.example/alice/creative-assets/',
+    refused: false,
     gate: null,
     library: undefined,
     ensured: 0,
@@ -277,6 +280,7 @@ export function fakeStore(): FakeStore {
       return { ok: true, value: {} };
     },
     exposureTarget: () => store.target,
+    refusedSignIn: () => store.refused,
     async resumePending(options) {
       store.resumed++;
       if (store.resumeGate) await store.resumeGate;

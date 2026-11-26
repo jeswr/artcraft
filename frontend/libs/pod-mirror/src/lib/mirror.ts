@@ -71,6 +71,11 @@ export interface PodStorePort {
   ensureLibrary(signal?: AbortSignal): Promise<Result<LibraryReport>>;
   /** The container the exposure check is about: the library, or the storage root before it exists. */
   exposureTarget(): string | null;
+  /**
+   * True once the pod answered a request of this store (from its opening on) with 401: the pod did
+   * not read it as the signed-in person. Optional: a port that cannot tell says nothing.
+   */
+  refusedSignIn?(): boolean;
 }
 
 export type OpenStoreResult = { ok: true; store: PodStorePort } | { ok: false; reason: 'offline' | 'failed' };
@@ -316,7 +321,7 @@ export class PodMirror {
   private baseline: Baseline | undefined;
   private store: PodStorePort | null = null;
   private exposureOk = false;
-  private blocked: 'exposed' | 'exposure-unknown' | 'storage-unsafe' | null = null;
+  private blocked: 'exposed' | 'exposure-unknown' | 'storage-unsafe' | 'storage-refused' | null = null;
   /** The library container `ensureLibrary` reported; the only container that can be confirmed. */
   private libraryUrl: string | null = null;
   private target: string | null = null;
@@ -522,7 +527,7 @@ export class PodMirror {
       version: this.version,
       running: this.running,
       paused,
-      exposureTarget: paused === 'exposed' || paused === 'exposure-unknown' || paused === 'storage-unsafe' ? this.target : null,
+      exposureTarget: paused === 'exposed' || paused === 'exposure-unknown' || paused === 'storage-unsafe' || paused === 'storage-refused' ? this.target : null,
       counts,
       import: this.importStatus(),
       goneFromArtcraft: gone,
@@ -1616,6 +1621,8 @@ export class PodMirror {
   }
 
   private recheck(): void {
+    // A store opened while the pod refused the person found its storage without them: open it again.
+    if (this.blocked === 'storage-refused') this.store = null;
     this.blocked = null;
     this.exposureOk = false;
     this.changed();
@@ -1762,8 +1769,9 @@ export class PodMirror {
       this.target = report.url ?? report.probed;
       if (report.url === null) {
         // No library, and the storage root is exposed or could not be checked: nothing was created
-        // and the root is never offered for confirmation.
-        this.blocked = 'storage-unsafe';
+        // and the root is never offered for confirmation. When the pod refused the store's requests,
+        // the root was not read as the person, and the pause says that instead.
+        this.blocked = this.store.refusedSignIn?.() === true ? 'storage-refused' : 'storage-unsafe';
       } else if (report.exposure === 'private') this.exposureOk = true;
       else if (report.exposure === 'exposed') this.blocked = 'exposed';
       else if (this.isConfirmed(report.url)) this.exposureOk = true;

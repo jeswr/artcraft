@@ -1765,6 +1765,29 @@ describe('exposure pauses the person can act on', () => {
     expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
   });
 
+  it('says the pod refused the person, not that it is public, when its requests were refused, and finds the storage again on a check', async () => {
+    const t = setup([hostedFile(1)]);
+    t.store.exposure = 'unknown';
+    t.store.library = null;
+    t.store.refused = true;
+    await t.mirror.start();
+    await t.mirror.enqueue(token(1));
+    await settle(t.mirror);
+    expect(t.mirror.summary().paused).toBe('storage-refused');
+    expect(t.store.puts).toEqual([]);
+    expect(await t.mirror.confirmPrivate()).toBe(false);
+    const opened = t.open.calls;
+    // Signed in properly now: the check opens the store again, which finds a private library.
+    t.store.refused = false;
+    t.store.library = undefined;
+    t.store.exposure = 'private';
+    t.mirror.recheckExposure();
+    await settle(t.mirror);
+    expect(t.open.calls).toBeGreaterThan(opened);
+    expect(t.mirror.summary().paused).toBeNull();
+    expect(t.mirror.stateOf(token(1))?.kind).toBe('saved');
+  });
+
   it('treats an exposed storage root the same way, and an exposed library as exposed', async () => {
     const t = setup([hostedFile(1)]);
     t.store.exposure = 'exposed';
