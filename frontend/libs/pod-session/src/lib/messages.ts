@@ -44,7 +44,7 @@ export const ERROR_TEXT: Record<PodSessionErrorKind, string> = {
  */
 export const STORAGE_UNKNOWN_TEXT: Record<StorageUnknownReason, string> = {
   'no-storage-declared':
-    "ArtCraft cannot make requests to your pod as you: your profile does not say where your pod is (it has no storage entry), and the server that holds your profile does not say either. Your pod sees ArtCraft's requests as coming from nobody, so nothing can be read from it or saved to it as you. Add your pod's address to your profile as its storage, then close and reopen ArtCraft.",
+    "ArtCraft cannot make requests to your pod as you: your profile does not say where your pod is (it has no storage entry), and ArtCraft could not confirm it from the server that holds your profile. Your pod sees ArtCraft's requests as coming from nobody, so nothing can be read from it or saved to it as you. Add your pod's address to your profile as its storage, then close and reopen ArtCraft.",
   'profile-redirected':
     "ArtCraft cannot make requests to your pod as you: your profile does not say where your pod is, and it was served from a different address than your WebID, which cannot speak for your pod. Your pod sees ArtCraft's requests as coming from nobody. Add your pod's address to your profile as its storage, then close and reopen ArtCraft.",
   'storage-unconfirmed':
