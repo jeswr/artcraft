@@ -51,9 +51,10 @@ export interface PodAuthPort {
   fetch: typeof fetch;
   /**
    * The same credentials for reads nobody just asked for: where `fetch` would need the person
-   * (and so would reach `authorizeSignIn`), it answers the pod's 401 instead. Absent in fakes.
+   * (and so would reach `authorizeSignIn`), it answers the pod's 401 instead. Required, so a
+   * connected session always has a background fetch.
    */
-  nonInteractiveFetch?: typeof fetch;
+  nonInteractiveFetch: typeof fetch;
   /** pod-auth's events; the session listens for `expired` (its stored sign-in is gone). */
   on?(event: 'expired', handler: () => void): () => void;
 }
@@ -200,8 +201,9 @@ export interface PodSession {
    * sign-in or opens the browser, so a request that would need a new sign-in answers 401 instead.
    * It is not silent in every case: the origin gate still applies with its prompt, so a request
    * to an origin the window's policy does not list still asks the app, whose native dialog asks
-   * the person (within the app's limits). `authorizeSignIn` still applies. Null unless connected, and null when pod-auth offers no
-   * non-interactive fetch (never the interactive one in its place).
+   * the person (within the app's limits). `authorizeSignIn` still applies. Null unless connected.
+   * The port's type requires the non-interactive fetch; a port built without types that lacks it
+   * still gets null here, never the interactive fetch in its place.
    */
   getBackgroundFetch(): typeof fetch | null;
   /** Whether this window is a pod window, as the app recorded it. */
@@ -793,8 +795,8 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
 
     getBackgroundFetch() {
       if (state.kind !== 'connected' || !auth) return null;
-      // Fails closed: without pod-auth's non-interactive fetch there is no background fetch, rather
-      // than the interactive one, which could reach a new sign-in.
+      // The type requires it; an untyped port without it still fails closed rather than falling
+      // back to the interactive fetch, which could reach a new sign-in.
       const source = auth.nonInteractiveFetch;
       if (!source) return null;
       if (!originGate) return source;
