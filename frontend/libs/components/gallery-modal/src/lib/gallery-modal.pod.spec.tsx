@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { PodGalleryProvider, type PodGalleryAccess } from "@storyteller/pod-gallery";
+import { PodGalleryProvider, type PodGalleryAccess, type PodGallerySignedOut } from "@storyteller/pod-gallery";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { galleryModalVisibleViewMode } from "./galleryModalSignals";
 import { asset, page, pngFiles, testPod } from "./pod/podTestKit";
@@ -182,6 +182,35 @@ describe("what the gallery lets go of", () => {
     );
     expect(pod.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("My pod")).toBeNull();
+    expect(screen.getByText("All Assets", { selector: "button" })).toBeTruthy();
+  });
+
+  it("keeps My pod when the session ends there, says to sign in again and offers it, and releases the pictures", async () => {
+    const pod = testPod([page([asset(1), asset(2)])], { files: pngFiles(2) });
+    const { rerender } = render(
+      <PodGalleryProvider access={accessFor(pod)}>
+        <GalleryModal mode="view" />
+      </PodGalleryProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "My pod" }));
+    await waitFor(() => expect(pod.tileCounts.acquired).toBe(2));
+    // The gate ended the session: no access to the pod, but the window can sign in again.
+    const signedOut: PodGallerySignedOut = { signInAgain: vi.fn() };
+    rerender(
+      <PodGalleryProvider access={null} signedOut={signedOut}>
+        <GalleryModal mode="view" />
+      </PodGalleryProvider>,
+    );
+    expect(pod.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "My pod" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("alert").textContent).toMatch(/Sign in to your pod again/);
+    // Not the ArtCraft library behind it.
+    expect(screen.queryByText("All Assets", { selector: "button" })).toBeNull();
+    expect(signedOut.signInAgain).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
+    expect(signedOut.signInAgain).toHaveBeenCalledTimes(1);
+    // The person can still go to the ArtCraft library.
+    fireEvent.click(screen.getByRole("button", { name: "ArtCraft library" }));
     expect(screen.getByText("All Assets", { selector: "button" })).toBeTruthy();
   });
 });

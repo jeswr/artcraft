@@ -1,6 +1,7 @@
 import { CloseButton } from "@storyteller/ui-close-button";
 import { Modal } from "@storyteller/ui-modal";
 import type { ReactNode } from "react";
+import { SIGNED_OUT_DETAIL, SIGNED_OUT_TITLE } from "./podMessages";
 
 /**
  * The header of the "My pod" view (source switch, title, controls, close) around its body. The
@@ -35,6 +36,25 @@ export function PodSkeleton({ columns }: { columns: number }) {
       {Array.from({ length: columns * 3 }, (_, index) => (
         <div key={index} className="aspect-square animate-pulse bg-white/[0.06]" />
       ))}
+    </div>
+  );
+}
+
+/**
+ * The body of "My pod" while the session has ended: says so where the person is looking, and
+ * offers the way back. The button only asks the app; the browser opens after later clicks.
+ */
+export function PodSignedOut({ onSignInAgain }: { onSignInAgain: () => void }) {
+  return (
+    <div className="flex h-64 items-center justify-center px-6" role="alert" data-testid="pod-signed-out">
+      <div className="flex max-w-sm flex-col items-center gap-3 text-center text-sm">
+        <div className="text-base-fg/70">{SIGNED_OUT_TITLE}</div>
+        <div className="text-xs text-base-fg/60">{SIGNED_OUT_DETAIL}</div>
+        {/* No autofocus: a stray Enter must not start a sign-in. */}
+        <button type="button" className="rounded-[3px] bg-ui-controls px-3 py-1.5 text-sm font-medium text-base-fg hover:bg-ui-controls/80" onClick={onSignInAgain}>
+          Sign in again
+        </button>
+      </div>
     </div>
   );
 }

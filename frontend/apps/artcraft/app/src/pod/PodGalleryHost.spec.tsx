@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { PodLibraryOpenError, usePodGalleryAccess, type PodLibrary } from "@storyteller/pod-gallery";
+import { PodLibraryOpenError, usePodGalleryAccess, usePodGallerySignedOut, type PodLibrary } from "@storyteller/pod-gallery";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const world = vi.hoisted(() => ({
@@ -27,16 +27,20 @@ const ALICE = "https://alice.example/profile/card#me";
 const BOB = "https://bob.example/profile/card#me";
 const FETCH = vi.fn() as unknown as typeof fetch;
 
-function fakePodSession(initial: PodSessionState) {
+function fakePodSession(initial: PodSessionState, options: { canSignInAgain?: (state: PodSessionState) => boolean } = {}) {
   let state = initial;
   const listeners = new Set<() => void>();
+  const signInAgain = vi.fn(async () => undefined);
   const session = {
     getState: () => state,
     subscribe: (listener: () => void) => (listeners.add(listener), () => listeners.delete(listener)),
     getFetch: () => (state.kind === "connected" ? FETCH : null),
+    canSignInAgain: () => options.canSignInAgain?.(state) ?? false,
+    signInAgain,
   } as unknown as PodSession;
   return {
     session,
+    signInAgain,
     set: (next: PodSessionState) =>
       act(() => {
         state = next;
@@ -61,6 +65,23 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the host that offers the pod library to the gallery", () => {
+  it("offers to sign in again, not the library, when the session ended in a window that can", async () => {
+    let signedOut: ReturnType<typeof usePodGallerySignedOut> = null;
+    function SignedOutProbe() {
+      signedOut = usePodGallerySignedOut();
+      return null;
+    }
+    const pod = fakePodSession(connected(ALICE), { canSignInAgain: (state) => state.kind === "error" });
+    render(<PodGalleryHost session={pod.session}><Probe /><SignedOutProbe /></PodGalleryHost>);
+    expect(signedOut).toBeNull();
+    pod.set({ kind: "error", error: "session-ended" });
+    expect(screen.getByTestId("probe").textContent).toBe("none");
+    expect(signedOut).not.toBeNull();
+    expect(pod.signInAgain).not.toHaveBeenCalled();
+    signedOut!.signInAgain();
+    expect(pod.signInAgain).toHaveBeenCalledTimes(1);
+  });
+
   it("offers nothing, and loads nothing, without a connected pod", async () => {
     const pod = fakePodSession(disconnected);
     render(<PodGalleryHost session={pod.session}><Probe /></PodGalleryHost>);

@@ -11,6 +11,6 @@ export {
   type PodLibraryDeps,
   type PodLibraryOpenErrorKind,
 } from './lib/library.js';
-export { PodGalleryProvider, usePodGalleryAccess, type PodGalleryAccess } from './lib/context.js';
+export { PodGalleryProvider, usePodGalleryAccess, usePodGallerySignedOut, type PodGalleryAccess, type PodGallerySignedOut } from './lib/context.js';
 export { usePodAssets, RETRY_BACKOFF_CAP_MS, RETRY_BACKOFF_MS, type PodAssets, type PodAssetsErrorKind, type PodAssetsState } from './lib/usePodAssets.js';
 export { PodSourceSwitch, SOURCE_LABELS, type GallerySource } from './lib/PodSourceSwitch.js';

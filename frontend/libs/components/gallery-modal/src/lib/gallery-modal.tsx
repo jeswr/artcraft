@@ -97,10 +97,11 @@ import { Checkbox } from "@storyteller/ui-checkbox";
 import {
   PodSourceSwitch,
   usePodGalleryAccess,
+  usePodGallerySignedOut,
   type GallerySource,
 } from "@storyteller/pod-gallery";
 import { PodPanelBoundary } from "./pod/PodPanelBoundary";
-import { PodPanelFrame, PodSkeleton } from "./pod/PodPanelFrame";
+import { PodPanelFrame, PodSignedOut, PodSkeleton } from "./pod/PodPanelFrame";
 
 // The "My pod" source: a separate chunk, fetched only when a connected pod's gallery shows it.
 const PodGalleryPanel = React.lazy(() => import("./pod/PodGalleryPanel"));
@@ -632,15 +633,19 @@ export const GalleryModal = React.memo(
     // pod is connected. Its code is a lazy chunk, loaded when it is first shown, and
     // it is unmounted (releasing every picture it holds) when the gallery closes.
     const podAccess = usePodGalleryAccess();
+    // A session that ended keeps "My pod", which then says so and offers to sign in again, rather
+    // than the gallery quietly switching to the ArtCraft library.
+    const podSignedOut = usePodGallerySignedOut();
+    const podOffered = podAccess !== null || podSignedOut !== null;
     const [source, setSource] = useState<GallerySource>("hosted");
     useEffect(() => {
       // A disconnected pod takes the choice with it: reconnecting starts on the ArtCraft library.
-      if (!podAccess) setSource("hosted");
-    }, [podAccess]);
+      if (!podOffered) setSource("hosted");
+    }, [podOffered]);
     // Not tied to the gallery being visible: while the modal fades out the pod view stays, so the
     // ArtCraft library never flashes through. The modal unmounts it (releasing every picture)
     // once it has closed.
-    const showPod = mode === "view" && podAccess !== null && source === "pod";
+    const showPod = mode === "view" && podOffered && source === "pod";
     // Focus returns to the source switch when the person changed source with it.
     const [switchFocus, setSwitchFocus] = useState(false);
     const chooseSource = useCallback((next: GallerySource) => {
@@ -2632,7 +2637,17 @@ export const GalleryModal = React.memo(
               <div className="absolute left-0 top-0 z-[50] h-[60px] w-full cursor-move" />
             </Modal.DragHandle>
           )}
-          {showPod && podAccess ? (
+          {showPod && !podAccess && podSignedOut ? (
+            <PodPanelFrame
+              sourceSwitch={<PodSourceSwitch source={source} onChange={chooseSource} focusOnMount={switchFocus} />}
+              onClose={() => {
+                clearBulkSelection();
+                galleryModalVisibleViewMode.value = false;
+              }}
+            >
+              <PodSignedOut onSignInAgain={() => podSignedOut.signInAgain()} />
+            </PodPanelFrame>
+          ) : showPod && podAccess ? (
             (() => {
               const closePod = () => {
                 clearBulkSelection();

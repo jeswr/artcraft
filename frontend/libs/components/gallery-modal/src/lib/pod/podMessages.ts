@@ -51,7 +51,7 @@ export function describeListError(kind: PodAssetsErrorKind): { title: string; de
     case "offline":
       return { title: "Your pod can't be reached", detail: "Check your connection. This list reloads when you're back online, or when you press Retry." };
     case "sign-in":
-      return { title: "Sign in to your pod again", detail: "Your pod session has ended. Open Settings, under Solid pod, to sign in again; this list reloads when you press Retry." };
+      return { title: "Sign in to your pod again", detail: "Your pod session has ended. Open Settings, under Solid pod, and choose Sign in again; this list reloads when you press Retry." };
     case "forbidden":
       return { title: "Your pod refused access", detail: "This account is not allowed to read the library. Settings, under Solid pod, shows which account is connected and lets you sign in again." };
     case "not-connected":
@@ -60,6 +60,11 @@ export function describeListError(kind: PodAssetsErrorKind): { title: string; de
       return { title: "Couldn't read your pod library", detail: "Try again in a moment." };
   }
 }
+
+/** "My pod" while the session has ended: nothing can be read until the person signs in again. */
+export const SIGNED_OUT_TITLE = "Sign in to your pod again";
+export const SIGNED_OUT_DETAIL =
+  "Your pod session has ended, so ArtCraft stopped reading your pod. Nothing opened your browser. Sign in again to see your pod here; ArtCraft first asks you to confirm in a separate dialog and reloads this window.";
 
 export const EMPTY_TITLE = "Nothing in your pod yet";
 export const EMPTY_DETAIL =

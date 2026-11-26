@@ -8,13 +8,43 @@ export interface PodGalleryAccess {
   open(): Promise<PodLibrary>;
 }
 
-const PodGalleryContext = createContext<PodGalleryAccess | null>(null);
+/**
+ * A pod window whose session has ended: the pod cannot be read, but the person can sign in again.
+ * The gallery keeps "My pod" and says so there, instead of quietly showing the ArtCraft library.
+ */
+export interface PodGallerySignedOut {
+  /** The person's click on "Sign in again". Never called by anything else. */
+  signInAgain(): void;
+}
 
-/** Offers "My pod" below it. Without a connected pod the value is null and nothing pod-related renders. */
-export function PodGalleryProvider({ access, children }: { access: PodGalleryAccess | null; children: ReactNode }) {
-  return <PodGalleryContext.Provider value={access}>{children}</PodGalleryContext.Provider>;
+const PodGalleryContext = createContext<PodGalleryAccess | null>(null);
+const PodGallerySignedOutContext = createContext<PodGallerySignedOut | null>(null);
+
+/**
+ * Offers "My pod" below it. Without a connected pod `access` is null; `signedOut` is set when the
+ * session ended and can be signed in to again. With neither, nothing pod-related renders.
+ */
+export function PodGalleryProvider({
+  access,
+  signedOut = null,
+  children,
+}: {
+  access: PodGalleryAccess | null;
+  signedOut?: PodGallerySignedOut | null;
+  children: ReactNode;
+}) {
+  return (
+    <PodGalleryContext.Provider value={access}>
+      <PodGallerySignedOutContext.Provider value={access ? null : signedOut}>{children}</PodGallerySignedOutContext.Provider>
+    </PodGalleryContext.Provider>
+  );
 }
 
 export function usePodGalleryAccess(): PodGalleryAccess | null {
   return useContext(PodGalleryContext);
+}
+
+/** Set only while no pod is connected and the session can be signed in to again. */
+export function usePodGallerySignedOut(): PodGallerySignedOut | null {
+  return useContext(PodGallerySignedOutContext);
 }
