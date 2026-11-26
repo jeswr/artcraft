@@ -13,7 +13,9 @@ pub const BUILD_PAUSE: Duration = Duration::from_millis(250);
 
 /// The window system, as the sequence needs it.
 pub trait Surface: Send + Sync {
-  /// While on, a last-window-closed exit request must be held back.
+  /// While on, a last-window-closed exit request must be held back. Turning it off must take
+  /// effect only after the window system has handled what was already posted to it (the old
+  /// window's destroyed event, the new window's creation): a build can return before either.
   fn guard_exit(&self, on: bool);
   fn has_main(&self) -> bool;
   /// Starts listening for the destroyed event, then requests the destroy, then resolves `true`
