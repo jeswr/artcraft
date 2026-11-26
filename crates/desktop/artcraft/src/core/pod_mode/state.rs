@@ -23,7 +23,12 @@ pub struct PodModeState {
   /// How many times the record has become restricted in this process (counting a restricted
   /// record at start). The hosted activity report reads it so no reporting session spans pod mode.
   restricted_periods: AtomicU64,
+  /// Run each time the record becomes restricted, after it has: what was gathered for usage
+  /// analytics before then is dropped at that moment, not whenever a reader next looks.
+  on_restricted: Mutex<Vec<RestrictedHook>>,
 }
+
+type RestrictedHook = Box<dyn Fn() + Send + Sync>;
 
 impl PodModeState {
   pub fn load(settings_dir: PathBuf, identifier: &str) -> Self {
@@ -31,7 +36,7 @@ impl PodModeState {
     // The dialog budget is per run of the app: it starts again when the app starts outside pod mode.
     let record = record::load(&dir, Loopback::for_this_build()).effective().budget_reset_on_start();
     let restricted_periods = AtomicU64::new(u64::from(record.restricted()));
-    Self { dir, record: Mutex::new(record), fresh: Mutex::new(None), rebuilding: AtomicBool::new(false), policy: Mutex::new(None), restricted_periods }
+    Self { dir, record: Mutex::new(record), fresh: Mutex::new(None), rebuilding: AtomicBool::new(false), policy: Mutex::new(None), restricted_periods, on_restricted: Mutex::new(Vec::new()) }
   }
 
   /// Pod mode, or pod credentials not yet confirmed wiped: no usage analytics may run.
@@ -41,6 +46,12 @@ impl PodModeState {
 
   pub fn restricted_periods(&self) -> u64 {
     self.restricted_periods.load(Ordering::SeqCst)
+  }
+
+  /// Registers `hook` to run each time the record becomes restricted (not for a record that is
+  /// restricted at start).
+  pub fn on_restricted(&self, hook: impl Fn() + Send + Sync + 'static) {
+    self.on_restricted.lock().unwrap_or_else(|p| p.into_inner()).push(Box::new(hook));
   }
 
   pub fn rebuilding(&self) -> bool {
@@ -75,10 +86,19 @@ impl Store for SharedPodModeState {
   fn replace(&self, next: &PodModeRecord) -> io::Result<()> {
     let mut guard = self.0.record.lock().unwrap_or_else(|p| p.into_inner());
     record::save(&self.0.dir, next)?;
-    if next.restricted() && !guard.restricted() {
+    let became_restricted = next.restricted() && !guard.restricted();
+    if became_restricted {
       self.0.restricted_periods.fetch_add(1, Ordering::SeqCst);
     }
     *guard = next.clone();
+    // The hooks run after the record lock is released: a hook may take a lock under which
+    // `restricted()` is read.
+    drop(guard);
+    if became_restricted {
+      for hook in self.0.on_restricted.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+        hook();
+      }
+    }
     Ok(())
   }
 
@@ -164,6 +184,29 @@ mod tests {
     // A process that starts restricted has already had one.
     let again = PodModeState::load(base.path().to_path_buf(), "x.y");
     assert!(again.restricted() && again.restricted_periods() > 0);
+  }
+
+  #[test]
+  fn the_restricted_hook_runs_on_each_entry_and_only_then() {
+    let base = tempfile::tempdir().unwrap();
+    let state = SharedPodModeState(Arc::new(PodModeState::load(base.path().to_path_buf(), "x.y")));
+    let runs = Arc::new(AtomicU64::new(0));
+    let seen = runs.clone();
+    let observed = state.0.clone();
+    // The hook sees the record already restricted, and may read it without deadlocking.
+    state.0.on_restricted(move || {
+      assert!(observed.restricted());
+      seen.fetch_add(1, Ordering::SeqCst);
+    });
+    let entered = pod_mode::transition::enter("https://login.example", Loopback::HttpRefused).unwrap();
+    state.replace(&entered).unwrap();
+    let first = runs.load(Ordering::SeqCst);
+    assert!(first > 0);
+    state.replace(&entered).unwrap();
+    state.replace(&PodModeRecord::default()).unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), first);
+    state.replace(&entered).unwrap();
+    assert!(runs.load(Ordering::SeqCst) > first);
   }
 
   #[test]

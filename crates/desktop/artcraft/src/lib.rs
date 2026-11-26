@@ -177,9 +177,9 @@ pub fn run() {
   ));
   let pod_mode_shared = SharedPodModeState(pod_mode_state.clone());
 
-  // Generation counts are usage analytics: none are kept while the window is restricted.
-  let usage_gate_state = pod_mode_state.clone();
-  let artcraft_usage_tracker = ArtcraftUsageTracker::new_with_gate(Arc::new(move || !usage_gate_state.restricted()));
+  // Generation counts are usage analytics: none are kept while the window is restricted, and those
+  // from before are dropped when it becomes restricted.
+  let artcraft_usage_tracker = ArtcraftUsageTracker::gated_by(&pod_mode_state);
   let artcraft_usage_tracker_2 = artcraft_usage_tracker.clone();
 
   println!("Initializing backend runtime...");

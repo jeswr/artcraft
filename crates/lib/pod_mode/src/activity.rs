@@ -2,16 +2,17 @@
 //! app's version, the OS, how long the app has been open and how many things were generated on
 //! which page. The hosted account does not need it to work, so it never runs while the window is
 //! restricted (pod mode, or pod credentials not yet confirmed wiped), and no reporting session
-//! spans a restricted period: after one, the reporter starts a new session with a new token, a new
-//! clock and cleared counts, so nothing about the time in pod mode reaches ArtCraft later.
+//! spans a restricted period: the app drops the counts the moment its record becomes restricted,
+//! and after the period the reporter starts a new session with a new token and a new clock, so
+//! nothing about the time in pod mode reaches ArtCraft later.
 
 /// What the activity reporter does on one pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityStep {
   /// The window is restricted: send nothing, and check again later.
   Hold,
-  /// Send a report. With `new_session`, first drop the old session (token, clock, counts),
-  /// because the window has been restricted since the last report.
+  /// Send a report. With `new_session`, first drop the old session (token and clock), because the
+  /// window has been restricted since the last report.
   Report { new_session: bool },
 }
 

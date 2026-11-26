@@ -81,9 +81,10 @@ async fn polling_loop(
         continue;
       }
       ActivityStep::Report { new_session: true } => {
-        // Nothing from before or during the restricted period goes into the next report.
+        // No token or duration from before or during the restricted period goes into the next
+        // report. The counts were already dropped when the window became restricted (see
+        // `ArtcraftUsageTracker::gated_by`); those made since it was left are kept.
         *session = ActivitySession::start();
-        artcraft_usage_tracker.reset()?;
       }
       ActivityStep::Report { new_session: false } => {}
     }
