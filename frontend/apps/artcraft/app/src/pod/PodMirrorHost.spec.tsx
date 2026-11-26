@@ -79,6 +79,18 @@ describe("the host that runs the mirror", () => {
     expect(world.loads).toBe(0);
   });
 
+  it("starts no mirror while the pod's storage is unknown, and starts one once a reopen finds it", async () => {
+    // Every request would go out anonymous and be refused; Settings says why instead.
+    const pod = fakePodSession({ kind: "connected", webId: ALICE, storageUnknown: "no-storage-declared" } as PodSessionState);
+    render(<PodMirrorHost session={pod.session}><Probe /></PodMirrorHost>);
+    await act(async () => undefined);
+    expect(world.started).toEqual([]);
+    expect(screen.getByTestId("probe").textContent).toBe("none:-");
+    pod.set(connected(ALICE));
+    await waitFor(() => expect(screen.getByTestId("probe").textContent).toBe("mirror:summary"));
+    expect(world.started.map((s) => s.webId)).toEqual([ALICE]);
+  });
+
   it("starts one mirror for the connected WebID and hosted user, and shows it below", async () => {
     const pod = fakePodSession(connected(ALICE));
     render(<PodMirrorHost session={pod.session}><Probe /></PodMirrorHost>);

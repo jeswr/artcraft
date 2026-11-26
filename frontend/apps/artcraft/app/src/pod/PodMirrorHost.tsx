@@ -6,7 +6,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { authentication } from "~/signals";
 
 /**
- * Copies the hosted library to the pod while a pod is connected. Everything under it can read
+ * Copies the hosted library to the pod while a pod is connected and its storage is known. Everything under it can read
  * item states through `@storyteller/pod-mirror-ui`. Without a connected pod, or without a
  * hosted username, nothing is built, nothing is loaded and nothing renders: the mirror's code
  * is one dynamic import made only when both exist.
@@ -14,7 +14,10 @@ import { authentication } from "~/signals";
 export function PodMirrorHost({ session, children }: { session: PodSession; children: ReactNode }) {
   useSignals();
   const state = usePodSessionState(session);
-  const webId = state.kind === "connected" ? state.webId : null;
+  // While pod-auth knows no storage for the WebID, every pod request would go out anonymous and be
+  // refused, so the mirror does not start; Settings says why. Reopening ArtCraft after the profile
+  // is fixed connects with storage known, and the mirror starts then.
+  const webId = state.kind === "connected" && !state.storageUnknown ? state.webId : null;
   const username = authentication.userInfo.value?.username ?? null;
   const [mirror, setMirror] = useState<PodMirror | null>(null);
   const [unavailable, setUnavailable] = useState(false);
