@@ -32,6 +32,14 @@ of origins. **The desktop app owns the mode; the page can only ask for it.**
   `pod_mode_credentials_cleared_command`, sent by a window that is not in pod mode after its own
   wipe reported success, clears the flag (and leaving outside pod mode is refused, so the flag
   cannot be raised that way).
+  **Signing in again.** `enter` is refused inside pod mode, so a pod window whose session ended
+  (see `libs/pod-session`, "The sign-in gate") asks with `signInAgain()`, which invokes
+  `pod_mode_sign_in_again_command`. It takes no origin: the app's native dialog names the issuer
+  the record already holds, and on Allow the app leaves the rebuilt window the same one-shot fresh
+  grant a connect leaves, for that issuer only. Nothing in the record changes but the wait after a
+  refusal, so the policy is not widened. These dialogs are counted before each opens, at most six
+  per run of the app (in memory, so a window that stays in pod mode across runs starts again when
+  ArtCraft is reopened), and each refusal grows the wait like the others.
   No credential ever reaches Rust: the commands take origins only, and only the main window may
   call them. Commands are serialised: a second one while one is in progress answers `busy`.
 - **Storage origins (a pod whose storage is on another origin than its sign-in server).** The

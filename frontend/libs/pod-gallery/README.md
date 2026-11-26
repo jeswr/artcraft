@@ -67,15 +67,22 @@ renders or loads.
 
 A refused request (401), an ended or changed session (`Session expired`, `Session changed during
 authentication`) or a missing session fetch is reported as `sign-in`: "Sign in to your pod again",
-with a pointer to Settings, under Solid pod (the existing reconnect path). The kind is carried
+with a pointer to Settings, under Solid pod, where a pod window offers "Sign in again". The kind is carried
 through every path: opening, the first page, a failed "load more" (`loadMoreError`), tiles and the
 viewer. The loaders cannot say "session": an expired session reaches them as `offline` and a 401
 as `forbidden`, so a tile or the viewer asks `library.sessionEnded()` (set by the session fetch
 wrapper on a 401 or an ended session, cleared by the next good answer or a new listing) and shows
-"Sign in to your pod again" instead. Nothing in the gallery starts a sign-in. A 403 from the pod
-with the session intact is `forbidden`. Known issue below this library: pod-auth, wired by
-`pod-session`, can itself open the system browser when a token refresh fails during any read
-(`apps/artcraft/app/src/pod/background-read.spec.ts` pins it as a known failure). "Can't reach your pod" is the one sentence for network failures.
+"Sign in to your pod again" instead. A 403 from the pod with the session intact is `forbidden`.
+"Can't reach your pod" is the one sentence for network failures.
+
+A read never opens the system browser: `pod-session`'s sign-in gate refuses pod-auth's request
+for a new authorization unless the person started a sign-in, and ends the session instead
+(`apps/artcraft/app/src/pod/background-read.spec.ts` pins this with real pod-auth). The gallery's
+access then goes away. When the window can sign in again, `PodGalleryProvider` gets `signedOut`
+instead: the source switch and "My pod" stay, and "My pod" says the session ended and offers
+"Sign in again", whose click only calls `signedOut.signInAgain()` (the session then asks the app,
+and the browser opens after the person's later clicks). Without it, the gallery returns to the
+ArtCraft library as before. Nothing in the gallery starts a sign-in on its own.
 
 ## Requests (measured)
 

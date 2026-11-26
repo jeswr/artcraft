@@ -194,6 +194,41 @@ and the page shows the address (and WebID) before it.
   `.local` or `.lan`, port 0) cannot be a provider or a profile address; the sign-in message says
   internationalised names are not supported yet.
 
+## The sign-in gate: only a sign-in the person started opens the browser
+
+pod-auth asks for the system browser whenever it needs a new authorization, and that includes a
+background read whose token can no longer be renewed (a refresh the provider refused, a provider
+that issues no refresh token, a 401 that invalidates the token), and a restore at window load whose
+refresh failed (pod-auth then tries a silent `prompt=none` authorization). The session hands every
+pod-auth it builds an `authorizeSignIn` gate (`sign-in-gate.ts`), which pod-auth calls before its
+code provider:
+
+- It returns only for the attempt `beginSignIn()` started and is still waiting for, and only once
+  for that attempt. The provider confirmation (`confirmOpen`, `confirm-provider`) still sits
+  between it and `openUrl`.
+- Anything else throws `SignInNotInProgressError` (`code: 'sign-in-not-in-progress'`, fixed text,
+  no URL, issuer or token). `createDefaultAuth` refuses to build a pod-auth without a gate.
+- A refusal while `connected` ends the session: pod-auth is disposed, `getFetch()` is null, the
+  mirror pauses and the state is `error('session-ended')`. A refusal during a restore is
+  `error('restore-failed')`. Nothing is revoked or wiped, but pod-auth has usually removed the
+  stored session already (it does so on `invalid_grant`), so a restore cannot bring it back.
+
+**Signing in again.** In a pod window with a recorded issuer and a shell, `canSignInAgain()` is
+true once `start()` has settled and the session is `disconnected` or in an error that left the
+window itself sound (`session-ended`, `restore-failed`, a failed or timed-out sign-in, and the
+like; not a refused address, a used-up allowance, a failed wipe or a window that is not clean).
+Settings and the gallery's "My pod" then offer **Sign in again**. The click calls `signInAgain()`,
+which stores a pending hint and asks the app (`requestSignInAgain`, the
+`pod_mode_sign_in_again_command`): a native dialog names the recorded issuer, and on Allow the app
+rebuilds the window with the same one-shot fresh grant a connect leaves, for that issuer only. The
+mode, the recorded issuer and the storage origins do not change, so the window's policy is not
+widened. The rebuilt window takes the ordinary path: `ready-to-sign-in`, Continue, the provider
+confirmation, then the browser. The hint is what the person typed for the last sign-in that
+succeeded (`artcraft.podSession.signedIn`, a public address, re-validated on read, cleared on
+leave) when its origin is the recorded issuer, and otherwise the recorded issuer itself. A declined
+or too-fast answer and the app's `busy`, `cooling_down` and `too_many_prompts` words are each
+reported in their own words; the app bounds these dialogs (see the pod-mode crate).
+
 ## Deep links (the sign-in callback)
 
 The callback is `<identifier>:/oauth/callback`. On Linux and Windows the OS starts a new instance
