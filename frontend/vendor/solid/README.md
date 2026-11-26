@@ -224,7 +224,7 @@ One tarball per package. Where a package was re-packed several times in the sect
 | `jeswr-guarded-fetch-0.1.0.tgz` | feat/desktop-auth 225a553 (dist identical at d20ddf6) | `198d0b6b78381df298071345d87d7769888ab467140d94b2ea11417e812d4f97` |
 | `jeswr-model-runtime-0.2.0.tgz` | feat/creative-assets d6dcc9a (main d20ddf6) | `cf164e21246efe5c8ef3455df3f604592bf39eaaa8e7e457e27e48d852f71351` |
 | `jeswr-pod-access-0.1.0.tgz` | feat/pod-media-store ce7d766 | `9295bc1f24ddcaf7dd0e4be2860ebf0a5e1057a533e614de30126f1e1819220c` |
-| `jeswr-pod-auth-0.1.0-c86c6ea.tgz` | c86c6eab7 (draft PR #690, review fixes) + b58caad (draft PR #677), local merge 80eacc891 | `9da5779d304951aa834fcc3714e97b102f3d93298aa2985f15900296e2198dbd` |
+| `jeswr-pod-auth-0.1.0-eb76ddf.tgz` | eb76ddf75 (draft PR #690, review fixes) + b58caad (draft PR #677), local merge f44edab4d (bundle below) | `526c35bb27fbeb2bcc70d21ba9a9cc8b272eb8055c5d56a4739156ab35b02e6f` |
 | `jeswr-pod-media-loader-0.1.0-fdf084a.tgz` | feat/pod-media-loader fdf084a | `b69d680862d923516b339df849693303ca7b73416f4f3feca8079e9163b3e9fc` |
 | `jeswr-pod-media-store-0.1.0.tgz` | feat/pod-media-store 690ecee7c | `2814fa93aee8e4edb1bf2f986d97b96cd0dbe27c4435ff2dbd39ef2b8032a998` |
 | `jeswr-pod-type-index-0.1.0.tgz` | fix/pod-type-index-vite-regex 2f1ece2 | `ecc187de5fc5bfd202da239ada0a957ce69b067cda31b7deec670d833039d3cf` |
@@ -322,3 +322,38 @@ profile without `pim:storage` now learns no storage at all (`source: "none"`), o
 that case cannot be told apart from an attack; only CSS's default layout (a typed pod container
 under a claimed origin root) is discovered. `jeswr-pod-auth-0.1.0-7c09caa.tgz` is replaced by
 `jeswr-pod-auth-0.1.0-c86c6ea.tgz`, SHA-256 `9da5779d304951aa834fcc3714e97b102f3d93298aa2985f15900296e2198dbd`; manifest and dependencies unchanged.
+
+### pod-auth re-packed at `eb76ddf75` (origin root never a boundary)
+
+`eb76ddf75` ("never learn the origin root as a user's storage boundary") refuses the origin root
+at every step of the storage-description walk: a WebID document stored directly in an
+origin-root storage no longer makes the whole origin the credential boundary; it gives
+`source: "none"` with reason `no-storage-declared`. Following the recipe above, a scratch SDK
+worktree at `eb76ddf75` merged the previous local build commit `80eacc891` (which carries #677,
+the `contentLength` patch and the earlier conflict resolutions) without conflicts; the result is
+`f44edab4d`, whose tree differs from `80eacc891` only by `eb76ddf75`'s own change. The pod-auth suite
+(981 tests) passes there with coverage off, and `tsc --noEmit` is clean. With coverage on, the
+package's 100% threshold is not met (statements 99.95%, branches 99.93%); this was not
+investigated. `jeswr-pod-auth-0.1.0-c86c6ea.tgz` is replaced by `jeswr-pod-auth-0.1.0-eb76ddf.tgz`.
+Against it only `dist/boundary.js` (and its maps) and the README differ; the manifest is
+identical.
+
+The local build commit is not pushed to the SDK. To make the build reproducible it is saved as a
+git bundle, `solid-sdk-artcraft-vendor-eb76ddf.bundle` in the project files
+(`/mnt/project-files/artcraft/vendor-builds/`, SHA-256
+`487b5806dd81491bc4b626a719b4acfc5de8492926247dd46104754686c200e3`). It holds the ref
+`refs/heads/artcraft-vendor-eb76ddf` at `f44edab4d` and the four local commits under it
+(`330d69c2d`, `324f75d24`, `8362139e6`, `80eacc891`). Its prerequisites are all on pushed SDK
+branches: `eb76ddf75`, `c86c6eab7`, `7c09caa78` and `14143e09b` on `claude/project-thread-jn2p5t`,
+and `b58caad06` on `feat/pod-auth-identity-hook`.
+
+```sh
+# in a clone of jeswr/solid-sdk that has both branches fetched
+git bundle verify <path>/solid-sdk-artcraft-vendor-eb76ddf.bundle
+git fetch <path>/solid-sdk-artcraft-vendor-eb76ddf.bundle artcraft-vendor-eb76ddf
+git worktree add ../vendor-build FETCH_HEAD   # f44edab4d
+cd ../vendor-build
+pnpm install --frozen-lockfile --filter "@jeswr/pod-auth..." --filter "@jeswr/solid-sdk-workspace"
+pnpm exec turbo run build --filter "@jeswr/pod-auth..."
+(cd packages/pod-auth && pnpm pack --pack-destination <dir>)   # then rename to jeswr-pod-auth-0.1.0-eb76ddf.tgz
+```
