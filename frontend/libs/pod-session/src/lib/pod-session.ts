@@ -196,9 +196,11 @@ export interface PodSession {
    */
   getFetch(): typeof fetch | null;
   /**
-   * `getFetch()` for background reads and writes (the gallery, the mirror): it never asks for
-   * the person, so a request that would need a new sign-in answers 401 instead. The origin gate
-   * and `authorizeSignIn` still apply. Null unless connected, and null when pod-auth offers no
+   * `getFetch()` for background reads and writes (the gallery, the mirror): it never starts a
+   * sign-in or opens the browser, so a request that would need a new sign-in answers 401 instead.
+   * It is not silent in every case: the origin gate still applies with its prompt, so a request
+   * to an origin the window's policy does not list still asks the app, whose native dialog asks
+   * the person (within the app's limits). `authorizeSignIn` still applies. Null unless connected, and null when pod-auth offers no
    * non-interactive fetch (never the interactive one in its place).
    */
   getBackgroundFetch(): typeof fetch | null;
