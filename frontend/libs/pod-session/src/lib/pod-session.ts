@@ -820,6 +820,14 @@ const SIGN_IN_AGAIN_FROM: ReadonlySet<PodSessionErrorKind> = new Set<PodSessionE
   'sign-in-again-wait',
 ]);
 
+const STORAGE_UNKNOWN_REASONS: ReadonlySet<StorageUnknownReason> = new Set<StorageUnknownReason>([
+  'no-storage-declared',
+  'profile-redirected',
+  'storage-unconfirmed',
+  'discovery-failed',
+  'storage-ineligible',
+]);
+
 /**
  * The connected state. When pod-auth found no storage for the WebID, its credentials go nowhere:
  * every pod request is sent as nobody, and the state says why.
@@ -828,8 +836,10 @@ function connectedAs(webId: string, identity: SignedInIdentity): PodSessionState
   const discovery = identity.storageDiscovery;
   if (discovery?.source !== 'none') return { kind: 'connected', webId };
   const reason = discovery.reason;
-  const storageUnknown: StorageUnknownReason =
-    reason === 'profile-redirected' || reason === 'storage-ineligible' ? reason : 'no-storage-declared';
+  // A reason this build does not know yet reads as the plainest one.
+  const storageUnknown: StorageUnknownReason = STORAGE_UNKNOWN_REASONS.has(reason as StorageUnknownReason)
+    ? (reason as StorageUnknownReason)
+    : 'no-storage-declared';
   return { kind: 'connected', webId, storageUnknown };
 }
 

@@ -102,7 +102,14 @@ export type PodSessionState =
  * Why pod-auth found no storage for the signed-in WebID. `no-storage-declared`: the profile has
  * no `pim:storage` and the server that holds it declares none either. `profile-redirected`: the
  * profile was served from another address, which cannot speak for the WebID's storage.
- * `storage-ineligible`: the storage it names is not one ArtCraft may send credentials to (for
- * example not HTTPS).
+ * `storage-unconfirmed`: what that server says about the storage contradicts itself, so pod-auth
+ * did not guess. `discovery-failed`: that server could not be asked (no answer, or an error); the
+ * next sign-in or restore asks again. `storage-ineligible`: the storage named is not one ArtCraft
+ * may send credentials to (for example not HTTPS).
  */
-export type StorageUnknownReason = 'no-storage-declared' | 'profile-redirected' | 'storage-ineligible';
+export type StorageUnknownReason =
+  | 'no-storage-declared'
+  | 'profile-redirected'
+  | 'storage-unconfirmed'
+  | 'discovery-failed'
+  | 'storage-ineligible';
