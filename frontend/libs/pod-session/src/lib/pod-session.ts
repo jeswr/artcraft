@@ -253,8 +253,9 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
    * with `null` (a restore, a revoke) never may, and neither may the one a finished attempt left
    * behind to serve reads: a read whose token cannot be renewed ends the session instead.
    */
-  const buildAuth = (owner: Attempt | null): PodAuthPort =>
-    deps.createAuth({
+  const buildAuth = (owner: Attempt | null): PodAuthPort => {
+    let built: PodAuthPort | null = null;
+    built = deps.createAuth({
       ...(authFetch ? { fetch: authFetch } : {}),
       confirmOpen,
       authorizeSignIn: () => {
@@ -263,10 +264,14 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
           return;
         }
         // Nothing the person is waiting for asked for this: a background read, or a second ask.
-        if (state.kind === 'connected') sessionEnded();
+        // Only the pod-auth that serves the connected session can end it; one released earlier
+        // cannot reach here today (its lifetime signal aborts first), and this keeps it so.
+        if (state.kind === 'connected' && built !== null && auth === built) sessionEnded();
         throw new SignInNotInProgressError();
       },
     });
+    return built;
+  };
 
   const set = (next: PodSessionState): void => {
     state = next;

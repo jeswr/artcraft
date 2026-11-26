@@ -147,6 +147,33 @@ describe('the gate on opening the system browser', () => {
     expect(logged).toEqual([]);
   });
 
+  it('a refusal from a pod-auth released earlier does not end the session that replaced it', async () => {
+    const built: { auth: ReturnType<typeof fakeAuth>; options: AuthOptions }[] = [];
+    const session = createPodSession({
+      config: CONFIG,
+      createAuth: (authOptions = {}) => {
+        // The first restore fails; "Try again" restores with a new pod-auth.
+        const auth = fakeAuth(built.length === 0 ? { restoreError: new Error('offline') } : { restored: WEBID });
+        built.push({ auth, options: authOptions });
+        return auth;
+      },
+      wipeStores: async () => 'wiped',
+      podMode: fakePodMode({ podWindow: true, issuer: ISSUER }),
+      marker: memoryMarker(),
+      pending: memoryPending(),
+      selfTest: async () => ({ ok: true }),
+    });
+    await session.start();
+    expect(session.getState()).toEqual({ kind: 'error', error: 'restore-failed' });
+    await session.retry();
+    expect(session.getState()).toEqual({ kind: 'connected', webId: WEBID });
+    expect(() => built[0]!.options.authorizeSignIn!()).toThrow(SignInNotInProgressError);
+    expect(session.getState()).toEqual({ kind: 'connected', webId: WEBID });
+    // The current one still ends it.
+    expect(() => built[1]!.options.authorizeSignIn!()).toThrow(SignInNotInProgressError);
+    expect(session.getState()).toEqual({ kind: 'error', error: 'session-ended' });
+  });
+
   it('refuses by default when no gate is supplied', () => {
     expect(() => refuseSignIn()).toThrow(SignInNotInProgressError);
   });
