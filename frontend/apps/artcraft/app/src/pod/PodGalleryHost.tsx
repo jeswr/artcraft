@@ -30,10 +30,10 @@ export function PodGalleryHost({ session, children }: { session: PodSession; chi
           return current.kind === "connected" ? current.webId : null;
         },
         build: async (key, signal) => {
-          if (!session.getFetch()) throw new PodLibraryOpenError("not-connected");
+          if (!session.getBackgroundFetch()) throw new PodLibraryOpenError("not-connected");
           const { buildPodLibrary } = await import("./gallery-runtime");
           // The fetch is read per request, so an ended session stops reads instead of reusing it.
-          return buildPodLibrary({ getFetch: () => session.getFetch(), getSessionKey: currentKey, webId: key, signal });
+          return buildPodLibrary({ getFetch: () => session.getBackgroundFetch(), getSessionKey: currentKey, webId: key, signal });
         },
       }),
     [session, currentKey],

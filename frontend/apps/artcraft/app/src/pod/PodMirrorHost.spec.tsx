@@ -40,7 +40,7 @@ import { PodMirrorHost } from "./PodMirrorHost";
 function fakePodSession(initial: PodSessionState) {
   let state = initial;
   const listeners = new Set<() => void>();
-  const session = { getState: () => state, subscribe: (l: () => void) => (listeners.add(l), () => listeners.delete(l)), getFetch: () => null } as unknown as PodSession;
+  const session = { getState: () => state, subscribe: (l: () => void) => (listeners.add(l), () => listeners.delete(l)), getFetch: () => null, getBackgroundFetch: () => null } as unknown as PodSession;
   return { session, set: (next: PodSessionState) => act(() => { state = next; for (const l of listeners) l(); }) };
 }
 const connected = (webId: string) => ({ kind: "connected", webId }) as PodSessionState;

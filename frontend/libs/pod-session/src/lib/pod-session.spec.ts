@@ -174,6 +174,23 @@ describe('start in a pod window', () => {
     expect(t.session.getFetch()).toBe(t.auth.fetch);
   });
 
+  it('hands background readers the fetch that never asks for the person', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    expect(t.session.getBackgroundFetch()).toBeNull();
+    const started = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.finish(WEBID);
+    await started;
+    expect(t.session.getBackgroundFetch()).toBe(t.auth.nonInteractiveFetch);
+    expect(t.session.getBackgroundFetch()).not.toBe(t.session.getFetch());
+    // Its reads answer 401 instead of asking for the person; when pod-auth then reports the
+    // stored sign-in gone, the session ends as it would after a refused browser request.
+    t.auth.expire();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'session-ended' });
+    expect(t.session.getBackgroundFetch()).toBeNull();
+  });
+
   it('restores a remembered session when no sign-in was asked for', async () => {
     const t = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restored: WEBID }) });
     await t.session.start();

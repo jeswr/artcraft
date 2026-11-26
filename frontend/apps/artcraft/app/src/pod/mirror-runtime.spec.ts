@@ -26,7 +26,7 @@ vi.mock("./mirror-store", () => ({ createStoreOpener: (deps: { webId: string }) 
 
 import { RECONCILE_INTERVAL_MS, startPodMirror } from "./mirror-runtime";
 
-const deps = { session: { getFetch: () => null } as never, webId: "https://alice.example/profile/card#me", username: "alice_hosted", currentUsername: () => "alice_hosted" };
+const deps = { session: { getFetch: () => null, getBackgroundFetch: () => null } as never, webId: "https://alice.example/profile/card#me", username: "alice_hosted", currentUsername: () => "alice_hosted" };
 
 beforeEach(() => {
   vi.clearAllMocks();

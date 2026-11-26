@@ -26,6 +26,7 @@ import { PodGalleryHost } from "./PodGalleryHost";
 const ALICE = "https://alice.example/profile/card#me";
 const BOB = "https://bob.example/profile/card#me";
 const FETCH = vi.fn() as unknown as typeof fetch;
+const INTERACTIVE_FETCH = vi.fn() as unknown as typeof fetch;
 
 function fakePodSession(initial: PodSessionState, options: { canSignInAgain?: (state: PodSessionState) => boolean; podWindow?: boolean } = {}) {
   let state = initial;
@@ -39,7 +40,9 @@ function fakePodSession(initial: PodSessionState, options: { canSignInAgain?: (s
     openBrowser,
     getState: () => state,
     subscribe: (listener: () => void) => (listeners.add(listener), () => listeners.delete(listener)),
-    getFetch: () => (state.kind === "connected" ? FETCH : null),
+    // The gallery reads in the background: it must get the fetch that never asks for the person.
+    getFetch: () => (state.kind === "connected" ? INTERACTIVE_FETCH : null),
+    getBackgroundFetch: () => (state.kind === "connected" ? FETCH : null),
     canSignInAgain: () => options.canSignInAgain?.(state) ?? false,
     signInAgain,
   } as unknown as PodSession;
@@ -221,7 +224,7 @@ describe("the host that offers the pod library to the gallery", () => {
     expect(world.built[0]?.library.close).toHaveBeenCalledTimes(1);
   });
 
-  it("gives the runtime the session's fetch per request and its WebID as the loaders' key, both following the session", async () => {
+  it("gives the runtime the session's background fetch per request and its WebID as the loaders' key, both following the session", async () => {
     const pod = fakePodSession(connected(ALICE));
     render(<PodGalleryHost session={pod.session}><Probe /></PodGalleryHost>);
     await access!.open();

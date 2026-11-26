@@ -39,7 +39,7 @@ export async function startPodMirror({ session, webId, username, currentUsername
     account: { webId, username },
     journal,
     hosted: createHostedClient(username, currentUsername, currentHost),
-    openStore: createStoreOpener({ podFetch: () => session.getFetch(), webId, journal }),
+    openStore: createStoreOpener({ podFetch: () => session.getBackgroundFetch(), webId, journal }),
     fetchPublicBytes: createPublicBytesFetcher(),
     session: sessionPortFor(session, webId),
     network: browserNetworkPort(),

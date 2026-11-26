@@ -43,12 +43,26 @@ export type AuthOptions = {
 
 /** The part of `@jeswr/pod-auth`'s `PodAuth` this machine uses. */
 export interface PodAuthPort {
-  login(hint: { issuer: string } | { webId: string }, options: { signal: AbortSignal }): Promise<{ webId: string | null }>;
-  restore(): Promise<{ webId: string | null } | null>;
+  login(hint: { issuer: string } | { webId: string }, options: { signal: AbortSignal }): Promise<SignedInIdentity>;
+  restore(): Promise<SignedInIdentity | null>;
   logout(): Promise<void>;
   dispose?(): void;
   /** The only fetch that may carry pod credentials. */
   fetch: typeof fetch;
+  /**
+   * The same credentials for reads nobody just asked for: where `fetch` would need the person
+   * (and so would reach `authorizeSignIn`), it answers the pod's 401 instead. Absent in fakes.
+   */
+  nonInteractiveFetch?: typeof fetch;
+  /** pod-auth's events; the session listens for `expired` (its stored sign-in is gone). */
+  on?(event: 'expired', handler: () => void): () => void;
+}
+
+/** What pod-auth says about a signed-in account; only what the session reads. */
+export interface SignedInIdentity {
+  webId: string | null;
+  /** How pod-auth found the storage its credentials are for (`source: 'none'`: it found none). */
+  storageDiscovery?: { source: string; reason?: string };
 }
 
 /** What the machine needs from the window and the shell, replaceable in tests. */
@@ -181,6 +195,12 @@ export interface PodSession {
    * refusal rejects the request with `StorageOriginRefused`.
    */
   getFetch(): typeof fetch | null;
+  /**
+   * `getFetch()` for background reads and writes (the gallery, the mirror): it never asks for
+   * the person, so a request that would need a new sign-in answers 401 instead. The origin gate
+   * and `authorizeSignIn` still apply. Null unless connected.
+   */
+  getBackgroundFetch(): typeof fetch | null;
   /** Whether this window is a pod window, as the app recorded it. */
   inPodMode(): boolean;
   /** Whether this build can sign in at all; Connect stays disabled unless this is `ok`. */
@@ -214,6 +234,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   let leaving: Promise<void> | null = null;
   const originGate = podMode.admission ? createOriginGate(podMode.admission, deps.config.allowLoopbackHttp) : null;
   let gated: { source: typeof fetch; fetch: typeof fetch } | null = null;
+  let gatedBackground: { source: typeof fetch; fetch: typeof fetch } | null = null;
   // pod-auth's own reads: an unlisted origin is refused at once so the page can explain first.
   const authFetch: typeof fetch | undefined = originGate ? gateFetch((input, init) => globalThis.fetch(input, init), originGate, { prompt: false }) : undefined;
   // What the displayed `ready-to-sign-in` offered: used by the click, never re-read from storage.
@@ -269,6 +290,12 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
         if (state.kind === 'connected' && built !== null && auth === built) sessionEnded();
         throw new SignInNotInProgressError();
       },
+    });
+    // A background read through `nonInteractiveFetch` never reaches `authorizeSignIn`: when the
+    // stored sign-in is gone (a refused refresh), pod-auth says so here instead, and the session
+    // ends the same way.
+    built.on?.('expired', () => {
+      if (state.kind === 'connected' && built !== null && auth === built) sessionEnded();
     });
     return built;
   };
@@ -759,6 +786,14 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       if (!originGate) return auth.fetch;
       if (gated?.source !== auth.fetch) gated = { source: auth.fetch, fetch: gateFetch(auth.fetch, originGate) };
       return gated.fetch;
+    },
+
+    getBackgroundFetch() {
+      if (state.kind !== 'connected' || !auth) return null;
+      const source = auth.nonInteractiveFetch ?? auth.fetch;
+      if (!originGate) return source;
+      if (gatedBackground?.source !== source) gatedBackground = { source, fetch: gateFetch(source, originGate) };
+      return gatedBackground.fetch;
     },
     inPodMode: () => podMode.isPodMode(),
     configCheck: () => checkConfig(deps.config),

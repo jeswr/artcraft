@@ -1,13 +1,15 @@
 import type { PodGate } from '@storyteller/pod-mode';
 import type { HintStore, PendingSignIn, PendingStore, SignInHint } from './pending.js';
-import type { Marker, MarkerValue, PodAuthPort, PodModePort } from './pod-session.js';
+import type { Marker, MarkerValue, PodAuthPort, PodModePort, SignedInIdentity } from './pod-session.js';
 import type { AddOriginResult } from '@storyteller/pod-mode';
 
 export type FakeAuth = PodAuthPort & {
   calls: string[];
   loginHints: ({ issuer: string } | { webId: string })[];
-  /** Resolves a pending login. */
-  finish(webId: string | null): void;
+  /** Resolves a pending login, optionally with pod-auth's storage discovery. */
+  finish(webId: string | null, storageDiscovery?: SignedInIdentity['storageDiscovery']): void;
+  /** Emits pod-auth's `expired` event. */
+  expire(): void;
   /** Rejects a pending login. */
   fail(error: unknown): void;
 };
@@ -16,12 +18,21 @@ export type FakeAuth = PodAuthPort & {
 export function fakeAuth(options: { restored?: string | null; restoredWithoutWebId?: boolean; restoreError?: unknown; logoutError?: unknown } = {}): FakeAuth {
   const calls: string[] = [];
   const loginHints: ({ issuer: string } | { webId: string })[] = [];
-  let resolve: (v: { webId: string | null }) => void = () => undefined;
+  let resolve: (v: SignedInIdentity) => void = () => undefined;
   let reject: (e: unknown) => void = () => undefined;
+  const expired = new Set<() => void>();
   const auth: FakeAuth = {
     calls,
+    on(_event, handler) {
+      expired.add(handler);
+      return () => expired.delete(handler);
+    },
+    expire: () => {
+      for (const handler of [...expired]) handler();
+    },
     loginHints,
     fetch: (async () => new Response('ok')) as typeof fetch,
+    nonInteractiveFetch: (async () => new Response('ok')) as typeof fetch,
     login(hint, { signal }) {
       calls.push('login');
       loginHints.push(hint);
@@ -44,7 +55,7 @@ export function fakeAuth(options: { restored?: string | null; restoredWithoutWeb
     dispose() {
       calls.push('dispose');
     },
-    finish: (webId) => resolve({ webId }),
+    finish: (webId, storageDiscovery) => resolve(storageDiscovery ? { webId, storageDiscovery } : { webId }),
     fail: (error) => reject(error),
   };
   return auth;

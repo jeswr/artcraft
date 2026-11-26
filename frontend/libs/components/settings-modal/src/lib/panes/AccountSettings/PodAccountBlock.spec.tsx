@@ -41,6 +41,7 @@ function fakeSession(initial: PodSessionState, options: FakeOptions = {}) {
     signInAgain: vi.fn(async () => undefined),
     leave: vi.fn(async () => undefined),
     getFetch: () => null,
+    getBackgroundFetch: () => null,
     inPodMode: () => options.podWindow ?? false,
     configCheck: () => options.config ?? "ok",
   } satisfies PodSession;
