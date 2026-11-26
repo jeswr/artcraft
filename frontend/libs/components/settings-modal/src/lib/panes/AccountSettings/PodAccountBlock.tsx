@@ -19,7 +19,7 @@ import { PodImportBlock } from "./PodImportBlock";
  * anything: ArtCraft's hosted library stays the working library.
  */
 const DISCLOSURE =
-  "Connecting signs you in to your Solid pod provider and saves a copy of your new generations, uploads and edits to your pod, with the prompt and settings ArtCraft has for each. ArtCraft's servers still receive what you generate and upload. When you delete an item in ArtCraft, ArtCraft removes its pod copy too. If an item is missing from ArtCraft for any other reason, its copy stays on your pod and this page tells you, so you can decide. Audio, scene files and files over 50 MB are not copied.";
+  "Connecting signs you in to your Solid pod provider and saves a copy of your new generations, uploads and edits to your pod, with the prompt and settings ArtCraft has for each. ArtCraft's servers still receive what you generate and upload. When you delete an item in ArtCraft while your pod is connected in this window, ArtCraft removes its pod copy too. An item deleted at any other time (in a window that is not in pod mode, or after your pod sign-in ended) keeps its pod copy, as does an item missing from ArtCraft for any other reason: when ArtCraft next checks your pod, this page tells you, so you can decide. Audio, scene files and files over 50 MB are not copied.";
 const RESTART =
   "ArtCraft asks you to confirm the address in a separate dialog, then restarts this window in a restricted pod mode: usage analytics are off and the window can only reach your provider and ArtCraft's own services. Anything unsaved in this window is lost when it restarts.";
 
