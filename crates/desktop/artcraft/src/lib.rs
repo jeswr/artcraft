@@ -38,7 +38,7 @@ use crate::core::commands::media_files::media_file_delete_command::media_file_de
 use crate::core::commands::platform_info_command::platform_info_command;
 use crate::core::commands::pod_mode::pod_mode_commands::{
   pod_mode_add_storage_origin_command, pod_mode_consume_fresh_command, pod_mode_credentials_cleared_command,
-  pod_mode_enter_command, pod_mode_leave_command, pod_mode_reload_command,
+  pod_mode_enter_command, pod_mode_leave_command, pod_mode_reload_command, pod_mode_sign_in_again_command,
 };
 use crate::core::pod_mode::new_controller;
 use crate::core::pod_mode::state::{PodModeState, SharedPodModeState};
@@ -321,6 +321,7 @@ pub fn run() {
     pod_mode_enter_command,
     pod_mode_leave_command,
     pod_mode_reload_command,
+    pod_mode_sign_in_again_command,
     set_provider_order_command,
     sora_get_credential_info_command,
     sora_logout_command,

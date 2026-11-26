@@ -17,6 +17,11 @@ pub const MIN_DIALOG_DISPLAY_MS: u64 = 800;
 pub const COOLDOWN_MS: u64 = 5_000;
 /// The longest a back-off grows to.
 pub const MAX_COOLDOWN_MS: u64 = 5 * 60 * 1_000;
+/// The most "sign in again" dialogs the app shows in one run. Kept in memory only: like the other
+/// budgets it starts again when ArtCraft is reopened, but unlike `enter_prompts` it must also start
+/// again for a window that stays in pod mode across runs, or a provider whose sessions end every
+/// hour would lock the person out for good.
+pub const MAX_SIGN_IN_AGAIN_PROMPTS: u32 = 6;
 
 /// How long to turn requests away after the `refusals`-th declined dialog since the app started:
 /// 5 s, 10 s, 20 s, ... up to five minutes. The cap is reached from the seventh refusal; the
@@ -221,6 +226,9 @@ pub struct Controller<D, W, C, S> {
   /// The time before which new confirmations are refused: loaded from the record's
   /// `backoff_until_ms` at start (clamped), then kept here, so it still holds when a write fails.
   cooldown_until_ms: std::sync::atomic::AtomicU64,
+  /// "Sign in again" dialogs shown in this run, and how many of them the person declined.
+  sign_in_again_prompts: std::sync::atomic::AtomicU32,
+  sign_in_again_declines: std::sync::atomic::AtomicU32,
 }
 
 impl<D: Dialog, W: Windows, C: Clock, S: Store> Controller<D, W, C, S> {
@@ -234,6 +242,8 @@ impl<D: Dialog, W: Windows, C: Clock, S: Store> Controller<D, W, C, S> {
       loopback,
       in_flight: Mutex::new(()),
       cooldown_until_ms: std::sync::atomic::AtomicU64::new(0),
+      sign_in_again_prompts: std::sync::atomic::AtomicU32::new(0),
+      sign_in_again_declines: std::sync::atomic::AtomicU32::new(0),
     };
     controller.load_backoff();
     controller
@@ -293,6 +303,67 @@ ArtCraft's settings and trust it."
         let mut waiting = counted.clone();
         self.wait(&mut waiting, COOLDOWN_MS);
         let _ = self.persist(&counted, &waiting);
+        Ok(Reply::TooFast)
+      }
+    }
+  }
+
+  /// Sign in again in a pod window whose session ended (a token that can no longer be renewed
+  /// without the person). The window keeps its mode, its issuer and its storage origins: nothing
+  /// is added to what it may contact. A native dialog names the recorded issuer, and on Allow the
+  /// rebuilt window gets the same one-shot grant a connect leaves (`consume_fresh`), for that
+  /// issuer only, so the sign-in still starts from the person's click there. The dialogs are
+  /// bounded like the others: counted before each opens, at most `MAX_SIGN_IN_AGAIN_PROMPTS` in a
+  /// run, and each refusal grows the wait before the next dialog.
+  pub async fn sign_in_again(&self, caller: &str) -> Result<Reply, CommandError> {
+    use std::sync::atomic::Ordering::SeqCst;
+    self.only_main(caller)?;
+    let _turn = self.in_flight.try_lock().map_err(|_| CommandError::Busy)?;
+    let before = self.store.record();
+    if !before.enabled {
+      return Err(CommandError::NotInPodMode);
+    }
+    // A record with no issuer (a corrupt one, read fail closed) has nothing to sign in to.
+    let issuer = before.issuer.clone().ok_or(CommandError::NotInPodMode)?;
+    if self.sign_in_again_prompts.load(SeqCst) >= MAX_SIGN_IN_AGAIN_PROMPTS {
+      return Err(CommandError::TooManyPrompts);
+    }
+    self.check_cooldown()?;
+    self.sign_in_again_prompts.fetch_add(1, SeqCst);
+    let prompt = Prompt {
+      title: "Sign in to your Solid pod again",
+      message: format!(
+        "ArtCraft's window says your Solid pod sign-in has ended and asks to sign you in again at:\n\n{origin}\n\n\
+This is the address this window is already in pod mode for; nothing is added to what it may \
+contact. If you allow it, this window will reload, and your browser opens there only after you \
+continue in the window. ArtCraft cannot check why it is being asked. Only allow it if you just \
+chose to sign in again.",
+        origin = issuer
+      ),
+      accept: "Sign in again",
+    };
+    match self.ask(&prompt).await {
+      Confirmation::Accepted => {
+        if self.store.record() != before {
+          return Err(CommandError::Changed);
+        }
+        self.store.set_fresh(Some(issuer));
+        self.rebuilt().await?;
+        Ok(Reply::Applied)
+      }
+      Confirmation::Declined => {
+        self.store.set_fresh(None);
+        let declines = self.sign_in_again_declines.fetch_add(1, SeqCst) as usize + 1;
+        let mut waiting = before.clone();
+        self.wait(&mut waiting, refusal_backoff_ms(transition::declines(&before) + declines));
+        let _ = self.persist(&before, &waiting);
+        Ok(Reply::Declined)
+      }
+      Confirmation::TooFast => {
+        self.store.set_fresh(None);
+        let mut waiting = before.clone();
+        self.wait(&mut waiting, COOLDOWN_MS);
+        let _ = self.persist(&before, &waiting);
         Ok(Reply::TooFast)
       }
     }
@@ -1031,13 +1102,14 @@ mod tests {
         c.reload(MAIN).await,
         c.credentials_cleared(MAIN).await,
         c.consume_fresh(MAIN).await.map(|_| Reply::Applied),
+        c.sign_in_again(MAIN).await,
       );
       gate.notify_one();
       results
     };
-    let (first, (a, b, l, r, cc, f)) = tokio::join!(first, second);
+    let (first, (a, b, l, r, cc, f, s)) = tokio::join!(first, second);
     assert_eq!(first, Ok(Reply::Applied));
-    for result in [a, b, l, r, cc, f] {
+    for result in [a, b, l, r, cc, f, s] {
       assert_eq!(result, Err(CommandError::Busy));
     }
     assert_eq!(w.rebuilds.load(SeqCst), 1);
@@ -1148,6 +1220,91 @@ mod tests {
     *w.record.lock().unwrap() = PodModeRecord { credentials_may_exist: true, ..PodModeRecord::default() };
     assert_eq!(c.reload(MAIN).await, Ok(Reply::Applied));
     assert_eq!(w.rebuilds.load(SeqCst), 1);
+  }
+
+  mod sign_in_again {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_allowed_dialog_names_the_recorded_issuer_and_leaves_a_one_shot_grant_for_it() {
+      let (w, c) = world();
+      in_pod_mode(&w);
+      let record = w.record.lock().unwrap().clone();
+      assert_eq!(c.sign_in_again(MAIN).await, Ok(Reply::Applied));
+      assert!(w.prompts.lock().unwrap()[0].contains(ISSUER));
+      assert_eq!(w.rebuilds.load(SeqCst), 1);
+      // The mode and the origins the window may contact are as they were.
+      assert_eq!(*w.record.lock().unwrap(), record);
+      assert_eq!(c.consume_fresh(MAIN).await.as_deref(), Ok(ISSUER));
+      assert_eq!(c.consume_fresh(MAIN).await, Err(CommandError::NotFresh));
+    }
+
+    #[tokio::test]
+    async fn it_needs_a_pod_window_with_an_issuer_and_the_main_window() {
+      let (w, c) = world();
+      assert_eq!(c.sign_in_again(MAIN).await, Err(CommandError::NotInPodMode));
+      // A corrupt record is read as pod mode with no issuer: nothing to sign in to.
+      *w.record.lock().unwrap() = crate::record::Loaded::Corrupt.effective();
+      assert_eq!(c.sign_in_again(MAIN).await, Err(CommandError::NotInPodMode));
+      in_pod_mode(&w);
+      assert_eq!(c.sign_in_again("login").await, Err(CommandError::Forbidden));
+      assert!(w.prompts.lock().unwrap().is_empty());
+      assert!(w.fresh.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_decline_or_a_too_fast_answer_grants_nothing_and_starts_a_wait() {
+      for answer in [(Answer::Declined, 2_000), (Answer::Accepted, MIN_DIALOG_DISPLAY_MS - 1)] {
+        let (w, c) = world();
+        in_pod_mode(&w);
+        w.fresh.lock().unwrap().replace(ISSUER.to_string());
+        *w.answer.lock().unwrap() = Some(answer);
+        assert!(matches!(c.sign_in_again(MAIN).await, Ok(Reply::Declined | Reply::TooFast)));
+        assert!(w.fresh.lock().unwrap().is_none());
+        assert_eq!(w.rebuilds.load(SeqCst), 0);
+        assert!(w.record.lock().unwrap().enabled, "declining does not leave pod mode");
+        let shown = w.prompts.lock().unwrap().len();
+        assert_eq!(c.sign_in_again(MAIN).await, Err(CommandError::CoolingDown));
+        assert_eq!(w.prompts.lock().unwrap().len(), shown);
+      }
+    }
+
+    #[tokio::test]
+    async fn each_refusal_waits_longer_than_the_one_before() {
+      let (w, c) = world();
+      in_pod_mode(&w);
+      *w.answer.lock().unwrap() = Some((Answer::Declined, 1_000));
+      assert_eq!(c.sign_in_again(MAIN).await, Ok(Reply::Declined));
+      let first = w.record.lock().unwrap().backoff_until_ms - w.now.load(SeqCst);
+      w.now.fetch_add(first + 1, SeqCst);
+      assert_eq!(c.sign_in_again(MAIN).await, Ok(Reply::Declined));
+      let second = w.record.lock().unwrap().backoff_until_ms - w.now.load(SeqCst);
+      assert!(second > first);
+    }
+
+    #[tokio::test]
+    async fn the_dialogs_are_bounded_per_run_whatever_the_answers() {
+      let (w, c) = world();
+      in_pod_mode(&w);
+      for _ in 0..MAX_SIGN_IN_AGAIN_PROMPTS {
+        w.now.fetch_add(MAX_COOLDOWN_MS + 1, SeqCst);
+        assert_eq!(c.sign_in_again(MAIN).await, Ok(Reply::Applied));
+      }
+      w.now.fetch_add(MAX_COOLDOWN_MS + 1, SeqCst);
+      let shown = w.prompts.lock().unwrap().len();
+      assert_eq!(c.sign_in_again(MAIN).await, Err(CommandError::TooManyPrompts));
+      assert_eq!(w.prompts.lock().unwrap().len(), shown);
+    }
+
+    #[tokio::test]
+    async fn a_record_that_changed_while_the_dialog_was_open_grants_nothing() {
+      let (w, c) = world();
+      in_pod_mode(&w);
+      *w.during.lock().unwrap() = Some(Box::new(|w| *w.record.lock().unwrap() = PodModeRecord::default()));
+      assert_eq!(c.sign_in_again(MAIN).await, Err(CommandError::Changed));
+      assert!(w.fresh.lock().unwrap().is_none());
+      assert_eq!(w.rebuilds.load(SeqCst), 0);
+    }
   }
 
   #[test]

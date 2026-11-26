@@ -74,6 +74,17 @@ pub async fn pod_mode_reload_command(
   outcome(controller.reload(window.label()).await)
 }
 
+/// A pod window whose session ended asks to sign in again at its recorded issuer (native dialog).
+/// Nothing about the mode or its origins changes; on Allow the rebuilt window may offer the
+/// sign-in, which still starts from the person's click.
+#[tauri::command]
+pub async fn pod_mode_sign_in_again_command(
+  window: WebviewWindow,
+  controller: State<'_, PodModeController>,
+) -> Result<Outcome, String> {
+  outcome(controller.sign_in_again(window.label()).await)
+}
+
 /// The click that starts a fresh sign-in: returns the issuer the person approved in this
 /// process, once.
 #[tauri::command]
