@@ -6,20 +6,32 @@ use crate::core::state::artcraft_usage_tracker::artcraft_usage_type::{ArtcraftUs
 
 /// Track generation volume so we know which areas to focus efforts on.
 /// But also note: https://en.wikipedia.org/wiki/Survivorship_bias
+/// The counts are usage analytics: `counting_allowed` is read before each record, and a pod-mode
+/// window counts nothing.
 #[derive(Clone)]
 pub struct ArtcraftUsageTracker {
   data: Arc<RwLock<ArtcraftUsageTrackerData>>,
+  counting_allowed: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 
 impl ArtcraftUsageTracker {
-  pub fn new() -> Self {
+  pub fn new_with_gate(counting_allowed: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
     Self {
       data: Arc::new(RwLock::new(ArtcraftUsageTrackerData::new())),
+      counting_allowed,
     }
+  }
+
+  /// Drops every count, for a new reporting session.
+  pub fn reset(&self) -> Result<(), ArtcraftError> {
+    self.set(ArtcraftUsageTrackerData::new())
   }
   
   pub fn record_image_generation(&self, num_images: u16, usage_type: ArtcraftUsageType, page: ArtcraftUsagePage) -> Result<(), ArtcraftError> {
+    if !(self.counting_allowed)() {
+      return Ok(());
+    }
     let mut data = self.get()?;
     data.total_generation_count += num_images;
     data.image_generation_count += num_images;
@@ -53,6 +65,9 @@ impl ArtcraftUsageTracker {
   }
   
   pub fn record_video_generation(&self, num_videos: u16, usage_type: ArtcraftUsageType, page: ArtcraftUsagePage) -> Result<(), ArtcraftError> {
+    if !(self.counting_allowed)() {
+      return Ok(());
+    }
     let mut data = self.get()?;
     data.total_generation_count += num_videos;
     data.video_generation_count += num_videos;
@@ -82,6 +97,9 @@ impl ArtcraftUsageTracker {
   }
   
   pub fn record_object_generation(&self, num_objects: u16, usage_type: ArtcraftUsageType, page: ArtcraftUsagePage) -> Result<(), ArtcraftError> {
+    if !(self.counting_allowed)() {
+      return Ok(());
+    }
     let mut data = self.get()?;
     data.total_generation_count += num_objects;
     data.object_generation_count += num_objects;
@@ -131,5 +149,30 @@ impl ArtcraftUsageTracker {
         Err(ArtcraftError::RwLockWriteError)
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::sync::atomic::{AtomicBool, Ordering};
+
+  #[test]
+  fn nothing_is_counted_while_the_gate_is_closed_and_reset_drops_the_counts() {
+    let open = Arc::new(AtomicBool::new(true));
+    let gate = open.clone();
+    let tracker = ArtcraftUsageTracker::new_with_gate(Arc::new(move || gate.load(Ordering::SeqCst)));
+    tracker.record_image_generation(2, ArtcraftUsageType::TextToResult, ArtcraftUsagePage::ImagePage).unwrap();
+    let counted = tracker.get().unwrap().total_generation_count;
+    assert!(counted > 0);
+
+    open.store(false, Ordering::SeqCst);
+    tracker.record_image_generation(2, ArtcraftUsageType::TextToResult, ArtcraftUsagePage::ImagePage).unwrap();
+    tracker.record_video_generation(1, ArtcraftUsageType::TextToResult, ArtcraftUsagePage::VideoPage).unwrap();
+    tracker.record_object_generation(1, ArtcraftUsageType::TextToResult, ArtcraftUsagePage::ObjectPage).unwrap();
+    assert_eq!(tracker.get().unwrap().total_generation_count, counted);
+
+    tracker.reset().unwrap();
+    assert!(tracker.get().unwrap().total_generation_count < counted);
   }
 }

@@ -170,15 +170,17 @@ pub fn run() {
   let worldlabs_bearer_bridge = WorldlabsBearerBridge::empty();
   let worldlabs_bearer_bridge_2 = worldlabs_bearer_bridge.clone();
   
-  let artcraft_usage_tracker = ArtcraftUsageTracker::new();
-  let artcraft_usage_tracker_2 = artcraft_usage_tracker.clone();
-
   let context = tauri::generate_context!("tauri.conf.json");
   let pod_mode_state = Arc::new(PodModeState::load(
     app_data_root.settings_dir().path().to_path_buf(),
     &context.config().identifier,
   ));
   let pod_mode_shared = SharedPodModeState(pod_mode_state.clone());
+
+  // Generation counts are usage analytics: none are kept while the window is restricted.
+  let usage_gate_state = pod_mode_state.clone();
+  let artcraft_usage_tracker = ArtcraftUsageTracker::new_with_gate(Arc::new(move || !usage_gate_state.restricted()));
+  let artcraft_usage_tracker_2 = artcraft_usage_tracker.clone();
 
   println!("Initializing backend runtime...");
 

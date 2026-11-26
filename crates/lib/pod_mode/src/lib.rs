@@ -2,6 +2,7 @@
 //! ask for it, and an origin is trusted only after a native confirmation. No credential ever
 //! reaches this crate; it only sees origins.
 
+pub mod activity;
 pub mod controller;
 pub mod csp;
 pub mod host_script;

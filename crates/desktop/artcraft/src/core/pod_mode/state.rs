@@ -3,7 +3,7 @@ use pod_mode::origin::Loopback;
 use pod_mode::record::{self, PodModeRecord};
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The pod-mode record, read from disk once at start and replaced only through `replace`, which
@@ -20,6 +20,9 @@ pub struct PodModeState {
   /// WebKitGTK the first window's handler stays registered for later windows (shown in a throwaway
   /// app), so a handler that captured its own copy would keep serving the first window's policy.
   policy: Mutex<Option<String>>,
+  /// How many times the record has become restricted in this process (counting a restricted
+  /// record at start). The hosted activity report reads it so no reporting session spans pod mode.
+  restricted_periods: AtomicU64,
 }
 
 impl PodModeState {
@@ -27,7 +30,17 @@ impl PodModeState {
     let dir = record::record_dir(&settings_dir, identifier);
     // The dialog budget is per run of the app: it starts again when the app starts outside pod mode.
     let record = record::load(&dir, Loopback::for_this_build()).effective().budget_reset_on_start();
-    Self { dir, record: Mutex::new(record), fresh: Mutex::new(None), rebuilding: AtomicBool::new(false), policy: Mutex::new(None) }
+    let restricted_periods = AtomicU64::new(u64::from(record.restricted()));
+    Self { dir, record: Mutex::new(record), fresh: Mutex::new(None), rebuilding: AtomicBool::new(false), policy: Mutex::new(None), restricted_periods }
+  }
+
+  /// Pod mode, or pod credentials not yet confirmed wiped: no usage analytics may run.
+  pub fn restricted(&self) -> bool {
+    self.record.lock().unwrap_or_else(|p| p.into_inner()).restricted()
+  }
+
+  pub fn restricted_periods(&self) -> u64 {
+    self.restricted_periods.load(Ordering::SeqCst)
   }
 
   pub fn rebuilding(&self) -> bool {
@@ -62,6 +75,9 @@ impl Store for SharedPodModeState {
   fn replace(&self, next: &PodModeRecord) -> io::Result<()> {
     let mut guard = self.0.record.lock().unwrap_or_else(|p| p.into_inner());
     record::save(&self.0.dir, next)?;
+    if next.restricted() && !guard.restricted() {
+      self.0.restricted_periods.fetch_add(1, Ordering::SeqCst);
+    }
     *guard = next.clone();
     Ok(())
   }
@@ -126,6 +142,28 @@ mod tests {
     assert_eq!(state.policy().as_deref(), Some("b"));
     state.set_policy(None);
     assert_eq!(state.policy(), None);
+  }
+
+  #[test]
+  fn each_entry_into_a_restricted_record_starts_a_new_period() {
+    let base = tempfile::tempdir().unwrap();
+    let state = SharedPodModeState(Arc::new(PodModeState::load(base.path().to_path_buf(), "x.y")));
+    let before = state.0.restricted_periods();
+    assert!(!state.0.restricted());
+    let entered = pod_mode::transition::enter("https://login.example", Loopback::HttpRefused).unwrap();
+    state.replace(&entered).unwrap();
+    let first = state.0.restricted_periods();
+    assert!(state.0.restricted() && first > before);
+    // Staying restricted is the same period.
+    state.replace(&entered).unwrap();
+    assert_eq!(state.0.restricted_periods(), first);
+    state.replace(&PodModeRecord::default()).unwrap();
+    assert!(!state.0.restricted());
+    state.replace(&entered).unwrap();
+    assert!(state.0.restricted_periods() > first);
+    // A process that starts restricted has already had one.
+    let again = PodModeState::load(base.path().to_path_buf(), "x.y");
+    assert!(again.restricted() && again.restricted_periods() > 0);
   }
 
   #[test]

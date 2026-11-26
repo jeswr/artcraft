@@ -1,3 +1,4 @@
+use crate::core::pod_mode::state::PodModeState;
 use crate::core::state::app_env_configs::app_env_configs::AppEnvConfigs;
 use crate::core::state::artcraft_platform_info::ArtcraftPlatformInfo;
 use crate::core::state::artcraft_usage_tracker::artcraft_usage_tracker::ArtcraftUsageTracker;
@@ -10,7 +11,9 @@ use artcraft_client::credentials::storyteller_credential_set::StorytellerCredent
 use artcraft_client::error::storyteller_error::StorytellerError;
 use errors::AnyhowResult;
 use log::{debug, error, info};
+use pod_mode::activity::{ActivityGate, ActivityStep};
 use sqlite_tasks::queries::list_tasks_by_provider_and_tokens::{list_tasks_by_provider_and_tokens, ListTasksArgs};
+use std::sync::Arc;
 use std::time::Instant;
 use tokens::tokens::app_session::AppSessionToken;
 
@@ -18,25 +21,28 @@ const CLIENT_NAME : &str = "artcraft";
 
 const ERROR_SLEEP_MILLIS : u64 = 1_000 * 60 * 3; // 3 minutes;
 
+/// Reports activity to the hosted API. This is usage analytics, so it sends nothing while the
+/// window is restricted (pod mode, or pod credentials not yet wiped), and a session never spans
+/// such a period (see `pod_mode::activity`).
 pub async fn storyteller_activity_thread(
+  pod_mode: Arc<PodModeState>,
   app_env_configs: AppEnvConfigs,
   artcraft_platform_info: ArtcraftPlatformInfo,
   artcraft_usage_tracker: ArtcraftUsageTracker,
   storyteller_creds_manager: StorytellerCredentialManager,
 ) -> ! {
-  let startup = Instant::now();
-  let app_session_token = AppSessionToken::generate();
-
-  info!("Session started at {:?} with token: {:?}", startup, app_session_token);
+  let mut session = ActivitySession::start();
+  let mut gate = ActivityGate::default();
 
   loop {
     let res = polling_loop(
+      &pod_mode,
+      &mut gate,
+      &mut session,
       &app_env_configs,
       &artcraft_usage_tracker,
       &storyteller_creds_manager,
-      startup,
       &artcraft_platform_info,
-      &app_session_token,
     ).await;
     if let Err(err) = res {
       error!("Activity request failed: origin={} path={} error={:?}", app_env_configs.storyteller_host.to_api_hostname_and_scheme(), LOG_ACTIVE_USER_V2_PATH, err);
@@ -46,15 +52,42 @@ pub async fn storyteller_activity_thread(
   }
 }
 
+struct ActivitySession {
+  startup: Instant,
+  token: AppSessionToken,
+}
+
+impl ActivitySession {
+  fn start() -> Self {
+    let session = Self { startup: Instant::now(), token: AppSessionToken::generate() };
+    info!("Session started at {:?} with token: {:?}", session.startup, session.token);
+    session
+  }
+}
+
 async fn polling_loop(
+  pod_mode: &PodModeState,
+  gate: &mut ActivityGate,
+  session: &mut ActivitySession,
   app_env_configs: &AppEnvConfigs,
   artcraft_usage_tracker: &ArtcraftUsageTracker,
   storyteller_creds_manager: &StorytellerCredentialManager,
-  startup: Instant,
   artcraft_platform_info: &ArtcraftPlatformInfo,
-  app_session_token: &AppSessionToken,
 ) -> AnyhowResult<()> {
   loop {
+    match gate.step(pod_mode.restricted(), pod_mode.restricted_periods()) {
+      ActivityStep::Hold => {
+        tokio::time::sleep(std::time::Duration::from_millis(5_000)).await;
+        continue;
+      }
+      ActivityStep::Report { new_session: true } => {
+        // Nothing from before or during the restricted period goes into the next report.
+        *session = ActivitySession::start();
+        artcraft_usage_tracker.reset()?;
+      }
+      ActivityStep::Report { new_session: false } => {}
+    }
+
     let creds = storyteller_creds_manager.get_credentials()?;
 
     let creds = match creds {
@@ -73,10 +106,10 @@ async fn polling_loop(
 
     let usage_data = artcraft_usage_tracker.get()?;
     
-    let time_since_startup = Instant::now().duration_since(startup);
+    let time_since_startup = Instant::now().duration_since(session.startup);
 
     let request = LogAppActiveUserRequest {
-      maybe_app_session_token: Some(app_session_token.clone()),
+      maybe_app_session_token: Some(session.token.clone()),
       maybe_app_name: Some(CLIENT_NAME.to_string()),
       maybe_app_version: Some(artcraft_platform_info.artcraft_version.clone()),
       maybe_os_platform: Some(artcraft_platform_info.os_platform.as_str().to_owned()),
