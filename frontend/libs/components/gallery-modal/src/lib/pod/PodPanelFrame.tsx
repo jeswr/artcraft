@@ -44,16 +44,40 @@ export function PodSkeleton({ columns }: { columns: number }) {
  * The body of "My pod" while the session has ended: says so where the person is looking, and
  * offers the way back. The button only asks the app; the browser opens after later clicks.
  */
-export function PodSignedOut({ onSignInAgain }: { onSignInAgain: () => void }) {
+export function PodSignedOut({
+  onSignInAgain,
+  asking = false,
+  problem = null,
+  canPress = true,
+}: {
+  onSignInAgain: () => void;
+  /** The app is asking in its dialog: the button waits and says so. */
+  asking?: boolean;
+  /** What came of the last press, when it did not lead to a sign-in. */
+  problem?: string | null;
+  /** False when pressing again cannot help: no button. */
+  canPress?: boolean;
+}) {
   return (
     <div className="flex h-64 items-center justify-center px-6" role="alert" data-testid="pod-signed-out">
       <div className="flex max-w-sm flex-col items-center gap-3 text-center text-sm">
         <div className="text-base-fg/70">{SIGNED_OUT_TITLE}</div>
         <div className="text-xs text-base-fg/60">{SIGNED_OUT_DETAIL}</div>
+        {/* Announced when it changes: the answer to a press is shown here, where the person is looking. */}
+        <div role="status" aria-live="polite" className="text-xs text-amber-300" data-testid="pod-signed-out-status">
+          {asking ? "Waiting for your answer in ArtCraft's dialog." : problem}
+        </div>
         {/* No autofocus: a stray Enter must not start a sign-in. */}
-        <button type="button" className="rounded-[3px] bg-ui-controls px-3 py-1.5 text-sm font-medium text-base-fg hover:bg-ui-controls/80" onClick={onSignInAgain}>
-          Sign in again
-        </button>
+        {(canPress || asking) && (
+          <button
+            type="button"
+            className="rounded-[3px] bg-ui-controls px-3 py-1.5 text-sm font-medium text-base-fg hover:bg-ui-controls/80 disabled:opacity-60"
+            onClick={onSignInAgain}
+            disabled={asking}
+          >
+            Sign in again
+          </button>
+        )}
       </div>
     </div>
   );

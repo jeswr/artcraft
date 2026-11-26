@@ -2645,7 +2645,12 @@ export const GalleryModal = React.memo(
                 galleryModalVisibleViewMode.value = false;
               }}
             >
-              <PodSignedOut onSignInAgain={() => podSignedOut.signInAgain()} />
+              <PodSignedOut
+                onSignInAgain={() => podSignedOut.signInAgain()}
+                asking={podSignedOut.asking}
+                problem={podSignedOut.problem}
+                canPress={podSignedOut.canPress}
+              />
             </PodPanelFrame>
           ) : showPod && podAccess ? (
             (() => {

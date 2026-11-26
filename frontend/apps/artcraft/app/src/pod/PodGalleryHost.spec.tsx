@@ -82,6 +82,43 @@ describe("the host that offers the pod library to the gallery", () => {
     expect(pod.signInAgain).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps My pod while the app asks and after its answer, and says what the answer was", async () => {
+    let signedOut: ReturnType<typeof usePodGallerySignedOut> = null;
+    function SignedOutProbe() {
+      signedOut = usePodGallerySignedOut();
+      return null;
+    }
+    // As the real session: only an ended session or a short wait can be signed in to again.
+    const pod = fakePodSession(
+      { kind: "error", error: "session-ended" },
+      { canSignInAgain: (state) => state.kind === "disconnected" || (state.kind === "error" && state.error !== "sign-in-again-limit") },
+    );
+    render(<PodGalleryHost session={pod.session}><SignedOutProbe /></PodGalleryHost>);
+    act(() => signedOut!.signInAgain());
+    pod.set({ kind: "connecting", issuer: "https://pod.example" });
+    expect(signedOut).toMatchObject({ asking: true });
+    pod.set({ kind: "disconnected", outcome: "declined" });
+    expect(signedOut).toMatchObject({ asking: false, canPress: true });
+    expect(signedOut!.problem).toMatch(/declined/);
+    pod.set({ kind: "error", error: "sign-in-again-wait" });
+    expect(signedOut!.problem).toBeTruthy();
+    pod.set({ kind: "error", error: "sign-in-again-limit" });
+    expect(signedOut).toMatchObject({ canPress: false });
+    expect(signedOut!.problem).toBeTruthy();
+  });
+
+  it("does not keep My pod for a connecting state it did not start", async () => {
+    let signedOut: ReturnType<typeof usePodGallerySignedOut> = null;
+    function SignedOutProbe() {
+      signedOut = usePodGallerySignedOut();
+      return null;
+    }
+    const pod = fakePodSession(disconnected, { canSignInAgain: (state) => state.kind === "error" });
+    render(<PodGalleryHost session={pod.session}><SignedOutProbe /></PodGalleryHost>);
+    pod.set({ kind: "connecting", issuer: "https://pod.example" });
+    expect(signedOut).toBeNull();
+  });
+
   it("offers nothing, and loads nothing, without a connected pod", async () => {
     const pod = fakePodSession(disconnected);
     render(<PodGalleryHost session={pod.session}><Probe /></PodGalleryHost>);

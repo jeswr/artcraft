@@ -209,6 +209,22 @@ describe("what the gallery lets go of", () => {
     expect(signedOut.signInAgain).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
     expect(signedOut.signInAgain).toHaveBeenCalledTimes(1);
+    // While the app asks, the button waits and says so; an answer is written where the person looks.
+    rerender(
+      <PodGalleryProvider access={null} signedOut={{ ...signedOut, asking: true }}>
+        <GalleryModal mode="view" />
+      </PodGalleryProvider>,
+    );
+    expect(screen.getByRole("button", { name: "My pod" }).getAttribute("aria-pressed")).toBe("true");
+    expect((screen.getByRole("button", { name: "Sign in again" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("pod-signed-out-status").textContent).toMatch(/dialog/);
+    rerender(
+      <PodGalleryProvider access={null} signedOut={{ ...signedOut, problem: "Out of tries.", canPress: false }}>
+        <GalleryModal mode="view" />
+      </PodGalleryProvider>,
+    );
+    expect(screen.getByTestId("pod-signed-out-status").textContent).toBe("Out of tries.");
+    expect(screen.queryByRole("button", { name: "Sign in again" })).toBeNull();
     // The person can still go to the ArtCraft library.
     fireEvent.click(screen.getByRole("button", { name: "ArtCraft library" }));
     expect(screen.getByText("All Assets", { selector: "button" })).toBeTruthy();

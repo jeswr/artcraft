@@ -15,6 +15,12 @@ export interface PodGalleryAccess {
 export interface PodGallerySignedOut {
   /** The person's click on "Sign in again". Never called by anything else. */
   signInAgain(): void;
+  /** True while the app is asking the person in its dialog: the button waits. */
+  readonly asking?: boolean;
+  /** What came of the last press, in words, when it did not lead to a sign-in. */
+  readonly problem?: string | null;
+  /** False when pressing again cannot help (the app's limit for this run is reached). Default true. */
+  readonly canPress?: boolean;
 }
 
 const PodGalleryContext = createContext<PodGalleryAccess | null>(null);
