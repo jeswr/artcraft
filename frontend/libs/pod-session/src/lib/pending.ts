@@ -19,6 +19,17 @@ export interface PendingStore {
 }
 
 const PENDING_KEY = 'artcraft.podSession.pending';
+const SIGNED_IN_KEY = 'artcraft.podSession.signedIn';
+
+/**
+ * What the person typed for the sign-in that last succeeded in pod mode, so "Sign in again" asks
+ * pod-auth the same way (a typed WebID, or the provider). A public address only, like the pending
+ * hint; cleared when the window leaves pod mode.
+ */
+export interface HintStore {
+  get(): SignInHint | null;
+  set(value: SignInHint | null): void;
+}
 
 /** The origin the app is asked to confirm for this hint. */
 export function originOfHint(hint: SignInHint, allowLoopback = false): string | null {
@@ -47,6 +58,29 @@ export function localStoragePending(storage?: Pick<Storage, 'getItem' | 'setItem
         else pick().setItem(PENDING_KEY, JSON.stringify(value));
       } catch {
         // without it the person simply types the address again
+      }
+    },
+  };
+}
+
+export function localStorageSignedIn(storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>, allowLoopbackHttp = false): HintStore {
+  const pick = () => storage ?? globalThis.localStorage;
+  return {
+    get() {
+      try {
+        const raw = pick().getItem(SIGNED_IN_KEY);
+        if (raw === null) return null;
+        return validate({ hint: JSON.parse(raw) }, allowLoopbackHttp)?.hint ?? null;
+      } catch {
+        return null;
+      }
+    },
+    set(value) {
+      try {
+        if (value === null) pick().removeItem(SIGNED_IN_KEY);
+        else pick().setItem(SIGNED_IN_KEY, JSON.stringify(value));
+      } catch {
+        // without it "Sign in again" asks the window's own address
       }
     },
   };

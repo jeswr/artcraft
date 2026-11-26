@@ -278,6 +278,7 @@ describe('the app port', () => {
     requestReload: async () => undefined,
     requestCredentialsCleared: async () => undefined,
     requestConsumeFresh: async () => ISSUER,
+    requestSignInAgain: async () => 'requested' as const,
   });
   const host = globalThis as Record<string, unknown>;
 

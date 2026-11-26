@@ -3,8 +3,8 @@ import type { PodSessionConfig } from './config.js';
 import { createPodSession, localStorageMarker, type PodSessionDeps } from './pod-session.js';
 import { StorageOriginRefused } from './storage-origins.js';
 import type { PodSessionState } from './state.js';
-import type { PendingSignIn } from './pending.js';
-import { fakeAuth, fakePodMode, memoryMarker, memoryPending } from './testing.js';
+import type { PendingSignIn, SignInHint } from './pending.js';
+import { fakeAuth, fakePodMode, memoryHint, memoryMarker, memoryPending } from './testing.js';
 import type { WipeOutcome } from './wipe.js';
 
 const ISSUER = 'https://login.example';
@@ -36,6 +36,10 @@ function setup(options: {
   pending?: PendingSignIn | null;
   listed?: string[];
   addAnswer?: Parameters<typeof fakePodMode>[0]['addAnswer'];
+  /** What the last successful sign-in typed. */
+  signedIn?: SignInHint | null;
+  againAnswer?: NonNullable<Parameters<typeof fakePodMode>[0]>['againAnswer'];
+  againAvailable?: boolean;
 } = {}) {
   const podMode = fakePodMode({
     podWindow: options.podWindow ?? false,
@@ -46,10 +50,13 @@ function setup(options: {
     consumeFails: options.consumeFails ?? false,
     answer: options.answer ?? 'requested',
     leaveFails: options.leaveFails ?? false,
+    againAnswer: options.againAnswer ?? 'requested',
+    againAvailable: options.againAvailable ?? true,
     ...(options.listed || options.addAnswer ? { listed: options.listed ?? [], addAnswer: options.addAnswer ?? 'requested' } : {}),
   });
   const pending = memoryPending(options.pending !== undefined ? options.pending : options.fresh ? { hint: { kind: 'issuer', issuer: options.fresh } } : null);
   const marker = memoryMarker(options.marker ?? null);
+  const signedIn = memoryHint(options.signedIn ?? null);
   const auth = options.auth ?? fakeAuth();
   const order: string[] = [];
   const createAuth = vi.fn((_options?: { fetch?: typeof fetch }) => {
@@ -68,11 +75,12 @@ function setup(options: {
     podMode,
     marker,
     pending,
+    signedIn,
     selfTest: options.selfTest ?? (async () => ({ ok: true })),
   });
   const states: PodSessionState[] = [];
   session.subscribe((s) => states.push(s));
-  return { session, podMode, marker, pending, auth, createAuth, wipeStores, order, states };
+  return { session, podMode, marker, pending, signedIn, auth, createAuth, wipeStores, order, states };
 }
 
 describe('connect', () => {
@@ -1165,5 +1173,125 @@ describe('a typed address the app answers too fast', () => {
     await t.session.connect(PROFILE);
     expect(t.session.getState()).toEqual({ kind: 'error', error: 'approval-too-fast' });
     expect(t.pending.value).toBeNull();
+  });
+});
+
+describe('signing in again in a pod window', () => {
+  /** A pod window whose restored session the gate has just ended (a background read's refresh failed). */
+  async function ended(options: Parameters<typeof setup>[0] = {}) {
+    const t = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restored: WEBID }), ...options });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'connected', webId: WEBID });
+    const options_ = t.createAuth.mock.calls.at(-1)![0] as { authorizeSignIn?: () => void };
+    expect(() => options_.authorizeSignIn!()).toThrow();
+    return t;
+  }
+
+  it('is offered once the gate has ended the session, and asks the app only on the click', async () => {
+    const t = await ended();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'session-ended' });
+    expect(t.session.canSignInAgain()).toBe(true);
+    expect(t.podMode.log).not.toContain('sign-in-again');
+    await t.session.signInAgain();
+    expect(t.podMode.log).toContain('sign-in-again');
+    // The rebuilt window offers "Continue sign-in" from this hint, for the recorded issuer only.
+    expect(t.pending.value).toEqual({ hint: { kind: 'issuer', issuer: ISSUER } });
+    expect(t.session.getState()).toEqual({ kind: 'connecting', issuer: ISSUER });
+    // Nothing is built, wiped or opened by the request itself.
+    expect(t.auth.calls).not.toContain('login');
+    expect(t.wipeStores).not.toHaveBeenCalled();
+  });
+
+  it('is offered in a pod window with nothing to restore, and Try again leads back to it', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restoreError: new Error('boom') }) });
+    await t.session.start();
+    expect(t.session.getState()).toEqual({ kind: 'error', error: 'restore-failed' });
+    expect(t.session.canSignInAgain()).toBe(true);
+    const nothing = setup({ podWindow: true, issuer: ISSUER });
+    await nothing.session.start();
+    expect(nothing.session.getState()).toEqual({ kind: 'disconnected' });
+    expect(nothing.session.canSignInAgain()).toBe(true);
+  });
+
+  it('the allowed request leads, in the rebuilt window, to a sign-in that waits for the click', async () => {
+    const t = await ended();
+    await t.session.signInAgain();
+    // The rebuilt window: the shell's one-shot grant for the recorded issuer, the same page storage.
+    const podMode = fakePodMode({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    const auth = fakeAuth();
+    const next = createPodSession({ config: CONFIG, createAuth: () => auth, wipeStores: async () => 'wiped', podMode, marker: memoryMarker(), pending: t.pending, signedIn: t.signedIn, selfTest: async () => ({ ok: true }) });
+    await next.start();
+    expect(next.getState()).toEqual({ kind: 'ready-to-sign-in', issuer: ISSUER });
+    expect(auth.calls).toEqual([]);
+    const done = next.beginSignIn();
+    await vi.waitFor(() => expect(auth.calls).toContain('login'));
+    expect(auth.loginHints).toEqual([{ issuer: ISSUER }]);
+    auth.finish(WEBID);
+    await done;
+    expect(next.getState()).toEqual({ kind: 'connected', webId: WEBID });
+  });
+
+  it('asks pod-auth the way the person signed in last time when that was for this address', async () => {
+    const t = await ended({ issuer: 'https://pod.example', signedIn: { kind: 'webid', webId: WEBID } });
+    await t.session.signInAgain();
+    expect(t.pending.value).toEqual({ hint: { kind: 'webid', webId: WEBID } });
+    // A remembered hint for another address is not used: the grant can only be for the recorded issuer.
+    const other = await ended({ signedIn: { kind: 'webid', webId: WEBID } });
+    await other.session.signInAgain();
+    expect(other.pending.value).toEqual({ hint: { kind: 'issuer', issuer: ISSUER } });
+  });
+
+  it.each([
+    ['declined', { kind: 'disconnected', outcome: 'declined' }],
+    ['too-fast', { kind: 'error', error: 'approval-too-fast' }],
+    ['busy', { kind: 'error', error: 'sign-in-again-wait' }],
+    ['cooling_down', { kind: 'error', error: 'sign-in-again-wait' }],
+    ['too_many_prompts', { kind: 'error', error: 'sign-in-again-limit' }],
+  ] as const)('an app answer of %s leaves no hint behind and says so', async (againAnswer, expected) => {
+    const t = await ended({ againAnswer });
+    await t.session.signInAgain();
+    expect(t.session.getState()).toEqual(expected);
+    expect(t.pending.value).toBeNull();
+    expect(t.session.canSignInAgain()).toBe(againAnswer !== 'too_many_prompts');
+  });
+
+  it('is not offered without a shell, without a recorded issuer, outside pod mode, while connected or after a refused address', async () => {
+    const noShell = await ended({ againAvailable: false });
+    expect(noShell.session.canSignInAgain()).toBe(false);
+    await noShell.session.signInAgain();
+    expect(noShell.session.getState()).toEqual({ kind: 'error', error: 'session-ended' });
+    const noIssuer = setup({ podWindow: true, issuer: null });
+    await noIssuer.session.start();
+    expect(noIssuer.session.canSignInAgain()).toBe(false);
+    const ordinary = setup();
+    await ordinary.session.start();
+    expect(ordinary.session.canSignInAgain()).toBe(false);
+    const connected = setup({ podWindow: true, issuer: ISSUER, auth: fakeAuth({ restored: WEBID }) });
+    await connected.session.start();
+    expect(connected.session.canSignInAgain()).toBe(false);
+    await connected.session.signInAgain();
+    expect(connected.podMode.log).not.toContain('sign-in-again');
+    const refused = setup({ podWindow: true, issuer: ISSUER, listed: [ISSUER], auth: fakeAuth({ restoreError: refusal('declined') }) });
+    await refused.session.start();
+    expect(refused.session.getState()).toEqual({ kind: 'error', error: 'origin-declined' });
+    expect(refused.session.canSignInAgain()).toBe(false);
+  });
+
+  it('is not offered before the window has finished starting', () => {
+    const t = setup({ podWindow: true, issuer: ISSUER });
+    expect(t.session.getState()).toEqual({ kind: 'disconnected' });
+    expect(t.session.canSignInAgain()).toBe(false);
+  });
+
+  it('remembers what the person typed for a successful sign-in, and forgets it on leaving', async () => {
+    const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+    await t.session.start();
+    const done = t.session.beginSignIn();
+    await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+    t.auth.finish(WEBID);
+    await done;
+    expect(t.signedIn.value).toEqual({ kind: 'issuer', issuer: ISSUER });
+    await t.session.leave();
+    expect(t.signedIn.value).toBeNull();
   });
 });

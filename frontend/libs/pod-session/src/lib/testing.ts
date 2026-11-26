@@ -1,5 +1,5 @@
 import type { PodGate } from '@storyteller/pod-mode';
-import type { PendingSignIn, PendingStore } from './pending.js';
+import type { HintStore, PendingSignIn, PendingStore, SignInHint } from './pending.js';
 import type { Marker, MarkerValue, PodAuthPort, PodModePort } from './pod-session.js';
 import type { AddOriginResult } from '@storyteller/pod-mode';
 
@@ -61,6 +61,10 @@ export type FakePodMode = PodModePort & {
   fresh: string | null;
   /** What the shell's native dialog answers. */
   answer: 'requested' | 'declined' | 'too-fast' | 'throws';
+  /** What the shell answers to "sign in again": an answer, or the word it rejects with. */
+  againAnswer: 'requested' | 'declined' | 'too-fast' | 'busy' | 'cooling_down' | 'too_many_prompts';
+  /** Whether the window has a shell that can be asked to sign in again. */
+  againAvailable: boolean;
   /** Make the shell's leave request fail. */
   leaveFails: boolean;
   consumeFails: boolean;
@@ -74,7 +78,9 @@ export type FakePodMode = PodModePort & {
 };
 
 export function fakePodMode(
-  initial: Partial<Pick<FakePodMode, 'podWindow' | 'shell' | 'flagged' | 'issuer' | 'fresh' | 'answer' | 'leaveFails' | 'consumeFails' | 'listed' | 'addAnswer'>> = {},
+  initial: Partial<
+    Pick<FakePodMode, 'podWindow' | 'shell' | 'flagged' | 'issuer' | 'fresh' | 'answer' | 'leaveFails' | 'consumeFails' | 'listed' | 'addAnswer' | 'againAnswer' | 'againAvailable'>
+  > = {},
 ): FakePodMode {
   const mode: FakePodMode = {
     podWindow: false,
@@ -83,6 +89,8 @@ export function fakePodMode(
     issuer: null,
     fresh: null,
     answer: 'requested',
+    againAnswer: 'requested',
+    againAvailable: true,
     leaveFails: false,
     consumeFails: false,
     log: [],
@@ -128,6 +136,15 @@ export function fakePodMode(
     async requestReload() {
       mode.log.push('reload');
     },
+    get requestSignInAgain() {
+      if (!mode.againAvailable) return undefined;
+      return async () => {
+        mode.log.push('sign-in-again');
+        const answer = mode.againAnswer;
+        if (answer === 'busy' || answer === 'cooling_down' || answer === 'too_many_prompts') throw answer;
+        return answer;
+      };
+    },
     async leave() {
       if (mode.leaveFails) throw new Error('shell refused');
       mode.log.push('left');
@@ -156,6 +173,17 @@ export function memoryPending(initial: PendingSignIn | null = null): PendingStor
     value: initial,
     get: () => store.value,
     set: (v: PendingSignIn | null) => {
+      store.value = v;
+    },
+  };
+  return store;
+}
+
+export function memoryHint(initial: SignInHint | null = null): HintStore & { value: SignInHint | null } {
+  const store = {
+    value: initial,
+    get: () => store.value,
+    set: (v: SignInHint | null) => {
       store.value = v;
     },
   };

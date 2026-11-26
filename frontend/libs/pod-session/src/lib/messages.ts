@@ -22,7 +22,11 @@ export const ERROR_TEXT: Record<PodSessionErrorKind, string> = {
   'browser-open-failed': 'ArtCraft could not open your browser.',
   'sign-in-timed-out': 'Sign-in took too long and was stopped. Try again.',
   'sign-in-failed': 'Sign-in did not finish. Check the address and try again.',
-  'restore-failed': 'ArtCraft could not restore your previous sign-in. You can connect again or leave pod mode.',
+  'restore-failed': 'ArtCraft could not restore your previous sign-in. You can try again, sign in again or leave pod mode.',
+  'session-ended':
+    'Your pod sign-in has ended and could not be renewed without you, so ArtCraft stopped using your pod. Your browser was not opened. Choose Sign in again to continue, or leave pod mode.',
+  'sign-in-again-wait': 'ArtCraft is not ready to ask again yet (a dialog is open, or it is waiting after a refusal). Wait a few seconds and choose Sign in again.',
+  'sign-in-again-limit': 'ArtCraft has asked to sign you in again as many times as it does in one run. Quit and reopen ArtCraft, or leave pod mode and connect again.',
   'origin-declined':
     'ArtCraft was not allowed to connect to an address your profile needs, so your pod is not connected. Leave pod mode and connect again to be asked again, or try again.',
   'origin-limit':

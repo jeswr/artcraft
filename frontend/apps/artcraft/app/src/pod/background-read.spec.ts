@@ -5,7 +5,7 @@ import { createDefaultAuth, createPodSession, type PodSessionConfig } from "@sto
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sessionPortFor } from "./mirror-ports";
 // Test doubles of pod-session (read only; nothing in that library is changed by this spec).
-import { fakePodMode, memoryMarker, memoryPending } from "../../../../../libs/pod-session/src/lib/testing";
+import { fakePodMode, memoryHint, memoryMarker, memoryPending } from "../../../../../libs/pod-session/src/lib/testing";
 
 /**
  * M4 of the delta review: can a background read through the gallery's fetch (`session.getFetch()`,
@@ -14,7 +14,9 @@ import { fakePodMode, memoryMarker, memoryPending } from "../../../../../libs/po
  * The wiring is ArtCraft's real one: `createPodSession` + `createDefaultAuth` (pod-auth with
  * desktop-auth's `getCode`), against pod-auth's in-memory identity provider; `host.openUrl` is the
  * Tauri opener. The second test is the regression test for M4: a read that nobody asked the person
- * about used to open the browser; pod-session now refuses it and ends the session.
+ * about used to open the browser; pod-session now refuses it and ends the session. The third is the
+ * way back from that (M1 of the integration review): "Sign in again" in the same pod window, which
+ * opens the browser only after the person's clicks.
  */
 const config: PodSessionConfig = {
   clientId: "https://artcraft.example/solid-client-id.jsonld",
@@ -50,15 +52,23 @@ async function connected() {
       queueMicrotask(() => listener?.([callback]));
     },
   };
-  const session = createPodSession({
-    config,
-    createAuth: (options) => createDefaultAuth(config, host, options),
-    wipeStores: async () => "wiped",
-    podMode: fakePodMode({ podWindow: true, issuer: new URL(op.issuer).origin, fresh: new URL(op.issuer).origin }),
-    marker: memoryMarker(),
-    pending: memoryPending({ hint: { kind: "issuer", issuer: op.issuer } }),
-    selfTest: async () => ({ ok: true }),
-  });
+  const issuer = new URL(op.issuer).origin;
+  // Page storage, which outlives a window rebuild.
+  const pending = memoryPending({ hint: { kind: "issuer", issuer: op.issuer } });
+  const lastSignIn = memoryHint();
+  /** A pod window as the app builds it; `fresh` is the one-shot grant a dialog in this process left. */
+  const podWindow = (fresh: string | null) =>
+    createPodSession({
+      config,
+      createAuth: (options) => createDefaultAuth(config, host, options),
+      wipeStores: async () => "wiped",
+      podMode: fakePodMode({ podWindow: true, issuer, fresh }),
+      marker: memoryMarker(),
+      pending,
+      signedIn: lastSignIn,
+      selfTest: async () => ({ ok: true }),
+    });
+  const session = podWindow(issuer);
   await session.start();
   // The person's own sign-in: the click, the provider confirmation, the click that opens the browser.
   const signedIn = session.beginSignIn();
@@ -67,7 +77,7 @@ async function connected() {
   await signedIn;
   expect(session.getState().kind).toBe("connected");
   expect(opened).toHaveLength(1); // the person's own sign-in
-  return { op, session, opened, podFetch: session.getFetch()! };
+  return { op, session, opened, podWindow, issuer, podFetch: session.getFetch()! };
 }
 
 /** Five minutes is the mock token's lifetime: a day later the cached access token is expired. */
@@ -95,8 +105,33 @@ describe("a background read through the session's fetch", () => {
     await podFetch(`${op.root}private`).catch(() => undefined);
     expect(opened).toHaveLength(1);
     // The session is no longer connected, so the mirror pauses and the gallery says "sign in again".
-    expect(session.getState()).toEqual({ kind: "error", error: "restore-failed" });
+    expect(session.getState()).toEqual({ kind: "error", error: "session-ended" });
     expect(session.getFetch()).toBeNull();
     expect(sessionPortFor(session, op.webId).isConnected()).toBe(false);
+  });
+
+  it("after the gate ended the session, signs in again from the same pod window, opening the browser only after the clicks (M1)", async () => {
+    const { op, session, opened, podWindow, issuer, podFetch } = await connected();
+    op.failRefresh("invalid_grant");
+    aDayLater();
+    await podFetch(`${op.root}private`).catch(() => undefined);
+    // The person is offered a way back, and nothing has opened.
+    expect(session.getState()).toEqual({ kind: "error", error: "session-ended" });
+    expect(session.canSignInAgain()).toBe(true);
+    // The click asks the app (its dialog names the window's own issuer); the app rebuilds the window.
+    await session.signInAgain();
+    expect(opened).toHaveLength(1);
+    const rebuilt = podWindow(issuer);
+    await rebuilt.start();
+    expect(rebuilt.getState()).toEqual({ kind: "ready-to-sign-in", issuer });
+    expect(opened).toHaveLength(1);
+    const signedIn = rebuilt.beginSignIn();
+    await vi.waitFor(() => expect(rebuilt.getState().kind).toBe("confirm-provider"));
+    expect(opened).toHaveLength(1);
+    rebuilt.openBrowser();
+    await signedIn;
+    expect(rebuilt.getState().kind).toBe("connected");
+    expect(opened).toHaveLength(2);
+    expect((await rebuilt.getFetch()!(`${op.root}private`)).status).toBe(200);
   });
 });

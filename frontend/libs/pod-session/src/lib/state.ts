@@ -24,6 +24,16 @@ export type PodSessionErrorKind =
   | 'sign-in-timed-out'
   | 'sign-in-failed'
   | 'restore-failed'
+  /**
+   * The connected session could not renew its token without the person (a refresh that failed, a
+   * provider with no refresh token), so ArtCraft stopped using it rather than open the browser on
+   * its own. The way back is "Sign in again".
+   */
+  | 'session-ended'
+  /** ArtCraft is not ready to ask about signing in again yet (a dialog is open, or it waits after a refusal). */
+  | 'sign-in-again-wait'
+  /** ArtCraft has asked about signing in again as often as it does in one run. */
+  | 'sign-in-again-limit'
   /** The person declined (or the app already refused) an address pod-auth needed to read. */
   | 'origin-declined'
   /** This pod-mode session has used up the addresses it may ask about. */

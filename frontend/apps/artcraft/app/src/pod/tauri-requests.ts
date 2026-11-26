@@ -9,7 +9,7 @@ type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unkno
  * before it changes the mode, and answers `declined` when they say no.
  */
 export function createTauriPodModeRequests(call: Invoke = invoke): PodModeRequests {
-  // Only the two dialogs that ask for a consent can answer "too fast": Allow pressed sooner than a
+  // Only the dialogs that ask for a consent can answer "too fast": Allow pressed sooner than a
   // considered answer. Nothing changed; the page may ask again after the app's wait.
   const outcome = async (command: string, args?: Record<string, unknown>, asks = false) => {
     const answer = await call(command, args);
@@ -24,6 +24,7 @@ export function createTauriPodModeRequests(call: Invoke = invoke): PodModeReques
     requestLeave: async () => void (await outcome("pod_mode_leave_command")),
     requestReload: async () => void (await outcome("pod_mode_reload_command")),
     requestCredentialsCleared: async () => void (await outcome("pod_mode_credentials_cleared_command")),
+    requestSignInAgain: () => outcome("pod_mode_sign_in_again_command", undefined, true),
     requestConsumeFresh: async () => {
       const issuer = await call("pod_mode_consume_fresh_command");
       if (typeof issuer !== "string" || issuer === "") throw new Error("unexpected answer from the app");

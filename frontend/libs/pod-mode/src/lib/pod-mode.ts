@@ -122,3 +122,12 @@ export async function consumeFreshConnect(deps: PodModeDeps = {}): Promise<strin
   if (!deps.requests) throw new Error('consumeFreshConnect: needs the desktop shell');
   return deps.requests.requestConsumeFresh();
 }
+
+/**
+ * Ask to sign in again in a pod window whose session ended: the shell confirms the recorded
+ * issuer in a native dialog and rebuilds the window with a one-shot grant for it. Requires a shell.
+ */
+export async function signInAgain(deps: PodModeDeps = {}): Promise<EnterResult> {
+  if (!deps.requests) throw new Error('signInAgain: needs the desktop shell');
+  return deps.requests.requestSignInAgain();
+}

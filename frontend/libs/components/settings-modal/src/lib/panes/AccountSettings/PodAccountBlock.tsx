@@ -314,11 +314,14 @@ const PodControls = ({ session, state }: { session: PodSession; state: PodSessio
     case "connected":
       return <LeaveButton session={session} />;
     default:
-      // A pod window offers leaving, from every state; an ordinary window offers connecting.
+      // A pod window offers leaving, from every state, and signing in again at its own address when
+      // the session is gone; an ordinary window offers connecting.
       return podWindow ? (
         <div className="flex flex-col gap-2">
           {error && <ErrorText error={error} />}
           <div className="flex gap-2">
+            {/* No autofocus: a stray Enter must not start a sign-in. */}
+            {session.canSignInAgain() && <Button onClick={() => void session.signInAgain()}>Sign in again</Button>}
             {error && RETRYABLE.has(error) && (
               <Button variant="secondary" onClick={() => void session.retry()}>
                 Try again

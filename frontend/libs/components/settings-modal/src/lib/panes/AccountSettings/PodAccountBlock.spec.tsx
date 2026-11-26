@@ -18,7 +18,9 @@ const WEBID = "https://pod.example/alice/profile/card#me";
 
 afterEach(cleanup);
 
-function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; config?: ConfigCheck; finishing?: boolean } = {}) {
+type FakeOptions = { podWindow?: boolean; config?: ConfigCheck; finishing?: boolean; canSignInAgain?: boolean };
+
+function fakeSession(initial: PodSessionState, options: FakeOptions = {}) {
   let state = initial;
   const listeners = new Set<(s: PodSessionState) => void>();
   const session = {
@@ -35,6 +37,8 @@ function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; c
     approveOrigin: vi.fn(async () => undefined),
     openBrowser: vi.fn(),
     retry: vi.fn(async () => undefined),
+    canSignInAgain: () => options.canSignInAgain ?? false,
+    signInAgain: vi.fn(async () => undefined),
     leave: vi.fn(async () => undefined),
     getFetch: () => null,
     inPodMode: () => options.podWindow ?? false,
@@ -49,7 +53,7 @@ function fakeSession(initial: PodSessionState, options: { podWindow?: boolean; c
   };
 }
 
-function renderBlock(initial: PodSessionState, options: { podWindow?: boolean; config?: ConfigCheck; finishing?: boolean } = {}) {
+function renderBlock(initial: PodSessionState, options: FakeOptions = {}) {
   const fake = fakeSession(initial, options);
   render(
     <PodSessionProvider session={fake.session} startNow={false}>
@@ -560,6 +564,25 @@ it.each(["origin-limit", "invalid-response", "sign-in-failed", "approval-too-fas
   renderBlock({ kind: "error", error }, { podWindow: true });
   expect(screen.getByRole("alert").textContent).toBe(ERROR_TEXT[error]);
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+});
+
+it.each([
+  ["the gate ended the session", { kind: "error", error: "session-ended" }],
+  ["there was nothing to restore", { kind: "disconnected" }],
+] as const)("offers Sign in again in a pod window when %s, and only the click asks for it", async (_case, state) => {
+  const user = userEvent.setup();
+  const { session } = renderBlock(state, { podWindow: true, canSignInAgain: true });
+  const button = screen.getByRole("button", { name: "Sign in again" });
+  expect(document.activeElement).not.toBe(button);
+  expect(session.signInAgain).not.toHaveBeenCalled();
+  await user.click(button);
+  expect(session.signInAgain).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: "Leave pod mode" })).toBeTruthy();
+});
+
+it("offers no Sign in again where the session cannot", () => {
+  renderBlock({ kind: "error", error: "origin-limit" }, { podWindow: true, canSignInAgain: false });
+  expect(screen.queryByRole("button", { name: "Sign in again" })).toBeNull();
 });
 
 it("shows the missing-library notice when the pod check found the library missing, and Copy again calls copyAgain()", async () => {

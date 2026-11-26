@@ -12,10 +12,11 @@ import {
   type PodModeRequests,
   readHostPodMode,
   reloadPodWindow,
+  signInAgain as requestSignInAgain,
 } from '@storyteller/pod-mode';
 import { checkConfig, type ConfigCheck, type PodSessionConfig } from './config.js';
 import { parseSignInInput } from './issuer.js';
-import { localStoragePending, originOfHint, type PendingStore, type SignInHint } from './pending.js';
+import { type HintStore, localStoragePending, localStorageSignedIn, originOfHint, type PendingStore, type SignInHint } from './pending.js';
 import { runSelfTest, type SelfTestResult } from './self-test.js';
 import { type SignInGate, SignInNotInProgressError } from './sign-in-gate.js';
 import type { PodSessionErrorKind, PodSessionState } from './state.js';
@@ -76,6 +77,12 @@ export interface PodModePort {
   /** Tells the shell a wipe succeeded in a window that is not in pod mode. */
   credentialsCleared(): Promise<void>;
   /**
+   * Asks the shell to let this pod window sign in again at its recorded issuer (native dialog; the
+   * window is rebuilt with a one-shot grant for that issuer when it is allowed). Absent where there
+   * is no shell. Rejects with the shell's closed word when it turns the request away.
+   */
+  requestSignInAgain?: () => Promise<'requested' | 'declined' | 'too-fast'>;
+  /**
    * How a request to an origin the policy does not list asks the shell to admit it. Absent where
    * there is no shell (a plain browser), in which case `getFetch()` is pod-auth's fetch as is.
    */
@@ -117,6 +124,8 @@ export interface PodSessionDeps {
   marker?: Marker;
   /** The hint typed and the origin approved while a sign-in waits for a window rebuild. */
   pending?: PendingStore;
+  /** What the person typed for the last sign-in that succeeded, for "Sign in again". */
+  signedIn?: HintStore;
 }
 
 export interface PodSession {
@@ -149,6 +158,18 @@ export interface PodSession {
   /** From an error that left the stored session alone (a declined address): tries the restore again. */
   retry(): Promise<void>;
   /**
+   * Whether this pod window, with no usable session, can offer "Sign in again": it has a recorded
+   * issuer and a shell to ask, and nothing else is in progress.
+   */
+  canSignInAgain(): boolean;
+  /**
+   * The click on "Sign in again": asks the app to confirm the window's recorded issuer in its own
+   * dialog. When it is allowed the window is rebuilt and offers "Continue sign-in", which opens
+   * the browser only after the person's next clicks. Nothing about the window's mode or the
+   * addresses it may contact changes. Never called by anything but that click.
+   */
+  signInAgain(): Promise<void>;
+  /**
    * Leaves pod mode from any state: revokes if it can, always wipes the local data, then asks
    * the app to leave. Revocation failing does not stop the wipe; a wipe that cannot finish is
    * reported and the window stays in pod mode.
@@ -174,6 +195,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   const marker = deps.marker ?? localStorageMarker();
   const selfTest = deps.selfTest ?? (() => runSelfTest());
   const pending = deps.pending ?? localStoragePending(undefined, deps.config.allowLoopbackHttp);
+  const signedIn = deps.signedIn ?? localStorageSignedIn(undefined, deps.config.allowLoopbackHttp);
 
   let state: PodSessionState = { kind: 'disconnected' };
   const listeners = new Set<(state: PodSessionState) => void>();
@@ -187,6 +209,8 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   type Attempt = { controller: AbortController; browserOpened: boolean };
   let attempt: Attempt | null = null;
   let started: Promise<PodSessionState> | null = null;
+  /** `start` has settled: a `disconnected` state is the answer, not the state before the restore. */
+  let settled = false;
   let leaving: Promise<void> | null = null;
   const originGate = podMode.admission ? createOriginGate(podMode.admission, deps.config.allowLoopbackHttp) : null;
   let gated: { source: typeof fetch; fetch: typeof fetch } | null = null;
@@ -267,12 +291,13 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
 
   /**
    * The connected session can no longer renew its token without the person: nothing may use its
-   * fetch, so the mirror pauses and the gallery asks to sign in again. The stored sign-in is kept
-   * so "Try again" can restore it; leaving pod mode removes it.
+   * fetch, so the mirror pauses and the gallery offers to sign in again. pod-auth has usually
+   * removed the stored session already (a refused refresh deletes it), so a restore cannot bring it
+   * back: the way back is `signInAgain`, which starts only from the person's click.
    */
   function sessionEnded(): void {
     releaseAuth();
-    fail('restore-failed');
+    fail('session-ended');
   }
 
   /** Why pod-auth may not be built in this window, or null when it may. */
@@ -349,6 +374,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
         return fail('sign-in-failed');
       }
       pending.set(null);
+      signedIn.set(hint);
       set({ kind: 'connected', webId: identity.webId });
     } catch (error) {
       // Tokens may already be stored when the failure came after the exchange.
@@ -409,7 +435,11 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       auth = created;
       const identity = await created.restore();
       if (identity?.webId) set({ kind: 'connected', webId: identity.webId });
-      else releaseAuth();
+      else {
+        releaseAuth();
+        // Nothing to restore: a new state object, so a view that offers "Sign in again" re-renders.
+        set({ kind: 'disconnected' });
+      }
     } catch (error) {
       // A refusal is never a reason to drop the stored session: nothing is wiped, so approving
       // the address (or declining) leaves the sign-in data as it was.
@@ -450,6 +480,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   }
 
   async function settleLeaveMarker(value: 'leave' | 'leave-revocation-failed'): Promise<void> {
+    signedIn.set(null);
     set({ kind: 'leaving', step: 'clearing' });
     // The marker stays until the delete is confirmed: a quit in between leaves it for the next start.
     if (!(await wipeNow())) return fail('wipe-failed');
@@ -459,6 +490,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
 
   async function runLeave(): Promise<void> {
     pending.set(null);
+    signedIn.set(null);
     abort?.abort();
     set({ kind: 'leaving', step: 'revoking' });
     const revoked = await revoke();
@@ -513,6 +545,7 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
           // Credentials may still be in web storage and the window loaded no analytics. The
           // only thing to do is delete them; nothing here opens pod-auth.
           marker.set(null);
+          signedIn.set(null);
           set({ kind: 'leaving', step: 'clearing' });
           if (await wipeNow()) await finishLeave(markerPending !== 'leave-revocation-failed' && markerPending !== 'done-revocation-failed');
           else fail('wipe-failed');
@@ -558,7 +591,9 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
         if (waiting !== null) pending.set(null);
         if (state.kind !== 'error') await restore();
         return state;
-      })();
+      })().finally(() => {
+        settled = true;
+      });
       return started;
     },
 
@@ -646,6 +681,44 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
       await restore();
     },
 
+    canSignInAgain() {
+      if (!settled || !podMode.isPodMode() || !podMode.requestSignInAgain) return false;
+      if (podMode.recordedIssuer() === null || gate() !== null) return false;
+      return state.kind === 'disconnected' || (state.kind === 'error' && SIGN_IN_AGAIN_FROM.has(state.error));
+    },
+
+    async signInAgain() {
+      const request = podMode.requestSignInAgain;
+      const recorded = podMode.recordedIssuer();
+      if (!session.canSignInAgain() || !request || recorded === null) return;
+      // Ask pod-auth the way the person did last time, if that was for this window's own address;
+      // otherwise the address the window is in pod mode for. Either way the hint's origin is the
+      // recorded issuer, the only one the shell's grant can be for.
+      const remembered = signedIn.get();
+      const hint: SignInHint =
+        remembered !== null && originOfHint(remembered, deps.config.allowLoopbackHttp) === recorded ? remembered : { kind: 'issuer', issuer: recorded };
+      pending.set({ hint });
+      set({ kind: 'connecting', issuer: recorded });
+      let answer: Awaited<ReturnType<typeof request>>;
+      try {
+        answer = await request();
+      } catch (error) {
+        pending.set(null);
+        const word = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+        if (word === 'busy' || word === 'cooling_down') return fail('sign-in-again-wait');
+        if (word === 'too_many_prompts') return fail('sign-in-again-limit');
+        return fail('request-failed');
+      }
+      if (answer === 'declined') {
+        pending.set(null);
+        set({ kind: 'disconnected', outcome: 'declined' });
+      } else if (answer === 'too-fast') {
+        pending.set(null);
+        fail('approval-too-fast');
+      }
+      // 'requested': the app rebuilds this window, which offers "Continue sign-in" from the hint.
+    },
+
     finishing: () => podMode.finishing(),
 
     openBrowser() {
@@ -684,6 +757,24 @@ export function createPodSession(deps: PodSessionDeps): PodSession {
   return session;
 }
 
+/**
+ * The errors after which a pod window may offer "Sign in again": the stored session is gone or
+ * unusable, and nothing about the window itself is wrong. Not after a refused address (the app
+ * would refuse it again), a used-up allowance, a wipe that did not finish or a window that is not
+ * clean.
+ */
+const SIGN_IN_AGAIN_FROM: ReadonlySet<PodSessionErrorKind> = new Set<PodSessionErrorKind>([
+  'session-ended',
+  'restore-failed',
+  'sign-in-failed',
+  'sign-in-timed-out',
+  'browser-open-failed',
+  'request-failed',
+  'approval-too-fast',
+  'invalid-response',
+  'sign-in-again-wait',
+]);
+
 /** Maps a failure to a closed kind. Reads only `code`; never the message or any URL. */
 function classify(error: unknown): PodSessionErrorKind {
   const code = (error as { code?: unknown } | null)?.code;
@@ -707,6 +798,7 @@ export function realPodModePort(requests?: PodModeRequests): PodModePort {
     requestEnter: (issuer) => enterPodMode({ issuer }, deps),
     consumeFresh: () => consumeFreshConnect(deps),
     requestReload: () => reloadPodWindow(deps),
+    ...(requests ? { requestSignInAgain: () => requestSignInAgain(deps) } : {}),
     leave: () => leavePodMode(async () => undefined, deps),
     credentialsCleared: () => credentialsCleared(deps),
     ...(requests

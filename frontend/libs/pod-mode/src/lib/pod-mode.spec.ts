@@ -127,6 +127,7 @@ function requests(over: Partial<PodModeRequests> = {}): PodModeRequests & { call
     requestReload: async () => void calls.push('reload'),
     requestCredentialsCleared: async () => void calls.push('cleared'),
     requestConsumeFresh: async () => (calls.push('consume'), 'https://id.example'),
+    requestSignInAgain: async () => (calls.push('again'), 'requested'),
     ...over,
   };
 }

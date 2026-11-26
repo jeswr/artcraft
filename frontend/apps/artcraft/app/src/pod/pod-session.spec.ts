@@ -37,6 +37,13 @@ describe("createTauriPodModeRequests", () => {
     await expect(createTauriPodModeRequests(async () => 3).requestConsumeFresh()).rejects.toThrow();
   });
 
+  it("asks the app to sign in again with no origin, and maps its consent answers", async () => {
+    const call = vi.fn(async (_c: string, _a?: Record<string, unknown>): Promise<unknown> => "too_fast");
+    await expect(createTauriPodModeRequests(call).requestSignInAgain()).resolves.toBe("too-fast");
+    expect(call).toHaveBeenCalledWith("pod_mode_sign_in_again_command", undefined);
+    await expect(createTauriPodModeRequests(async () => "applied").requestSignInAgain()).resolves.toBe("requested");
+  });
+
   it("reports a declined confirmation", async () => {
     const requests = createTauriPodModeRequests(async () => "declined");
     await expect(requests.requestEnter({ issuer: "https://login.example" })).resolves.toBe("declined");

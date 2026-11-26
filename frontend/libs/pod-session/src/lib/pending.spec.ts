@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { localStoragePending, originOfHint } from './pending.js';
+import { localStoragePending, localStorageSignedIn, originOfHint } from './pending.js';
 
 function storage(initial?: string) {
   const data = new Map<string, string>(initial === undefined ? [] : [['artcraft.podSession.pending', initial]]);
@@ -105,5 +105,20 @@ describe('the purpose of an approval', () => {
   it('reads the origin of a hint with the build’s loopback flag', () => {
     expect(originOfHint({ kind: 'issuer', issuer: 'http://localhost:3000' })).toBeNull();
     expect(originOfHint({ kind: 'issuer', issuer: 'http://localhost:3000' }, true)).toBe('http://localhost:3000');
+  });
+});
+
+describe('localStorageSignedIn', () => {
+  it('round-trips a hint and re-validates what page storage holds', () => {
+    const s = storage();
+    const store = localStorageSignedIn(s);
+    store.set({ kind: 'webid', webId: 'https://pod.example/alice#me' });
+    expect(store.get()).toEqual({ kind: 'webid', webId: 'https://pod.example/alice#me' });
+    for (const raw of ['not json', '{"kind":"issuer","issuer":"http://login.example"}', '{"kind":"webid","webId":"https://u:p@pod.example/a"}']) {
+      s.data.set('artcraft.podSession.signedIn', raw);
+      expect(store.get()).toBeNull();
+    }
+    store.set(null);
+    expect(s.data.size).toBe(0);
   });
 });

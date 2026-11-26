@@ -56,10 +56,10 @@ describe('the gate on opening the system browser', () => {
     const { auth, options } = w.last();
     // A background read whose refresh failed: pod-auth asks for the browser.
     expect(() => options.authorizeSignIn!()).toThrow(SignInNotInProgressError);
-    expect(w.session.getState()).toEqual({ kind: 'error', error: 'restore-failed' });
+    expect(w.session.getState()).toEqual({ kind: 'error', error: 'session-ended' });
     expect(w.session.getFetch()).toBeNull();
     expect(auth.calls).toContain('dispose');
-    // The stored session is kept for "Try again": nothing was revoked.
+    // Ending the session revokes nothing: the way back is the person's "Sign in again".
     expect(auth.calls).not.toContain('logout');
   });
 
@@ -111,7 +111,7 @@ describe('the gate on opening the system browser', () => {
     await done;
     expect(w.session.getState()).toEqual({ kind: 'connected', webId: WEBID });
     expect(() => gate()).toThrow(SignInNotInProgressError);
-    expect(w.session.getState()).toEqual({ kind: 'error', error: 'restore-failed' });
+    expect(w.session.getState()).toEqual({ kind: 'error', error: 'session-ended' });
     expect(w.session.getFetch()).toBeNull();
   });
 

@@ -70,6 +70,12 @@ export type PodModeRequests = {
   requestCredentialsCleared(): Promise<void>;
   /** The click that starts a fresh sign-in: the issuer the person approved, once. */
   requestConsumeFresh(): Promise<string>;
+  /**
+   * A pod window whose session ended asks to sign in again at its recorded issuer. The shell shows
+   * a native confirmation and, on Allow, rebuilds the window with a fresh connect for that issuer;
+   * nothing about the mode or its origins changes.
+   */
+  requestSignInAgain(): Promise<EnterResult>;
 };
 
 type WindowState = {
