@@ -118,6 +118,21 @@ describe("the host that runs the mirror", () => {
     expect(world.started[1].webId).toBe("https://bob.example/profile/card#me");
   });
 
+  it("starts the next mirror only after the previous one has stopped", async () => {
+    const pod = fakePodSession(connected(ALICE));
+    render(<PodMirrorHost session={pod.session}><Probe /></PodMirrorHost>);
+    await waitFor(() => expect(world.started).toHaveLength(1));
+    let stop: () => void = () => undefined;
+    world.started[0].dispose.mockImplementation(() => new Promise<void>((resolve) => (stop = resolve)));
+    pod.set(connected("https://bob.example/profile/card#me"));
+    await waitFor(() => expect(world.started[0].dispose).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    expect(world.started).toHaveLength(1);
+    await act(async () => stop());
+    await waitFor(() => expect(world.started).toHaveLength(2));
+    expect(world.started[1].webId).toBe("https://bob.example/profile/card#me");
+  });
+
   it("stops a mirror that finished starting after the pod had already gone", async () => {
     let open: () => void = () => undefined;
     world.gate = new Promise<void>((resolve) => (open = resolve));

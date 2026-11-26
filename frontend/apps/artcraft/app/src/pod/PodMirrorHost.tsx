@@ -2,7 +2,7 @@ import { useSignals } from "@preact/signals-react/runtime";
 import type { PodMirror } from "@storyteller/pod-mirror";
 import { PodMirrorViewProvider, type PodMirrorView } from "@storyteller/pod-mirror-ui";
 import { usePodSessionState, type PodSession } from "@storyteller/pod-session";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authentication } from "~/signals";
 
 /**
@@ -20,13 +20,19 @@ export function PodMirrorHost({ session, children }: { session: PodSession; chil
   const [unavailable, setUnavailable] = useState(false);
   // Bumped after "forget this account" so a fresh mirror (with a new baseline) takes over.
   const [generation, setGeneration] = useState(0);
+  // Settles once the mirror of the previous effect run has stopped. The next one starts only
+  // then, so two mirrors never run over the same journal at once.
+  const stopped = useRef<Promise<unknown>>(Promise.resolve());
 
   useEffect(() => {
     if (!webId || !username) return;
     let cancelled = false;
     let running: { dispose(): Promise<void> } | null = null;
     setUnavailable(false);
-    void (async () => {
+    const previous = stopped.current;
+    const run = (async () => {
+      await previous;
+      if (cancelled) return;
       const { startPodMirror } = await import("./mirror-runtime");
       const started = await startPodMirror({ session, webId, username, currentUsername: () => authentication.userInfo.peek()?.username ?? null });
       if (cancelled) {
@@ -41,7 +47,9 @@ export function PodMirrorHost({ session, children }: { session: PodSession; chil
     return () => {
       cancelled = true;
       setMirror(null);
-      void running?.dispose();
+      // A start still in flight disposes its own mirror when it finishes (above); either way this
+      // run counts as stopped only after its mirror's dispose has settled.
+      stopped.current = run.then(() => running?.dispose()).catch(() => undefined);
     };
   }, [session, webId, username, generation]);
 
