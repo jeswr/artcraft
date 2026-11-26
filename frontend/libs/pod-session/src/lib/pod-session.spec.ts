@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PodSessionConfig } from './config.js';
 import { createPodSession, localStorageMarker, type PodSessionDeps } from './pod-session.js';
 import { StorageOriginRefused } from './storage-origins.js';
+import { STORAGE_UNKNOWN_TEXT } from './messages.js';
 import type { PodSessionState } from './state.js';
 import type { PendingSignIn, SignInHint } from './pending.js';
 import { fakeAuth, fakePodMode, memoryHint, memoryMarker, memoryPending } from './testing.js';
@@ -221,6 +222,27 @@ describe('start in a pod window', () => {
     t.auth.finish(WEBID, { source: 'none', reason: 'discovery-failed' });
     await started;
     expect(t.session.getState()).toEqual({ kind: 'connected', webId: WEBID, storageUnknown: 'discovery-failed' });
+  });
+
+  it('tells an ineligible storage the server named apart from one the profile named', async () => {
+    const reasonFor = async (declaredBy: string) => {
+      const t = setup({ podWindow: true, issuer: ISSUER, fresh: ISSUER });
+      await t.session.start();
+      const started = t.session.beginSignIn();
+      await vi.waitFor(() => expect(t.auth.calls).toContain('login'));
+      t.auth.finish(WEBID, { source: 'none', reason: 'storage-ineligible', declaredBy });
+      await started;
+      const state = t.session.getState();
+      return state.kind === 'connected' ? state.storageUnknown : undefined;
+    };
+    const byProfile = await reasonFor('profile');
+    const byServer = await reasonFor('server');
+    expect(byProfile).toBeDefined();
+    expect(byServer).toBeDefined();
+    expect(byServer).not.toBe(byProfile);
+    // The profile names no storage in the server case, so its sentence must not send the person to it.
+    expect(STORAGE_UNKNOWN_TEXT[byServer!]).not.toMatch(/your profile names/);
+    expect(STORAGE_UNKNOWN_TEXT[byProfile!]).toMatch(/your profile names/);
   });
 
   it('restores a remembered session when no sign-in was asked for', async () => {

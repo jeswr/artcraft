@@ -51,6 +51,8 @@ export const STORAGE_UNKNOWN_TEXT: Record<StorageUnknownReason, string> = {
     "ArtCraft cannot make requests to your pod as you: your profile does not say where your pod is, and what the server that holds your profile says about it does not add up, so ArtCraft did not guess. Your pod sees ArtCraft's requests as coming from nobody. Add your pod's address to your profile as its storage, then close and reopen ArtCraft.",
   'discovery-failed':
     "ArtCraft cannot make requests to your pod as you for now: your profile does not say where your pod is, and the server that holds your profile could not be asked (it did not answer, or reported an error). Your pod sees ArtCraft's requests as coming from nobody. Close and reopen ArtCraft to try again, or add your pod's address to your profile as its storage.",
+  'server-storage-ineligible':
+    "ArtCraft cannot make requests to your pod as you: your profile does not say where your pod is, and the server that holds your profile points to a pod that is not one ArtCraft sends your sign-in to (for example, it does not use HTTPS). Your pod sees ArtCraft's requests as coming from nobody. Add your pod's address to your profile as its storage, then close and reopen ArtCraft.",
   'storage-ineligible':
     "ArtCraft cannot make requests to your pod as you: the pod your profile names is not one ArtCraft sends your sign-in to (for example, it does not use HTTPS). Your pod sees ArtCraft's requests as coming from nobody. Check the storage address in your profile, then close and reopen ArtCraft.",
 };

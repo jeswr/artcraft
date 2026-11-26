@@ -104,12 +104,14 @@ export type PodSessionState =
  * profile was served from another address, which cannot speak for the WebID's storage.
  * `storage-unconfirmed`: what that server says about the storage contradicts itself, so pod-auth
  * did not guess. `discovery-failed`: that server could not be asked (no answer, or an error); the
- * next sign-in or restore asks again. `storage-ineligible`: the storage named is not one ArtCraft
- * may send credentials to (for example not HTTPS).
+ * next sign-in or restore asks again. `storage-ineligible`: the storage the profile names is not
+ * one ArtCraft may send credentials to (for example not HTTPS). `server-storage-ineligible`: the
+ * profile names none, and the one the server that holds it names is not eligible either.
  */
 export type StorageUnknownReason =
   | 'no-storage-declared'
   | 'profile-redirected'
   | 'storage-unconfirmed'
   | 'discovery-failed'
-  | 'storage-ineligible';
+  | 'storage-ineligible'
+  | 'server-storage-ineligible';

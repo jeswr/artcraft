@@ -62,7 +62,7 @@ export interface PodAuthPort {
 export interface SignedInIdentity {
   webId: string | null;
   /** How pod-auth found the storage its credentials are for (`source: 'none'`: it found none). */
-  storageDiscovery?: { source: string; reason?: string };
+  storageDiscovery?: { source: string; reason?: string; declaredBy?: string };
 }
 
 /** What the machine needs from the window and the shell, replaceable in tests. */
@@ -832,6 +832,7 @@ const STORAGE_UNKNOWN_REASONS: ReadonlySet<StorageUnknownReason> = new Set<Stora
   'storage-unconfirmed',
   'discovery-failed',
   'storage-ineligible',
+  'server-storage-ineligible',
 ]);
 
 /**
@@ -841,7 +842,8 @@ const STORAGE_UNKNOWN_REASONS: ReadonlySet<StorageUnknownReason> = new Set<Stora
 function connectedAs(webId: string, identity: SignedInIdentity): PodSessionState {
   const discovery = identity.storageDiscovery;
   if (discovery?.source !== 'none') return { kind: 'connected', webId };
-  const reason = discovery.reason;
+  // pod-auth says who declared an ineligible storage; when it was the server, the profile has none.
+  const reason = discovery.reason === 'storage-ineligible' && discovery.declaredBy === 'server' ? 'server-storage-ineligible' : discovery.reason;
   // A reason this build does not know yet reads as the plainest one.
   const storageUnknown: StorageUnknownReason = STORAGE_UNKNOWN_REASONS.has(reason as StorageUnknownReason)
     ? (reason as StorageUnknownReason)
